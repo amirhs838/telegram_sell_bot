@@ -1,0 +1,184 @@
+// Telegram Commerce Platform — Prisma schema (SQLite)
+// Database is the single source of truth for products, inventory, customers, orders.
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "sqlite"
+  url      = env("DATABASE_URL")
+}
+
+// ─── Auth ────────────────────────────────────────────────────────────────────
+
+model User {
+  id           String    @id @default(cuid())
+  name         String
+  email        String    @unique
+  passwordHash String
+  role         String    @default("seller") // admin | seller
+  createdAt    DateTime  @default(now())
+  updatedAt    DateTime  @updatedAt
+  sessions     Session[]
+}
+
+model Session {
+  id        String   @id @default(cuid())
+  token     String   @unique
+  userId    String
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  expiresAt DateTime
+  createdAt DateTime @default(now())
+
+  @@index([userId])
+}
+
+// ─── Catalog ─────────────────────────────────────────────────────────────────
+
+model Category {
+  id          String    @id @default(cuid())
+  name        String
+  slug        String    @unique
+  description String?
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @updatedAt
+  products    Product[]
+}
+
+model Product {
+  id                String            @id @default(cuid())
+  name              String
+  slug              String            @unique
+  description       String?
+  shortDescription  String?
+  price             Float             @default(0)
+  compareAtPrice    Float?
+  stock             Int               @default(0)
+  lowStockThreshold Int               @default(5)
+  categoryId        String?
+  category          Category?         @relation(fields: [categoryId], references: [id], onDelete: SetNull)
+  imageUrl          String?
+  status            String            @default("draft") // draft | active | inactive | out_of_stock
+  aiGenerated       Boolean           @default(false)
+  tags              String? // JSON array string
+  createdAt         DateTime          @default(now())
+  updatedAt         DateTime          @updatedAt
+
+  telegramProducts TelegramProduct[]
+  orderItems       OrderItem[]
+  embedding        ProductEmbedding?
+}
+
+// ─── Customers & Orders ──────────────────────────────────────────────────────
+
+model Customer {
+  id              String    @id @default(cuid())
+  telegramUserId  String    @unique
+  telegramUsername String?
+  firstName       String
+  lastName        String?
+  phone           String?
+  address         String?
+  createdAt       DateTime  @default(now())
+  updatedAt       DateTime  @updatedAt
+  orders          Order[]
+}
+
+model Order {
+  id           String      @id @default(cuid())
+  orderNumber  Int         @unique // allocated via Counter inside the order transaction
+  customerId   String
+  customer     Customer    @relation(fields: [customerId], references: [id], onDelete: Restrict)
+  status       String      @default("pending") // pending|confirmed|processing|shipped|completed|cancelled
+  subtotal     Float
+  discount     Float       @default(0)
+  total        Float
+  customerName String // snapshot
+  address      String
+  phone        String
+  createdAt    DateTime    @default(now())
+  updatedAt    DateTime    @updatedAt
+  items        OrderItem[]
+
+  @@index([status])
+  @@index([customerId])
+}
+
+model OrderItem {
+  id                  String   @id @default(cuid())
+  orderId             String
+  order               Order    @relation(fields: [orderId], references: [id], onDelete: Cascade)
+  productId           String?
+  product             Product? @relation(fields: [productId], references: [id], onDelete: SetNull)
+  productNameSnapshot String // historical orders never change
+  unitPriceSnapshot   Float
+  quantity            Int
+  total               Float
+
+  @@index([orderId])
+}
+
+// ─── Telegram integration ────────────────────────────────────────────────────
+
+// Mapping product → channel post, enables editing existing posts (no duplicates)
+model TelegramProduct {
+  id              String   @id @default(cuid())
+  productId       String
+  product         Product  @relation(fields: [productId], references: [id], onDelete: Cascade)
+  channelId       String
+  messageId       Int
+  lastContentHash String?
+  publishedAt     DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+
+  @@unique([productId, channelId])
+}
+
+// ─── RAG-ready knowledge base ────────────────────────────────────────────────
+
+model ProductEmbedding {
+  id         String   @id @default(cuid())
+  productId  String   @unique
+  product    Product  @relation(fields: [productId], references: [id], onDelete: Cascade)
+  content    String // embedded text
+  embedding  String // JSON float[] (vector storage; swap for pgvector/pgvector later)
+  metadata   String? // JSON {name, category, price, status}
+  model      String   @default("local-hash-v1")
+  createdAt  DateTime @default(now())
+  updatedAt  DateTime @updatedAt
+}
+
+// ─── Bot conversation state (survives restarts) ─────────────────────────────
+
+model BotSession {
+  telegramUserId String   @id
+  state          String   @default("{}") // JSON state machine
+  updatedAt      DateTime @updatedAt
+}
+
+// Atomic named counters (e.g. orderNumber sequence)
+model Counter {
+  name  String @id
+  value Int    @default(0)
+}
+
+// ─── Settings & structured logs ──────────────────────────────────────────────
+
+model Setting {
+  key       String   @id
+  value     String
+  updatedAt DateTime @updatedAt
+}
+
+model ActivityLog {
+  id        String   @id @default(cuid())
+  level     String   @default("info") // info | warn | error
+  type      String // order.created, telegram.publish, ai.generate, auth.failed, …
+  message   String
+  data      String? // JSON payload (never secrets)
+  createdAt DateTime @default(now())
+
+  @@index([type])
+  @@index([createdAt])
+}
