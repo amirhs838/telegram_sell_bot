@@ -2,7 +2,16 @@ import { ok, requireAuth, route } from '@/lib/api'
 import { db } from '@/lib/db'
 import { getTelegramStatus } from '@/lib/telegram'
 
-const RECENT_TYPES = ['telegram_out', 'telegram_error', 'telegram.publish', 'telegram.sync', 'telegram.unpublish']
+const RECENT_TYPES = [
+  'telegram_out',
+  'telegram_error',
+  'telegram.publish',
+  'telegram.sync',
+  'telegram.unpublish',
+  'telegram.test',
+  'telegram.config_updated',
+  'telegram.config_removed',
+]
 
 export const GET = route(async () => {
   await requireAuth()

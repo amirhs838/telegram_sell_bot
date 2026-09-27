@@ -93,6 +93,185 @@ async function tgRequest<T>(method: string, payload: unknown): Promise<T> {
   return json.result
 }
 
+// ─── Connection probe (used by the panel «تست اتصال» button) ────────────────
+
+export type TelegramProbeCheck = {
+  key: string
+  label: string
+  ok: boolean
+  message: string
+}
+
+/**
+ * Full connectivity self-check:
+ *  - mock mode → config-completeness only (no external calls)
+ *  - real mode → live Bot API probes: getMe, getChat(channel), getChatMember,
+ *    getChat(admin chat). Each probe reports a Persian, user-actionable message.
+ */
+export async function probeTelegramConnection(): Promise<{
+  ok: boolean
+  mode: 'mock' | 'real'
+  checks: TelegramProbeCheck[]
+}> {
+  const cfg = await getTelegramConfig()
+  const checks: TelegramProbeCheck[] = []
+
+  if (await isMockMode()) {
+    checks.push({
+      key: 'simulation',
+      label: 'حالت شبیه‌سازی',
+      ok: true,
+      message:
+        'شبیه‌سازی فعال است — پیام‌ها به‌صورت محلی ساخته می‌شوند و در لاگ همین بخش قابل مشاهده‌اند؛ هیچ درخواستی به تلگرام ارسال نمی‌شود',
+    })
+    checks.push({
+      key: 'token',
+      label: 'توکن ربات',
+      ok: Boolean(cfg.botToken),
+      message: cfg.botToken
+        ? 'توکن تنظیم شده است؛ با ذخیره اتصال واقعی، ربات به‌صورت زنده بررسی می‌شود'
+        : 'توکن ربات تنظیم نشده — برای اتصال واقعی، توکن را از @BotFather بگیرید و در فرم «اتصال ربات» وارد کنید',
+    })
+    checks.push({
+      key: 'channel',
+      label: 'شناسه کانال',
+      ok: Boolean(cfg.channelId),
+      message: cfg.channelId
+        ? `شناسه کانال تنظیم شده (${cfg.channelId})`
+        : 'شناسه کانال تنظیم نشده — بدون آن، انتشار محصولات در کانال کار نمی‌کند',
+    })
+    checks.push({
+      key: 'adminChat',
+      label: 'شناسه چت مدیر',
+      ok: Boolean(cfg.adminChatId),
+      message: cfg.adminChatId
+        ? `شناسه چت مدیر تنظیم شده (${cfg.adminChatId})`
+        : 'شناسه چت مدیر تنظیم نشده — اعلان سفارش‌های جدید برایتان ارسال نمی‌شود',
+    })
+    checks.push({
+      key: 'botUsername',
+      label: 'یوزرنیم ربات',
+      ok: Boolean(cfg.botUsername),
+      message: cfg.botUsername
+        ? `یوزرنیم ربات تنظیم شده (@${cfg.botUsername}) — لینک مستقیم محصولات ساخته می‌شود`
+        : 'یوزرنیم ربات تنظیم نشده — دکمه «خرید» زیر پست‌های کانال ساخته نمی‌شود',
+    })
+    return { ok: checks.every((c) => c.ok), mode: 'mock', checks }
+  }
+
+  // ── Real mode: live Bot API probes ────────────────────────────────────────
+  let botId: number | null = null
+  try {
+    const me = await tgRequest<{ id: number; username?: string; first_name?: string }>('getMe', {})
+    botId = me.id
+    checks.push({
+      key: 'token',
+      label: 'توکن ربات',
+      ok: true,
+      message: `توکن معتبر است — ربات «${me.first_name ?? '?'}${me.username ? ` (@${me.username})` : ''}» پاسخ داد`,
+    })
+  } catch (e) {
+    checks.push({
+      key: 'token',
+      label: 'توکن ربات',
+      ok: false,
+      message: `توکن نامعتبر است یا دسترسی به سرورهای تلگرام برقرار نشد: ${(e as Error).message}`,
+    })
+    return { ok: false, mode: 'real', checks }
+  }
+
+  if (cfg.channelId) {
+    try {
+      const chat = await tgRequest<{ title?: string; username?: string }>('getChat', {
+        chat_id: cfg.channelId,
+      })
+      checks.push({
+        key: 'channel',
+        label: 'دسترسی به کانال',
+        ok: true,
+        message: `کانال «${chat.title ?? chat.username ?? cfg.channelId}» در دسترس ربات است`,
+      })
+      if (botId !== null) {
+        try {
+          const member = await tgRequest<{ status: string }>('getChatMember', {
+            chat_id: cfg.channelId,
+            user_id: botId,
+          })
+          const admin = member.status === 'administrator'
+          checks.push({
+            key: 'channelAdmin',
+            label: 'مدیر بودن ربات در کانال',
+            ok: admin,
+            message: admin
+              ? 'ربات مدیر کانال است و اجازه انتشار و ویرایش پست دارد'
+              : `وضعیت ربات در کانال «${member.status}» است — برای انتشار پست، ربات باید «مدیر (administrator)» باشد`,
+          })
+        } catch (e) {
+          checks.push({
+            key: 'channelAdmin',
+            label: 'مدیر بودن ربات در کانال',
+            ok: false,
+            message: `بررسی وضعیت ربات در کانال ناموفق بود: ${(e as Error).message}`,
+          })
+        }
+      }
+    } catch (e) {
+      checks.push({
+        key: 'channel',
+        label: 'دسترسی به کانال',
+        ok: false,
+        message: `ربات نمی‌تواند کانال را ببیند — ربات را «مدیر» کانال کنید و شناسه کانال را بررسی کنید (${(e as Error).message})`,
+      })
+    }
+  } else {
+    checks.push({
+      key: 'channel',
+      label: 'دسترسی به کانال',
+      ok: false,
+      message: 'شناسه کانال تنظیم نشده است — انتشار محصولات به کانال کار نمی‌کند',
+    })
+  }
+
+  if (cfg.adminChatId) {
+    try {
+      const chat = await tgRequest<{ first_name?: string; title?: string }>('getChat', {
+        chat_id: cfg.adminChatId,
+      })
+      checks.push({
+        key: 'adminChat',
+        label: 'چت مدیر (اعلان‌ها)',
+        ok: true,
+        message: `چت مدیر «${chat.first_name ?? chat.title ?? cfg.adminChatId}» در دسترس است — اعلان سفارش‌ها به همین‌جا ارسال می‌شود`,
+      })
+    } catch (e) {
+      checks.push({
+        key: 'adminChat',
+        label: 'چت مدیر (اعلان‌ها)',
+        ok: false,
+        message: `ربات به چت مدیر دسترسی ندارد — یک بار در تلگرام به ربات /start بدهید (${(e as Error).message})`,
+      })
+    }
+  } else {
+    checks.push({
+      key: 'adminChat',
+      label: 'چت مدیر (اعلان‌ها)',
+      ok: false,
+      message: 'شناسه چت مدیر تنظیم نشده است — اعلان سفارش‌ها ارسال نمی‌شود',
+    })
+  }
+
+  checks.push({
+    key: 'botUsername',
+    label: 'یوزرنیم ربات',
+    ok: Boolean(cfg.botUsername),
+    message: cfg.botUsername
+      ? `یوزرنیم ربات تنظیم شده (@${cfg.botUsername})`
+      : 'یوزرنیم ربات تنظیم نشده — دکمه «خرید» زیر پست‌های کانال ساخته نمی‌شود',
+  })
+
+  return { ok: checks.every((c) => c.ok), mode: 'real', checks }
+}
+
 // ─── Mock transport (dev simulation — clearly labeled, recorded to ActivityLog) ──
 
 function mockMessageId() {
