@@ -1,4 +1,4 @@
-import type { Order, OrderItem } from '@prisma/client'
+import type { Order, OrderItem, Payment } from '@prisma/client'
 import type { Prisma } from '@prisma/client'
 
 export const ORDER_STATUSES = [
@@ -24,7 +24,7 @@ export function serializeOrderItem(i: OrderItem) {
 type ListCustomer = { id: string; firstName: string; telegramUsername: string | null }
 
 export function serializeOrder(
-  o: Order & { customer: ListCustomer; items: OrderItem[] },
+  o: Order & { customer: ListCustomer; items: OrderItem[]; payment?: Payment | null },
 ) {
   return {
     id: o.id,
@@ -40,10 +40,18 @@ export function serializeOrder(
     updatedAt: o.updatedAt,
     customer: o.customer,
     items: o.items.map(serializeOrderItem),
+    payment: o.payment
+      ? {
+          status: o.payment.status,
+          rejectReason: o.payment.rejectReason,
+          amountSnapshot: o.payment.amountSnapshot,
+        }
+      : null,
   }
 }
 
 export const ORDER_INCLUDE = {
   customer: { select: { id: true, firstName: true, telegramUsername: true } },
   items: true,
+  payment: true,
 } satisfies Prisma.OrderInclude

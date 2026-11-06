@@ -39,6 +39,21 @@ import {
   useDebounced,
   orderStatusLabel,
 } from '@/components/admin/bits'
+import type { PaymentStatus } from '@/lib/client'
+
+const PAYMENT_LABEL: Record<PaymentStatus, { label: string; cls: string }> = {
+  awaiting_payment: { label: '💳 در انتظار پرداخت', cls: 'bg-slate-200 text-slate-700 dark:bg-slate-800 dark:text-slate-300' },
+  payment_review: { label: '🕐 رسید در انتظار بررسی', cls: 'bg-amber-200 text-amber-800 dark:bg-amber-900/60 dark:text-amber-300' },
+  paid: { label: '✅ پرداخت تأیید شده', cls: 'bg-emerald-200 text-emerald-800 dark:bg-emerald-900/60 dark:text-emerald-300' },
+  rejected: { label: '🔴 پرداخت رد شده', cls: 'bg-rose-200 text-rose-700 dark:bg-rose-900/60 dark:text-rose-300' },
+  refund_pending: { label: '↩️ بازپرداخت در انتظار', cls: 'bg-sky-200 text-sky-800 dark:bg-sky-900/60 dark:text-sky-300' },
+  refunded: { label: '↩️ بازپرداخت شد', cls: 'bg-sky-200 text-sky-800 dark:bg-sky-900/60 dark:text-sky-300' },
+}
+
+function PaymentStatusBadge({ status }: { status: PaymentStatus }) {
+  const meta = PAYMENT_LABEL[status] ?? { label: status, cls: '' }
+  return <span className={`rounded-full px-2 py-0.5 text-[11px] font-medium ${meta.cls}`}>{meta.label}</span>
+}
 import {
   Search,
   Eye,
@@ -219,7 +234,10 @@ export function OrdersSection() {
                         <MoneyText value={o.total} className="text-sm" />
                       </TableCell>
                       <TableCell>
-                        <OrderStatusBadge status={o.status} />
+                        <div className="flex flex-wrap items-center gap-1">
+                          <OrderStatusBadge status={o.status} />
+                          {o.payment && <PaymentStatusBadge status={o.payment.status} />}
+                        </div>
                       </TableCell>
                       <TableCell className="whitespace-nowrap text-xs text-muted-foreground">
                         {fmtDate(o.createdAt)}
@@ -256,6 +274,7 @@ export function OrdersSection() {
                 <DialogTitle className="flex flex-wrap items-center gap-2">
                   <span dir="ltr">#{fmtNumber(viewing.orderNumber)}</span>
                   <OrderStatusBadge status={viewing.status} />
+                  {viewing.payment && <PaymentStatusBadge status={viewing.payment.status} />}
                 </DialogTitle>
                 <DialogDescription>ثبت شده در {fmtDate(viewing.createdAt)}</DialogDescription>
               </DialogHeader>

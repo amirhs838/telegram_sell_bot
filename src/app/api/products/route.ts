@@ -8,6 +8,8 @@ import { uniqueSlug } from '@/lib/slug'
 import {
   PRODUCT_INCLUDE,
   PRODUCT_STATUSES,
+  normalizeImages,
+  pickPrimaryImageUrl,
   productCreateSchema,
   serializeProduct,
 } from './shared'
@@ -74,6 +76,7 @@ export const POST = route(async (req: NextRequest) => {
   }
 
   const slug = await uniqueSlug(body.name, 'product')
+  const gallery = normalizeImages(body.images)
 
   const product = await db.product.create({
     data: {
@@ -85,10 +88,24 @@ export const POST = route(async (req: NextRequest) => {
       compareAtPrice: body.compareAtPrice ?? null,
       stock: body.stock,
       categoryId,
-      imageUrl: body.imageUrl ?? null,
+      imageUrl: body.imageUrl ?? pickPrimaryImageUrl(gallery),
       status: body.status,
       aiGenerated: body.aiGenerated ?? false,
       tags: body.tags ? JSON.stringify(body.tags) : null,
+      // Silver specs (optional, free-form, never used for pricing)
+      sku: body.sku ?? null,
+      silverType: body.silverType ?? null,
+      purity: body.purity ?? null,
+      weightGrams: body.weightGrams ?? null,
+      size: body.size ?? null,
+      dimensions: body.dimensions ?? null,
+      brand: body.brand ?? null,
+      appearance: body.appearance ?? null,
+      careInstructions: body.careInstructions ?? null,
+      authenticity: body.authenticity ?? null,
+      ...(gallery.length
+        ? { images: { create: gallery } }
+        : {}),
     },
     include: PRODUCT_INCLUDE,
   })

@@ -18,6 +18,8 @@ import { CustomersSection } from '@/components/admin/customers-section'
 import { TelegramSection } from '@/components/admin/telegram-section'
 import { AiSection } from '@/components/admin/ai-section'
 import { SettingsSection } from '@/components/admin/settings-section'
+import { PaymentsSection } from '@/components/admin/payments-section'
+import { SilverRateSection } from '@/components/admin/silver-rate-section'
 
 function sectionFromHash(): SectionKey {
   if (typeof window === 'undefined') return 'dashboard'
@@ -120,6 +122,8 @@ export default function Home() {
       {section === 'products' && <ProductsSection />}
       {section === 'categories' && <CategoriesSection />}
       {section === 'orders' && <OrdersSection />}
+      {section === 'payments' && <PaymentsSection />}
+      {section === 'silver' && <SilverRateSection />}
       {section === 'customers' && <CustomersSection />}
       {section === 'telegram' && <TelegramSection />}
       {section === 'ai' && <AiSection />}

@@ -33,6 +33,13 @@ export type TelegramPost = {
   publishedAt: string
 }
 
+export type ProductImage = {
+  id: string
+  url: string
+  isPrimary: boolean
+  sortOrder: number
+}
+
 export type Product = {
   id: string
   name: string
@@ -51,6 +58,18 @@ export type Product = {
   tags: string[] | null
   createdAt: string
   updatedAt: string
+  // Silver specs (optional)
+  sku: string | null
+  silverType: string | null
+  purity: string | null
+  weightGrams: number | null
+  size: string | null
+  dimensions: string | null
+  brand: string | null
+  appearance: string | null
+  careInstructions: string | null
+  authenticity: string | null
+  images: ProductImage[]
   telegramPost: TelegramPost | null
 }
 
@@ -69,6 +88,14 @@ export type OrderCustomer = {
   telegramUsername: string | null
 }
 
+export type PaymentStatus =
+  | 'awaiting_payment'
+  | 'payment_review'
+  | 'paid'
+  | 'rejected'
+  | 'refund_pending'
+  | 'refunded'
+
 export type Order = {
   id: string
   orderNumber: number
@@ -83,6 +110,11 @@ export type Order = {
   updatedAt: string
   customer: OrderCustomer | null
   items: OrderItem[]
+  payment: {
+    status: PaymentStatus
+    rejectReason: string | null
+    amountSnapshot: number
+  } | null
 }
 
 export type Customer = {
@@ -108,6 +140,8 @@ export type DashboardTotals = {
   todayOrders: number
   totalSales: number
   customers: number
+  paymentsReview?: number
+  paymentsPaid?: number
 }
 
 export type WeeklyPoint = { date: string; orders: number; sales: number }
@@ -123,6 +157,7 @@ export type RecentOrder = {
 
 export type DashboardStats = {
   totals: DashboardTotals
+  silverRate?: { pricePerGram: number; unit: string } | null
   weekly: WeeklyPoint[]
   recentOrders: RecentOrder[]
   statusCounts: Record<OrderStatus, number>
@@ -133,6 +168,11 @@ export type Settings = {
   storeDescription: string
   supportUsername: string
   currency: string
+  shippingPolicy: string
+  returnPolicy: string
+  warrantyPolicy: string
+  paymentNote: string
+  aiAssistantEnabled: string
 }
 
 export type TelegramInfo = {

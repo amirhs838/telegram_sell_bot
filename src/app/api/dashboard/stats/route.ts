@@ -23,6 +23,9 @@ export const GET = route(async () => {
     statusGroups,
     last7DaysOrders,
     recentOrders,
+    paymentsReview,
+    paymentsPaid,
+    currentSilverRate,
   ] = await Promise.all([
     db.product.count(),
     db.product.count({ where: { status: 'active' } }),
@@ -42,6 +45,9 @@ export const GET = route(async () => {
       take: 6,
       select: { id: true, orderNumber: true, customerName: true, total: true, status: true, createdAt: true },
     }),
+    db.payment.count({ where: { status: 'payment_review' } }),
+    db.payment.count({ where: { status: 'paid' } }),
+    db.silverRate.findFirst({ where: { active: true }, orderBy: { createdAt: 'desc' } }),
   ])
 
   const statusCounts: Record<(typeof ORDER_STATUSES)[number], number> = {
@@ -87,7 +93,12 @@ export const GET = route(async () => {
       todayOrders,
       totalSales: salesAgg._sum.total ?? 0,
       customers,
+      paymentsReview,
+      paymentsPaid,
     },
+    silverRate: currentSilverRate
+      ? { pricePerGram: currentSilverRate.pricePerGram, unit: currentSilverRate.unit }
+      : null,
     weekly,
     recentOrders,
     statusCounts,

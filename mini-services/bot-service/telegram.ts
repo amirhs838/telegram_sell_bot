@@ -12,6 +12,8 @@
  * The config is re-read from the Setting table every ~15s, so connecting a bot
  * from the admin panel takes effect without restarting this service.
  */
+import path from 'node:path'
+import fs from 'node:fs/promises'
 import type { InlineButton } from '../../src/lib/telegram-render'
 import { db } from './db'
 
@@ -109,7 +111,7 @@ async function logEvent(
 
 export type TgResult = { ok: boolean; result?: unknown; error?: string }
 
-async function callTelegramApi(
+export async function callTelegramApi(
   method: string,
   payload: Record<string, unknown>,
 ): Promise<TgResult> {
@@ -171,6 +173,62 @@ export async function send(
   return result
 }
 
+/**
+ * Send a photo by uploading a local file (multipart sendPhoto).
+ * Mock mode → ActivityLog row. Never throws.
+ */
+export async function sendPhotoUpload(
+  chatId: string | number,
+  filePath: string,
+  caption: string,
+  keyboard?: InlineButton[][],
+): Promise<TgResult> {
+  await loadConfig()
+  if (isMockMode()) {
+    await logEvent('info', 'telegram_out', `[حالت شبیه‌سازی] sendPhoto(file) → ${chatId}`, {
+      chatId: String(chatId),
+      file: path.basename(filePath),
+      preview: caption.slice(0, 400),
+    })
+    return { ok: true }
+  }
+  const cfg = await loadConfig()
+  if (!cfg.botToken) return { ok: false, error: 'no token' }
+  try {
+    const buf = await fs.readFile(filePath)
+    const form = new FormData()
+    form.append('chat_id', String(chatId))
+    form.append('caption', caption)
+    form.append('parse_mode', 'HTML')
+    if (keyboard?.length) {
+      form.append('reply_markup', JSON.stringify({ inline_keyboard: keyboard }))
+    }
+    form.append(
+      'photo',
+      new Blob([new Uint8Array(buf)], { type: 'image/jpeg' }),
+      path.basename(filePath),
+    )
+    const res = await fetch(`${TG_API}/bot${cfg.botToken}/sendPhoto`, {
+      method: 'POST',
+      body: form,
+      signal: AbortSignal.timeout(HTTP_TIMEOUT_MS * 2),
+    })
+    const json = (await res.json().catch(() => null)) as
+      | { ok: boolean; description?: string }
+      | null
+    if (!json || !json.ok) {
+      const err = json?.description ?? `HTTP ${res.status}`
+      await logEvent('error', 'telegram_error', `sendPhoto(file) → ${chatId} failed: ${err}`)
+      return { ok: false, error: err }
+    }
+    return { ok: true }
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : String(e)
+    await logEvent('error', 'telegram_error', `sendPhoto(file) failed: ${msg}`)
+    return { ok: false, error: msg }
+  }
+}
+
 /** Acknowledge a callback query (removes the loading spinner on the button). */
 export async function answerCallback(cbId: string, text?: string): Promise<TgResult> {
   await loadConfig()
@@ -194,6 +252,7 @@ export type TelegramUpdate = {
     chat: { id: number | string; type: string }
     from?: { id: number; first_name?: string; username?: string }
     text?: string
+    photo?: Array<{ file_id: string; width: number; height: number }>
   }
   callback_query?: {
     id: string

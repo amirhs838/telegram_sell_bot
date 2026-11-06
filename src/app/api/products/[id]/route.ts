@@ -8,6 +8,8 @@ import { syncProductPost, unpublishProduct } from '@/lib/telegram'
 import { uniqueSlug } from '@/lib/slug'
 import {
   PRODUCT_INCLUDE,
+  normalizeImages,
+  pickPrimaryImageUrl,
   productPatchSchema,
   serializeProduct,
 } from '../shared'
@@ -86,6 +88,34 @@ export const PATCH = route<{ params: Promise<{ id: string }> }>(
       changedFields.push('tags')
     }
 
+    // ── Silver specs (optional; undefined = untouched, null = cleared) ────────
+    const specFields = [
+      'sku', 'silverType', 'purity', 'size', 'dimensions',
+      'brand', 'appearance', 'careInstructions', 'authenticity',
+    ] as const
+    for (const f of specFields) {
+      const v = body[f]
+      if (v !== undefined) {
+        data[f] = v
+        changedFields.push(f)
+      }
+    }
+    if (body.weightGrams !== undefined) {
+      data.weightGrams = body.weightGrams
+      changedFields.push('weightGrams')
+    }
+
+    // ── Gallery replacement (explicit payload = full sync) ───────────────────
+    if (body.images !== undefined) {
+      const gallery = normalizeImages(body.images)
+      const primary = pickPrimaryImageUrl(gallery)
+      if (primary) {
+        data.imageUrl = primary
+        changedFields.push('imageUrl(gallery-primary)')
+      }
+      changedFields.push('images')
+    }
+
     // Inventory ↔ status sync. Inventory integrity always wins:
     // stock 0 ⇒ never 'active' (becomes out_of_stock); stock back > 0 from out_of_stock ⇒ active.
     const explicitStatus = body.status
@@ -104,10 +134,18 @@ export const PATCH = route<{ params: Promise<{ id: string }> }>(
       }
     }
 
-    const updated = await db.product.update({
-      where: { id },
-      data,
-      include: PRODUCT_INCLUDE,
+    const updated = await db.$transaction(async (tx) => {
+      if (body.images !== undefined) {
+        // full replacement — keeps ids/state consistent with the form
+        await tx.productImage.deleteMany({ where: { productId: id } })
+        const gallery = normalizeImages(body.images)
+        if (gallery.length) {
+          await tx.productImage.createMany({
+            data: gallery.map((g) => ({ productId: id, url: g.url, isPrimary: g.isPrimary, sortOrder: g.sortOrder })),
+          })
+        }
+      }
+      return tx.product.update({ where: { id }, data, include: PRODUCT_INCLUDE })
     })
 
     // Keep an existing channel post in sync (price/stock/name/…). Best-effort:

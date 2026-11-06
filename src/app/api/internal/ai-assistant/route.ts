@@ -4,6 +4,7 @@ import type { NextRequest } from 'next/server'
 import { z } from 'zod'
 import { fail, ok, readJson, route } from '@/lib/api'
 import { runAssistant } from '@/lib/ai/assistant'
+import { isAiAssistantEnabled } from '@/lib/settings'
 
 const bodySchema = z.object({
   telegramUserId: z.string().min(1),
@@ -19,13 +20,18 @@ export const POST = route(async (req: NextRequest) => {
 
   const body = bodySchema.parse(await readJson(req))
 
+  // Panel-controlled master switch (never model-decided)
+  if (!(await isAiAssistantEnabled())) {
+    return ok({ disabled: true })
+  }
+
   try {
-    const { reply, toolsUsed } = await runAssistant({
+    const result = await runAssistant({
       telegramUserId: body.telegramUserId,
       message: body.message,
       firstName: body.firstName,
     })
-    return ok({ reply, toolsUsed })
+    return ok(result)
   } catch (e) {
     console.error('[api:internal/ai-assistant]', e)
     return fail('دستیار هوشمند موقتاً در دسترس نیست', 502)

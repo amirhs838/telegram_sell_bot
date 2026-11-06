@@ -14,6 +14,12 @@ export type RenderProduct = {
   lowStockThreshold?: number
   status: string // draft | active | inactive | out_of_stock
   imageUrl?: string | null
+  // Silver Love — optional specs shown when present
+  sku?: string | null
+  silverType?: string | null
+  purity?: string | null
+  weightGrams?: number | null
+  size?: string | null
 }
 
 export type InlineButton = { text: string; callback_data?: string; url?: string }
@@ -48,11 +54,21 @@ export function renderProductPost(
 ): PostContent {
   const lines: string[] = []
   lines.push(`${PRODUCT_EMOJI} <b>${escapeHtml(product.name)}</b>`)
+  if (product.sku) lines.push(`🔖 کد: <code>${escapeHtml(product.sku)}</code>`)
   if (product.shortDescription) lines.push('', escapeHtml(product.shortDescription))
   lines.push('', `💰 قیمت: <b>${formatMoney(product.price, currency)}</b>`)
   if (product.compareAtPrice && product.compareAtPrice > product.price) {
     lines.push(`🏷️ قبلاً: <s>${formatMoney(product.compareAtPrice, currency)}</s>`)
   }
+
+  // Silver specs — only when the seller filled them (never computed)
+  const specs: string[] = []
+  if (product.silverType) specs.push(`نوع: ${escapeHtml(product.silverType)}`)
+  if (product.purity) specs.push(`عیار: ${escapeHtml(product.purity)}`)
+  if (product.weightGrams != null && product.weightGrams > 0)
+    specs.push(`وزن: ${formatNumber(product.weightGrams)} گرم`)
+  if (product.size) specs.push(`سایز: ${escapeHtml(product.size)}`)
+  if (specs.length > 0) lines.push('', '✨ ' + specs.join(' | '))
 
   const isPurchasable = product.status === 'active' && product.stock > 0
   const threshold = product.lowStockThreshold ?? 5
@@ -88,9 +104,13 @@ export function escapeHtml(s: string): string {
   return s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
 }
 
-export function hashContent(text: string, keyboard: InlineButton[][]): string {
-  // tiny sync-safe hash (FNV-1a) over text + keyboard structure
-  const payload = text + '\u0000' + JSON.stringify(keyboard)
+export function hashContent(
+  text: string,
+  keyboard: InlineButton[][],
+  imageUrl = '',
+): string {
+  // tiny sync-safe hash (FNV-1a) over text + keyboard structure + image
+  const payload = text + '\u0000' + JSON.stringify(keyboard) + '\u0000' + (imageUrl ?? '')
   let h = 0x811c9dc5
   for (let i = 0; i < payload.length; i++) {
     h ^= payload.charCodeAt(i)

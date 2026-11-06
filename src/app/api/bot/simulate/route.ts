@@ -9,21 +9,25 @@ const simulateSchema = z.object({
   text: z.string().optional(),
   callbackData: z.string().optional(),
   action: z.string().optional(),
+  photoName: z.string().optional(),
 })
 
 export const POST = route(async (req: NextRequest) => {
   await requireAuth()
 
   const body = simulateSchema.parse(await readJson(req))
-  const provided = [body.text, body.callbackData, body.action].filter((v) => v !== undefined)
+  const provided = [body.text, body.callbackData, body.action, body.photoName].filter(
+    (v) => v !== undefined,
+  )
   if (provided.length !== 1) {
-    throw new ApiError(400, 'دقیقاً یکی از فیلدهای text، callbackData یا action الزامی است')
+    throw new ApiError(400, 'دقیقاً یکی از فیلدهای text، callbackData، action یا photoName الزامی است')
   }
 
   const payload: Record<string, string> = { telegramUserId: body.telegramUserId }
   if (body.text !== undefined) payload.text = body.text
   if (body.callbackData !== undefined) payload.callbackData = body.callbackData
   if (body.action !== undefined) payload.action = body.action
+  if (body.photoName !== undefined) payload.photoName = body.photoName
 
   let res: Response
   try {

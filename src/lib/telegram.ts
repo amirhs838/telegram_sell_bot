@@ -1,5 +1,7 @@
 import 'server-only'
 import crypto from 'node:crypto'
+import path from 'node:path'
+import { readFile } from 'node:fs/promises'
 import { db } from '@/lib/db'
 import { logEvent } from '@/lib/logger'
 import {
@@ -295,6 +297,105 @@ async function mockCall(
   return {}
 }
 
+// ─── Media helpers (Silver Love) ────────────────────────────────────────────
+
+/** A channel image is either a local uploaded file or a remote http(s) URL. */
+type ChannelImage = { kind: 'local'; path: string } | { kind: 'remote'; url: string }
+
+/**
+ * Resolve a product image into something Telegram can actually use.
+ * Local uploads are re-uploaded as multipart (no public URL needed); only
+ * absolute http(s) URLs are passed to Telegram directly.
+ */
+function resolveChannelImage(url?: string | null): ChannelImage | null {
+  if (!url) return null
+  if (/^https?:\/\//i.test(url)) return { kind: 'remote', url }
+  if (url.startsWith('/api/uploads/')) {
+    const name = path.basename(url)
+    return { kind: 'local', path: path.join(process.cwd(), 'upload', name) }
+  }
+  return null
+}
+
+async function uploadPhotoFile(
+  chatId: string,
+  filePath: string,
+  caption: string,
+  keyboard: InlineButton[][] | undefined,
+): Promise<{ message_id: number }> {
+  const token = await getBotToken()
+  const buf = await readFile(filePath)
+  const form = new FormData()
+  form.append('chat_id', chatId)
+  form.append('caption', caption)
+  form.append('parse_mode', 'HTML')
+  if (keyboard?.length) form.append('reply_markup', JSON.stringify({ inline_keyboard: keyboard }))
+  form.append(
+    'photo',
+    new Blob([new Uint8Array(buf)], { type: 'image/jpeg' }),
+    path.basename(filePath),
+  )
+  const res = await fetch(`https://api.telegram.org/bot${token}/sendPhoto`, {
+    method: 'POST',
+    body: form,
+    signal: AbortSignal.timeout(30_000),
+  })
+  const json = (await res.json().catch(() => null)) as
+    | { ok: boolean; result?: { message_id: number }; description?: string }
+    | null
+  if (!json || !json.ok || !json.result) {
+    throw new TelegramApiError(json?.description ?? `HTTP ${res.status}`, 'sendPhoto')
+  }
+  return json.result
+}
+
+/** In-place media edit (editMessageMedia) — works photo→photo or text→photo. */
+async function editChannelPhoto(
+  chatId: string,
+  messageId: number,
+  image: ChannelImage,
+  caption: string,
+  keyboard: InlineButton[][],
+): Promise<void> {
+  if (await isMockMode()) {
+    await mockCall('editMessageMedia', chatId, { caption, message_id: messageId })
+    return
+  }
+  const token = await getBotToken()
+  const markup = { inline_keyboard: keyboard }
+  if (image.kind === 'remote') {
+    await tgRequest('editMessageMedia', {
+      chat_id: chatId,
+      message_id: messageId,
+      media: { type: 'photo', media: image.url, caption, parse_mode: 'HTML' },
+      reply_markup: markup,
+    })
+    return
+  }
+  const buf = await readFile(image.path)
+  const form = new FormData()
+  form.append('chat_id', chatId)
+  form.append('message_id', String(messageId))
+  form.append('media', JSON.stringify({ type: 'photo', media: 'attach://photo', caption, parse_mode: 'HTML' }))
+  form.append('reply_markup', JSON.stringify(markup))
+  form.append(
+    'photo',
+    new Blob([new Uint8Array(buf)], { type: 'image/jpeg' }),
+    path.basename(image.path),
+  )
+  const res = await fetch(`https://api.telegram.org/bot${token}/editMessageMedia`, {
+    method: 'POST',
+    body: form,
+    signal: AbortSignal.timeout(30_000),
+  })
+  const json = (await res.json().catch(() => null)) as
+    | { ok: boolean; description?: string }
+    | null
+  if (!json || !json.ok) {
+    throw new TelegramApiError(json?.description ?? `HTTP ${res.status}`, 'editMessageMedia')
+  }
+}
+
 // ─── Public helpers ──────────────────────────────────────────────────────────
 
 let cachedBotUsername: string | null = null
@@ -342,22 +443,25 @@ export async function sendMessage(
 
 export async function sendPhoto(
   chatId: string,
-  photoUrl: string,
+  image: ChannelImage | null,
   caption: string,
   keyboard?: InlineButton[][],
 ): Promise<{ messageId: number | null }> {
-  const payload = {
-    chat_id: chatId,
-    photo: photoUrl,
-    caption,
-    parse_mode: 'HTML',
-    ...(keyboard?.length ? { reply_markup: { inline_keyboard: keyboard } } : {}),
-  }
   if (await isMockMode()) {
-    const r = await mockCall('sendPhoto', chatId, payload)
+    const r = await mockCall('sendPhoto', chatId, { caption })
     return { messageId: r.message_id ?? null }
   }
-  const result = await tgRequest<{ message_id: number }>('sendPhoto', payload)
+  if (!image) throw new TelegramApiError('تصویری برای ارسال نیست', 'sendPhoto')
+  const result =
+    image.kind === 'remote'
+      ? await tgRequest<{ message_id: number }>('sendPhoto', {
+          chat_id: chatId,
+          photo: image.url,
+          caption,
+          parse_mode: 'HTML',
+          ...(keyboard?.length ? { reply_markup: { inline_keyboard: keyboard } } : {}),
+        })
+      : await uploadPhotoFile(chatId, image.path, caption, keyboard)
   await logEvent('telegram_out', `پست تصویری ارسال شد به ${chatId}`, {
     method: 'sendPhoto',
     chatId,
@@ -397,6 +501,23 @@ export async function notifyCustomer(telegramUserId: string, text: string, keybo
 
 type TgProduct = RenderProduct & { id: string }
 
+/** Delete a channel post (real mode only). Best-effort. */
+async function deleteChannelPost(channelId: string, messageId: number): Promise<void> {
+  if (await isMockMode()) {
+    await logEvent('telegram_out', `[حالت شبیه‌سازی] deleteMessage → ${channelId}#${messageId}`, {
+      method: 'deleteMessage',
+      chatId: channelId,
+      messageId,
+    })
+    return
+  }
+  await tgRequest('deleteMessage', { chat_id: channelId, message_id: messageId }).catch(
+    async (e) => {
+      await logEvent('telegram_error', `حذف پست کانال ناموفق بود: ${(e as Error).message}`, undefined, 'warn')
+    },
+  )
+}
+
 async function publishOrSync(product: TgProduct, mode: 'publish' | 'sync') {
   const channelId = await getChannelId()
   if (!channelId) {
@@ -405,7 +526,8 @@ async function publishOrSync(product: TgProduct, mode: 'publish' | 'sync') {
   const settings = await getSettings()
   const botUsername = await getBotUsername()
   const { text, keyboard } = renderProductPost(product, botUsername, settings.currency === 'IRT' ? 'تومان' : settings.currency)
-  const contentHash = hashContent(text, keyboard)
+  const image = resolveChannelImage(product.imageUrl)
+  const contentHash = hashContent(text, keyboard, product.imageUrl ?? '')
 
   const existing = await db.telegramProduct.findUnique({
     where: { productId_channelId: { productId: product.id, channelId } },
@@ -417,17 +539,40 @@ async function publishOrSync(product: TgProduct, mode: 'publish' | 'sync') {
   }
 
   let messageId: number
+  let hasPhoto = Boolean(image)
+
   if (existing && mode === 'sync') {
-    messageId = await editChannelPost(existing.channelId, existing.messageId, text, keyboard, product)
-  } else {
-    const absImage = absoluteImageUrl(product.imageUrl)
-    if (absImage) {
-      const r = await sendPhoto(channelId, absImage, text, keyboard)
+    try {
+      if (image) {
+        // in-place media + caption edit (photo→photo or text→photo)
+        await editChannelPhoto(channelId, existing.messageId, image, text, keyboard)
+        messageId = existing.messageId
+        await logEvent('telegram.sync', `پست کانال برای «${product.name}» به‌روزرسانی شد`, {
+          productId: product.id,
+          messageId,
+          media: true,
+        })
+      } else if (existing.hasPhoto) {
+        // photo → text cannot be edited in place → recreate with correct mapping
+        throw new TelegramApiError('photo-to-text conversion requires recreate', 'editMessageText')
+      } else {
+        messageId = await editChannelPost(existing.channelId, existing.messageId, text, keyboard, product)
+      }
+    } catch {
+      // Recreate fallback (allowed by spec when in-place edit is impossible):
+      // old post is removed and a fresh one is linked to the product.
+      await deleteChannelPost(channelId, existing.messageId)
+      const r = image ? await sendPhoto(channelId, image, text, keyboard) : await sendMessage(channelId, text, keyboard)
       messageId = r.messageId ?? mockMessageId()
-    } else {
-      const r = await sendMessage(channelId, text, keyboard)
-      messageId = r.messageId ?? mockMessageId()
+      hasPhoto = Boolean(image)
+      await logEvent('telegram.sync', `پست کانال برای «${product.name}» با رسانه جدید بازایجاد شد`, {
+        productId: product.id,
+        messageId,
+      })
     }
+  } else {
+    const r = image ? await sendPhoto(channelId, image, text, keyboard) : await sendMessage(channelId, text, keyboard)
+    messageId = r.messageId ?? mockMessageId()
     await logEvent('telegram.publish', `محصول «${product.name}» در کانال منتشر شد`, {
       productId: product.id,
       channelId,
@@ -437,8 +582,8 @@ async function publishOrSync(product: TgProduct, mode: 'publish' | 'sync') {
 
   await db.telegramProduct.upsert({
     where: { productId_channelId: { productId: product.id, channelId } },
-    create: { productId: product.id, channelId, messageId, lastContentHash: contentHash },
-    update: { messageId, lastContentHash: contentHash, updatedAt: new Date() },
+    create: { productId: product.id, channelId, messageId, lastContentHash: contentHash, hasPhoto },
+    update: { messageId, lastContentHash: contentHash, hasPhoto, updatedAt: new Date() },
   })
   return { messageId, channelId, unchanged: false }
 }
@@ -496,6 +641,7 @@ export async function unpublishProduct(product: TgProduct) {
   await logEvent('telegram.unpublish', `انتشار محصول «${product.name}» در کانال لغو شد`, { productId: product.id })
 }
 
+/** Text→text in-place edit (editMessageText, fallback editMessageCaption). */
 async function editChannelPost(
   channelId: string,
   messageId: number,
@@ -511,44 +657,24 @@ async function editChannelPost(
     return messageId
   }
   const replyMarkup = { inline_keyboard: keyboard }
-  const absImage = absoluteImageUrl(product.imageUrl)
-  const attempts: Array<() => Promise<unknown>> = absImage
-    ? [
-        () =>
-          tgRequest('editMessageCaption', {
-            chat_id: channelId,
-            message_id: messageId,
-            caption: text,
-            parse_mode: 'HTML',
-            reply_markup: replyMarkup,
-          }),
-        () =>
-          tgRequest('editMessageText', {
-            chat_id: channelId,
-            message_id: messageId,
-            text,
-            parse_mode: 'HTML',
-            reply_markup: replyMarkup,
-          }),
-      ]
-    : [
-        () =>
-          tgRequest('editMessageText', {
-            chat_id: channelId,
-            message_id: messageId,
-            text,
-            parse_mode: 'HTML',
-            reply_markup: replyMarkup,
-          }),
-        () =>
-          tgRequest('editMessageCaption', {
-            chat_id: channelId,
-            message_id: messageId,
-            caption: text,
-            parse_mode: 'HTML',
-            reply_markup: replyMarkup,
-          }),
-      ]
+  const attempts: Array<() => Promise<unknown>> = [
+    () =>
+      tgRequest('editMessageText', {
+        chat_id: channelId,
+        message_id: messageId,
+        text,
+        parse_mode: 'HTML',
+        reply_markup: replyMarkup,
+      }),
+    () =>
+      tgRequest('editMessageCaption', {
+        chat_id: channelId,
+        message_id: messageId,
+        caption: text,
+        parse_mode: 'HTML',
+        reply_markup: replyMarkup,
+      }),
+  ]
   let lastErr: unknown
   for (const attempt of attempts) {
     try {
@@ -563,13 +689,6 @@ async function editChannelPost(
     }
   }
   throw lastErr
-}
-
-function absoluteImageUrl(url?: string | null): string | null {
-  if (!url) return null
-  // Only absolute http(s) URLs can be fetched by Telegram servers.
-  if (/^https?:\/\//i.test(url)) return url
-  return null
 }
 
 export function newId() {

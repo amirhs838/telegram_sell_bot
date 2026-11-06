@@ -615,10 +615,11 @@ function LogIcon({ type }: { type: string }) {
 // Bot Lab — chat simulator
 // ---------------------------------------------------------------------------
 
-const QUICK_ACTIONS: { label: string; body: { text?: string; callbackData?: string } }[] = [
+const QUICK_ACTIONS: { label: string; body: { text?: string; callbackData?: string; photoName?: string } }[] = [
   { label: '/start', body: { text: '/start' } },
   { label: 'منوی سفارش‌ها', body: { callbackData: 'menu:orders' } },
   { label: 'جستجو', body: { callbackData: 'menu:search' } },
+  { label: '🧾 رسید آزمایشی', body: { photoName: 'simulated-receipt.jpg' } },
 ]
 
 function BotLab() {
@@ -638,7 +639,7 @@ function BotLab() {
   }, [])
 
   const simulate = useCallback(
-    async (body: { text?: string; callbackData?: string; action?: string }, userEcho?: string) => {
+    async (body: { text?: string; callbackData?: string; action?: string; photoName?: string }, userEcho?: string) => {
       setSending(true)
       if (userEcho) {
         setMessages((prev) => [...prev, { id: msgSeq++, role: 'user', text: userEcho }])

@@ -6,9 +6,10 @@ import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
 import { Textarea } from '@/components/ui/textarea'
 import { Badge } from '@/components/ui/badge'
+import { Switch } from '@/components/ui/switch'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { SectionHeader } from '@/components/admin/bits'
-import { Loader2, Store, Send, KeyRound, Info, CheckCircle2, XCircle } from 'lucide-react'
+import { Loader2, Store, Send, KeyRound, Info, CheckCircle2, XCircle, Bot } from 'lucide-react'
 import { toast } from 'sonner'
 import { api, type Settings, type TelegramInfo } from '@/lib/client'
 
@@ -68,11 +69,96 @@ export function SettingsSection() {
       <SectionHeader title="تنظیمات" description="اطلاعات فروشگاه، اتصال تلگرام و امنیت حساب" />
 
       <StoreInfoCard settings={data.settings} onSaved={load} />
+      <PoliciesCard settings={data.settings} onSaved={load} />
       <div className="grid gap-4 md:gap-6 lg:grid-cols-2">
         <TelegramStatusCard telegram={data.telegram} />
         <PasswordCard />
       </div>
     </div>
+  )
+}
+
+// ---------------------------------------------------------------------------
+// 1-b) Store policies (used by the AI assistant as its only source of truth)
+// + AI assistant master switch
+// ---------------------------------------------------------------------------
+
+function PoliciesCard({ settings, onSaved }: { settings: Settings; onSaved: () => void }) {
+  const [shippingPolicy, setShippingPolicy] = useState(settings.shippingPolicy ?? '')
+  const [returnPolicy, setReturnPolicy] = useState(settings.returnPolicy ?? '')
+  const [warrantyPolicy, setWarrantyPolicy] = useState(settings.warrantyPolicy ?? '')
+  const [paymentNote, setPaymentNote] = useState(settings.paymentNote ?? '')
+  const [aiEnabled, setAiEnabled] = useState(settings.aiAssistantEnabled !== 'false')
+  const [saving, setSaving] = useState(false)
+
+  async function save(e: FormEvent) {
+    e.preventDefault()
+    setSaving(true)
+    try {
+      await api('/api/settings', {
+        method: 'PUT',
+        body: JSON.stringify({
+          shippingPolicy: shippingPolicy.trim() || undefined,
+          returnPolicy: returnPolicy.trim() || undefined,
+          warrantyPolicy: warrantyPolicy.trim() || undefined,
+          paymentNote: paymentNote.trim() || undefined,
+          aiAssistantEnabled: aiEnabled ? 'true' : 'false',
+        }),
+      })
+      toast.success('قوانین فروشگاه ذخیره شد')
+      onSaved()
+    } catch (err) {
+      toast.error((err as Error).message)
+    } finally {
+      setSaving(false)
+    }
+  }
+
+  return (
+    <Card className="rounded-xl shadow-sm">
+      <CardHeader>
+        <CardTitle className="flex items-center gap-2 text-base">
+          <Bot className="size-4 text-emerald-600" aria-hidden />
+          قوانین فروشگاه و دستیار هوشمند
+        </CardTitle>
+      </CardHeader>
+      <CardContent>
+        <form onSubmit={save} className="space-y-4">
+          <div className="flex items-center justify-between rounded-lg border p-3">
+            <div>
+              <p className="text-sm font-medium">دستیار هوشمند فعال باشد؟</p>
+              <p className="text-xs text-muted-foreground">
+                خاموش = سؤالات آزاد با جستجوی ساده پاسخ داده می‌شوند
+              </p>
+            </div>
+            <Switch checked={aiEnabled} onCheckedChange={setAiEnabled} aria-label="فعال/غیرفعال کردن دستیار هوشمند" />
+          </div>
+          <div className="space-y-1.5">
+            <Label htmlFor="s-shipping">شرایط ارسال</Label>
+            <Textarea id="s-shipping" rows={2} value={shippingPolicy} onChange={(e) => setShippingPolicy(e.target.value)} placeholder="مثلاً: ارسال با پست پیشتاز به سراسر کشور…" />
+          </div>
+          <div className="space-y-1.5">
+            <Label htmlFor="s-return">شرایط تعویض / مرجوعی</Label>
+            <Textarea id="s-return" rows={2} value={returnPolicy} onChange={(e) => setReturnPolicy(e.target.value)} placeholder="مثلاً: تا ۷ روز…" />
+          </div>
+          <div className="space-y-1.5">
+            <Label htmlFor="s-warranty">ضمانت اصالت</Label>
+            <Textarea id="s-warranty" rows={2} value={warrantyPolicy} onChange={(e) => setWarrantyPolicy(e.target.value)} placeholder="مثلاً: همه محصولات دارای مهر عیار ۹۲۵…" />
+          </div>
+          <div className="space-y-1.5">
+            <Label htmlFor="s-paynote">توضیحات پرداخت</Label>
+            <Textarea id="s-paynote" rows={2} value={paymentNote} onChange={(e) => setPaymentNote(e.target.value)} placeholder="راهنمای واریز و ارسال رسید…" />
+          </div>
+          <p className="text-xs text-muted-foreground">
+            دستیار هوشمند این متن‌ها را به‌عنوان تنها منبع پاسخ به سؤال‌های ارسال/تعویض/ضمانت استفاده می‌کند — هیچ قانونی از خودش نمی‌سازد.
+          </p>
+          <Button type="submit" disabled={saving}>
+            {saving && <Loader2 className="size-4 animate-spin" aria-hidden />}
+            ذخیره قوانین
+          </Button>
+        </form>
+      </CardContent>
+    </Card>
   )
 }
 

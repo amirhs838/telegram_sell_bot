@@ -1,7 +1,8 @@
 /**
- * Seed script — realistic Persian demo data.
+ * Silver Love seed — Persian silver-store demo data.
  * Run: bun scripts/seed.ts          (idempotent — skips if already seeded)
- *      bun scripts/seed.ts --reset  (wipes all tables first)
+ *      bun scripts/seed.ts --reset  (wipes tables first, PRESERVING the
+ *                                    Telegram panel connection + admin user)
  */
 import { PrismaClient } from '@prisma/client'
 import bcrypt from 'bcryptjs'
@@ -11,13 +12,24 @@ const db = new PrismaClient()
 
 const daysAgo = (n: number, h = 12) => new Date(Date.now() - n * 24 * 3600 * 1000 + h * 3600 * 1000)
 
+/** Keys that must survive a reset (panel Telegram connection, AI switch, …). */
+const PROTECTED_SETTING_PREFIXES = ['telegram', 'aiAssistant']
+
 async function reset() {
+  // stash protected settings (Telegram panel connection, AI switch, …)
+  const all = await db.setting.findMany()
+  const keep = all.filter((r) => PROTECTED_SETTING_PREFIXES.some((p) => r.key.startsWith(p)))
+
+  await db.paymentEvent.deleteMany()
+  await db.payment.deleteMany()
+  await db.conversationMessage.deleteMany()
   await db.activityLog.deleteMany()
   await db.orderItem.deleteMany()
   await db.order.deleteMany()
   await db.productEmbedding.deleteMany()
   await db.telegramProduct.deleteMany()
   await db.botSession.deleteMany()
+  await db.productImage.deleteMany()
   await db.product.deleteMany()
   await db.category.deleteMany()
   await db.customer.deleteMany()
@@ -25,6 +37,13 @@ async function reset() {
   await db.user.deleteMany()
   await db.setting.deleteMany()
   await db.counter.deleteMany()
+  await db.bankAccount.deleteMany()
+  await db.silverRate.deleteMany()
+
+  // restore protected settings
+  for (const row of keep) {
+    await db.setting.create({ data: { key: row.key, value: row.value } })
+  }
 }
 
 async function main() {
@@ -39,17 +58,22 @@ async function main() {
   const passwordHash = await bcrypt.hash('admin1234', 10)
   await db.user.upsert({
     where: { email: 'admin@shop.local' },
-    create: { email: 'admin@shop.local', name: 'مدیر فروشگاه', passwordHash, role: 'admin' },
-    update: {},
+    create: { email: 'admin@shop.local', name: 'مدیر Silver Love', passwordHash, role: 'admin' },
+    update: { name: 'مدیر Silver Love' },
   })
   console.log('✓ admin user (admin@shop.local / admin1234)')
 
   // ── Settings ────────────────────────────────────────────────────────────
   const settings: Array<[string, string]> = [
-    ['storeName', 'فروشگاه تپش'],
-    ['storeDescription', 'خرید آسان و مطمئن از طریق تلگرام — ارسال سریع به سراسر کشور'],
-    ['supportUsername', 'tapesh_support'],
+    ['storeName', 'Silver Love'],
+    ['storeDescription', 'فروشگاه تخصصی نقره — اصالت، ظرافت و قیمت منصفانه. خرید آسان از طریق تلگرام.'],
+    ['supportUsername', 'silverlove_support'],
     ['currency', 'IRT'],
+    ['shippingPolicy', 'ارسال به سراسر کشور با پست پیشتاز و بیمه کامل مرسوله. تهران: ۱ تا ۲ روز کاری. شهرستان‌ها: ۲ تا ۴ روز کاری.'],
+    ['returnPolicy', 'تا ۷ روز پس از دریافت، در صورت عدم استفاده و سالم بودن بسته‌بندی، امکان بازگشت کالا وجود دارد. هزینه ارسال مرجوعی بر عهده خریدار است.'],
+    ['warrantyPolicy', 'همه محصولات نقره ۹۲۵ با ضمانت اصالت و عیار عرضه می‌شوند. در صورت مغایرت عیار، مبلغ کامل بازگردانده می‌شود.'],
+    ['paymentNote', 'پس از ثبت سفارش، مبلغ را به کارت فروشگاه واریز کنید و تصویر رسید را در همین ربات ارسال نمایید. تأیید نهایی پرداخت توسط ادمین انجام می‌شود.'],
+    ['aiAssistantEnabled', 'true'],
   ]
   for (const [key, value] of settings) {
     await db.setting.upsert({ where: { key }, create: { key, value }, update: { value } })
@@ -58,11 +82,12 @@ async function main() {
 
   // ── Categories ──────────────────────────────────────────────────────────
   const catData = [
-    { name: 'کفش و صندل', slug: 'shoes', description: 'انواع کفش اسپرت، پیاده‌روی و رسمی' },
-    { name: 'لوازم دیجیتال', slug: 'digital', description: 'گجت‌های هوشمند و لوازم جانبی' },
-    { name: 'پوشاک', slug: 'apparel', description: 'پوشاک ترند و باکیفیت' },
-    { name: 'خانه و زندگی', slug: 'home', description: 'لوازم کاربردی برای خانه' },
-    { name: 'اکسسوری', slug: 'accessories', description: 'کوله، عینک و لوازم شخصی' },
+    { name: 'انگشتر', slug: 'ring', description: 'انگشترهای نقره مردانه و زنانه با طرح‌های دست‌ساز و مدرن' },
+    { name: 'دستبند', slug: 'bracelet', description: 'دستبندهای نقره ظریف و چرم‌دوزی‌شده' },
+    { name: 'گردنبند و آویز', slug: 'necklace', description: 'گردنبندها و آویزهای نقره با طراحی خاص' },
+    { name: 'گوشواره', slug: 'earring', description: 'گوشواره‌های نقره روزمره و مجلسی' },
+    { name: 'سرویس نقره', slug: 'set', description: 'سرویس‌های هماهنگ نقره برای هدیه' },
+    { name: 'شمش و سرمایه‌ای', slug: 'bullion', description: 'شمش‌های نقره با عیار بالا، مناسب پس‌انداز' },
   ]
   const cats: Record<string, string> = {}
   for (const c of catData) {
@@ -78,92 +103,132 @@ async function main() {
   // ── Products ────────────────────────────────────────────────────────────
   type P = {
     name: string; slug: string; cat: string; price: number; compareAtPrice?: number
-    stock: number; status: string; image: string; shortDescription: string; description: string
+    stock: number; status: string; shortDescription: string; description: string
     tags: string[]; lowStockThreshold?: number
+    sku?: string; silverType?: string; purity?: string; weightGrams?: number
+    size?: string; dimensions?: string; brand?: string; appearance?: string
+    careInstructions?: string; authenticity?: string
   }
   const products: P[] = [
     {
-      name: 'کفش اسپرت سفید مدل ایرفلکس', slug: 'airflex-white-sneaker', cat: 'shoes',
-      price: 1850000, compareAtPrice: 2200000, stock: 12, status: 'active',
-      image: '/api/uploads/seed-sneakers-white.png',
-      shortDescription: 'کفش اسپرت سفید با رویه تنفس‌پذیر، مناسب پیاده‌روی روزمره و دویدن سبک. سبک و راحت.',
-      description: 'کفش اسپرت ایرفلکس با طراحی مینیمال سفید، انتخابی عالی برای استفاده روزمره است. رویه مش تنفس‌پذیر از تعریق پا جلوگیری می‌کند و زیره EVA سبک، ضربات را به‌خوبی جذب می‌کند. کفی داخلی نرم و قابل تعویض، راحتی را در طول روز تضمین می‌کند. مناسب پیاده‌روی طولانی، دویدن سبک و استایل کژوال.',
-      tags: ['کفش اسپرت', 'سفید', 'پیاده‌روی', 'روزمره', 'سبک'],
+      name: 'انگشتر نقره مردانه مدل اژدها', slug: 'silver-ring-dragon', cat: 'ring',
+      price: 2450000, stock: 8, status: 'active',
+      sku: 'SL-RG-101', silverType: 'نقره دست‌ساز', purity: '925', weightGrams: 12.5,
+      size: '۶۲ (اندازه ۲۲)', dimensions: 'قطر صفحه ۱۸ میلی‌متر', brand: 'Silver Love',
+      appearance: 'نقش اژدها به‌صورت برجسته، پرداخت مات و براق ترکیبی',
+      careInstructions: 'دور از عطر و مواد شیمیایی نگهداری شود؛ با دستمال نقره‌شوی تمیز کنید.',
+      authenticity: 'دارای مهر عیار ۹۲۵ و ضمانت اصالت Silver Love',
+      shortDescription: 'انگشتر مردانه نقره ۹۲۵ دست‌ساز با نقش برجسته اژدها — سنگین، خوش‌دست و خاص.',
+      description: 'انگشتر اژدها از نقره عیار ۹۲۵ با وزن ۱۲٫۵ گرم، کاملاً دست‌ساز و با پرداخت ترکیبی مات و براق. طراحی برجسته اژدها برای علاقه‌مندان به استایل خاص و مردانه. حلقه‌ی محکم و خوش‌دست که روزمره هم دوام دارد.',
+      tags: ['انگشتر مردانه', 'دست‌ساز', 'نقره ۹۲۵', 'اژدها'],
     },
     {
-      name: 'کفش پیاده‌روی مردانه گیت‌وای', slug: 'gateway-walking-shoes', cat: 'shoes',
-      price: 1450000, stock: 3, status: 'active',
-      image: '/api/uploads/seed-walking-shoes.png',
-      shortDescription: 'کفش پیاده‌روی مردانه با زیره طبی و کفی طبی، مناسب قدم‌های طولانی.',
-      description: 'کفش پیاده‌روی گیت‌وای با زیره ضدلغزش و کفی طبی، برای افرادی که روزانه مسیرهای طولانی را پیاده می‌پیمایند طراحی شده است. وزن سبک و انعطاف بالا، خستگی پا را به حداقل می‌رساند.',
-      tags: ['کفش مردانه', 'پیاده‌روی', 'زیره طبی', 'ضدلغزش'],
-      lowStockThreshold: 5,
+      name: 'انگشتر نقره زنانه ظریف با نگین آیکون', slug: 'silver-ring-zircon', cat: 'ring',
+      price: 1380000, compareAtPrice: 1650000, stock: 14, status: 'active',
+      sku: 'SL-RG-205', silverType: 'نقره ماشین‌ساز', purity: '925', weightGrams: 3.2,
+      size: '۵۴ تا ۵۸ (قابل انتخاب)', brand: 'Silver Love',
+      appearance: 'حلقه ظریف با نگین آیکون سفید و پرداخت براق',
+      careInstructions: 'با دستمال نرم تمیز شود؛ هنگام شست‌وشو دست کند.',
+      authenticity: 'دارای مهر عیار ۹۲۵',
+      shortDescription: 'انگشتر ظریف نقره ۹۲۵ با نگین آیکون — انتخابی شیک برای استفاده روزمره.',
+      description: 'انگشتر ظریف با نگین آیکون سفید، سبک و راحت برای استفاده هر روزه. پرداخت آینه‌ای نقره ۹۲۵ و قفل‌بندی دقیق سایزها (۵۴ تا ۵۸). مناسب هدیه هم هست.',
+      tags: ['انگشتر زنانه', 'ظریف', 'نگین', 'هدیه'],
     },
     {
-      name: 'هدفون بی‌سیم ساندبرگ پرو', slug: 'sandberg-pro-headphones', cat: 'digital',
-      price: 2350000, compareAtPrice: 2700000, stock: 15, status: 'active',
-      image: '/api/uploads/seed-headphones.png',
-      shortDescription: 'هدفون بی‌سیم با نویز کنسلینگ فعال و ۳۰ ساعت پخش موسیقی.',
-      description: 'هدفون ساندبرگ پرو با فناوری حذف نویز فعال (ANC)، صدایی شفاف و بیس عمیق ارائه می‌دهد. باتری ۳۰ ساعته، اتصال بلوتوث ۵.۳ و قابلیت اتصال هم‌زمان به دو دستگاه. راحتی برای استفاده طولانی با یوگا فوم پروتئینی.',
-      tags: ['هدفون', 'بی‌سیم', 'نویز کنسلینگ', 'بلوتوث'],
+      name: 'دستبند نقره چرم‌دوزی مردانه', slug: 'silver-bracelet-leather', cat: 'bracelet',
+      price: 1650000, stock: 3, status: 'active', lowStockThreshold: 5,
+      sku: 'SL-BR-310', silverType: 'نقره دست‌ساز', purity: '925', weightGrams: 8.4,
+      size: 'قابل تنظیم ۱۸ تا ۲۲ سانتی‌متر', brand: 'Silver Love',
+      appearance: 'حلقه‌های نقره روی بند چرم طبیعی قهوه‌ای',
+      careInstructions: 'چرم را خیس نکنید؛ نقره را با دستمال نقره‌شوی تمیز کنید.',
+      authenticity: 'دارای مهر عیار ۹۲۵ و ضمانت دوخت چرم',
+      shortDescription: 'دستبند ترکیبی نقره و چرم طبیعی — اسپرت، خوش‌دست و قابل تنظیم.',
+      description: 'دستبند چرم‌دوزی با ۵ حلقه نقره ۹۲۵ دست‌ساز روی چرم طبیعی گاوی. قفل گیره‌ای استیل قابل تنظیم برای دور مچ ۱۸ تا ۲۲ سانتی‌متر. ترکیبی از استایل کژوال و اصالت نقره.',
+      tags: ['دستبند مردانه', 'چرم', 'قابل تنظیم'],
     },
     {
-      name: 'پاوربانک ولتکس ۱۰ هزار', slug: 'voltex-powerbank-10k', cat: 'digital',
-      price: 890000, stock: 0, status: 'out_of_stock',
-      image: '/api/uploads/seed-powerbank.png',
-      shortDescription: 'پاوربانک ۱۰٬۰۰۰ میلی‌آمپر با نمایشگر دیجیتال و دو خروجی سریع.',
-      description: 'پاوربانک ولتکس با ظرفیت واقعی ۱۰٬۰۰۰ میلی‌آمپر، شارژ سریع ۲۲.۵ واتی و نمایشگر درصد باتری، همراه مطمئن سفرها و روزهای پرمشغله شماست.',
-      tags: ['پاوربانک', 'شارژ سریع', 'نمایشگر دیجیتال'],
+      name: 'دستبند زنجیری نقره زنانه مدل نور', slug: 'silver-bracelet-noor', cat: 'bracelet',
+      price: 1950000, stock: 10, status: 'active',
+      sku: 'SL-BR-402', silverType: 'نقره ماشین‌ساز', purity: '925', weightGrams: 6.8,
+      size: '۱۷ سانتی‌متر + طوله ۲ سانتی‌متری', brand: 'Silver Love',
+      appearance: 'زنجیر حلقه‌ای ظریف با آویز قلب مینی',
+      careInstructions: 'دور از آب و مواد شوینده نگهداری شود.',
+      authenticity: 'دارای مهر عیار ۹۲۵',
+      shortDescription: 'دستبند زنجیری ظریف نقره ۹۲۵ با آویز قلب — مناسب استفاده روزمره و مجلسی.',
+      description: 'دستبند زنجیری مدل نور با پرداخت براق و آویز قلب مینی. وزن متعادل ۶٫۸ گرم و قفل جفتی مطمئن. هم تنهایی زیباست و هم با گردنبند هم‌راستا ست می‌شود.',
+      tags: ['دستبند زنانه', 'زنجیری', 'آویز قلب'],
     },
     {
-      name: 'ساعت هوشمند اکتیو ۵', slug: 'active-5-smartwatch', cat: 'digital',
-      price: 3200000, stock: 6, status: 'active',
-      image: '/api/uploads/seed-smartwatch.png',
-      shortDescription: 'ساعت هوشمند با نمایشگر AMOLED، پایش ضربان قلب و خواب و ۷ روز شارژدهی.',
-      description: 'ساعت هوشمند اکتیو ۵ با نمایشگر AMOLED ۱.۴۳ اینچ، بیش از ۱۰۰ حالت ورزشی، پایش ضربان قلب و کیفیت خواب و مقاومت در برابر آب (5ATM). با یک بار شارژ تا ۷ روز همراه شماست.',
-      tags: ['ساعت هوشمند', 'AMOLED', 'سلامت', 'ورزشی'],
+      name: 'گردنبند نقره با آویز ماه و ستاره', slug: 'silver-necklace-moon', cat: 'necklace',
+      price: 2280000, compareAtPrice: 2600000, stock: 12, status: 'active',
+      sku: 'SL-NK-501', silverType: 'نقره دست‌ساز', purity: '925', weightGrams: 7.5,
+      dimensions: 'آویز ۲×۱٫۵ سانتی‌متر، زنجیر ۴۵ سانتی‌متر', brand: 'Silver Love',
+      appearance: 'آویز ماه و ستاره با پرداخت دورنگ (طلایی‌پوش روی نقره)',
+      careInstructions: 'پرداخت دورنگ را با دستمال خشک تمیز کنید.',
+      authenticity: 'دارای مهر عیار ۹۲۵ و ضمانت پرداخت',
+      shortDescription: 'گردنبند نقره ۹۲۵ با آویز ماه و ستاره و پرداخت دورنگ خاص.',
+      description: 'گردنبند ماه و ستاره با آویز دست‌ساز نقره ۹۲۵ و پرداخت دورنگ نقره/طلایی. زنجیر حلقه‌ای ۴۵ سانتی‌متری با قفل مطمئن. انتخابی محبوب برای هدیه.',
+      tags: ['گردنبند', 'ماه و ستاره', 'هدیه', 'دست‌ساز'],
     },
     {
-      name: 'هودی مردانه مشکی اورسایز', slug: 'black-oversize-hoodie', cat: 'apparel',
-      price: 980000, stock: 20, status: 'inactive',
-      image: '/api/uploads/seed-hoodie.png',
-      shortDescription: 'هودی اورسایز نخ پنبه سنگ‌شور، مناسب فصل سرد و استایل اسپرت.',
-      description: 'هودی اورسایز از نخ پنبه سنگ‌شور با کیفیت، با جیب کانگورویی و بند قابل تنظیم. گرم، نرم و ماندگار — انتخابی مطمئن برای فصل سرد.',
-      tags: ['هودی', 'مشکی', 'اورسایز', 'پنبه'],
+      name: 'گوشواره حلقه‌ای نقره کلاسیک', slug: 'silver-earring-hoop', cat: 'earring',
+      price: 990000, stock: 18, status: 'active',
+      sku: 'SL-ER-611', silverType: 'نقره ماشین‌ساز', purity: '925', weightGrams: 2.6,
+      dimensions: 'قطر ۱۵ میلی‌متر', brand: 'Silver Love',
+      appearance: 'حلقه‌ای ساده با سطح آینه‌ای',
+      careInstructions: 'پس از استفاده در جعبه نگهداری شود.',
+      authenticity: 'دارای مهر عیار ۹۲۵',
+      shortDescription: 'گوشواره حلقه‌ای کلاسیک نقره ۹۲۵ — سبک، براق و همیشه شیک.',
+      description: 'گوشواره حلقه‌ای با قطر ۱۵ میلی‌متر و وزن سبک ۲٫۶ گرم برای هر گوش. قفل فنری دقیق و پرداخت آینه‌ای. مناسب هر استایل از روزمره تا مجلسی.',
+      tags: ['گوشواره', 'حلقه‌ای', 'کلاسیک'],
     },
     {
-      name: 'کوله‌پشتی لپ‌تاپ سیتی‌پک', slug: 'citypack-laptop-backpack', cat: 'accessories',
-      price: 1250000, stock: 4, status: 'active',
-      image: '/api/uploads/seed-backpack.png',
-      shortDescription: 'کوله‌پشتی لپ‌تاپ ۱۵.۶ اینچ با محفظه ضدضربه و پارچه ضدآب.',
-      description: 'کوله‌پشتی سیتی‌پک با محفظه مخصوص لپ‌تاپ ۱۵.۶ اینچ و محافظ ضدضربه، جیب‌های متعدد برای نظم اقلام و پارچه ضدآب مقاوم. پشت‌بند طبی و کمربند سینه برای حمل راحت.',
-      tags: ['کوله‌پشتی', 'لپ‌تاپ', 'ضدآب', 'اداری'],
-      lowStockThreshold: 5,
+      name: 'سرویس نقره چهارتیکه مدل ارکیده', slug: 'silver-set-orchid', cat: 'set',
+      price: 7800000, compareAtPrice: 8900000, stock: 2, status: 'active', lowStockThreshold: 3,
+      sku: 'SL-ST-710', silverType: 'نقره دست‌ساز', purity: '925', weightGrams: 28.0,
+      dimensions: 'جعبه هدیه ۲۰×۱۵ سانتی‌متر', brand: 'Silver Love',
+      appearance: 'گردنبند + دستبند + انگشتر + گوشواره با طرح گل ارکیده',
+      careInstructions: 'هر قطعه جداگانه در کیسه پارچه‌ای نگهداری شود.',
+      authenticity: 'دارای مهر عیار ۹۲۵ روی همه قطعات + گارانتی اصالت Silver Love',
+      shortDescription: 'سرویس کامل چهارتیکه نقره ۹۲۵ دست‌ساز با جعبه هدیه لوکس.',
+      description: 'سرویس ارکیده شامل گردنبند، دستبند، انگشتر و گوشواره با یک طرح هماهنگ گل ارکیده. مجموعاً ۲۸ گرم نقره ۹۲۵ دست‌ساز با پرداخت براق. همراه جعبه چوبی هدیه — انتخاب اول برای مناسبت‌های مهم.',
+      tags: ['سرویس نقره', 'هدیه', 'دست‌ساز', 'جعبه هدیه'],
     },
     {
-      name: 'ماگ حرارتی استیل برو', slug: 'brew-thermal-mug', cat: 'home',
-      price: 320000, stock: 30, status: 'active',
-      image: '/api/uploads/seed-mug.png',
-      shortDescription: 'ماگ حرارتی استیل دوجداره، حفظ دما تا ۶ ساعت، درب ضدچکه.',
-      description: 'ماگ حرارتی برو از استیل ضدزنگ دوجداره، دمای نوشیدنی گرم تا ۶ ساعت و سرد تا ۱۲ ساعت حفظ می‌کند. درب قفل‌شونده ضدچکه، مناسب ماشین، محل کار و سفر.',
-      tags: ['ماگ', 'حرارتی', 'استیل', 'سفر'],
+      name: 'شمش نقره ۵۰ گرمی عیار ۹۹۹', slug: 'silver-bullion-50g', cat: 'bullion',
+      price: 5600000, stock: 6, status: 'active',
+      sku: 'SL-BL-999-50', silverType: 'شمش سرمایه‌ای', purity: '999', weightGrams: 50.0,
+      dimensions: '۵۰×۲۹×۵ میلی‌متر', brand: 'Silver Love',
+      appearance: 'شمش کپسول‌دار با حک شماره سریال منحصربه‌فرد',
+      careInstructions: 'کپسول را باز نکنید؛ در جای خشک نگهداری کنید.',
+      authenticity: 'شماره سریال ثبت‌شده + گواهی اصالت چاپی',
+      shortDescription: 'شمش نقره خالص ۹۹۹ با وزن ۵۰ گرم، کپسول‌دار و همراه گواهی اصالت.',
+      description: 'شمش نقره ۵۰ گرمی با عیار ۹۹۹ (خالص)، داخل کپسول محافظ و همراه گواهی اصالت با شماره سریال ثبت‌شده. مناسب پس‌انداز و هدیه سرمایه‌ای.',
+      tags: ['شمش نقره', 'سرمایه‌ای', 'عیار ۹۹۹', 'گواهی اصالت'],
     },
     {
-      name: 'عینک آفتابی پلاریزه رویال', slug: 'royal-polarized-sunglasses', cat: 'accessories',
-      price: 760000, stock: 10, status: 'active',
-      image: '/api/uploads/seed-sunglasses.png',
-      shortDescription: 'عینک آفتابی پلاریزه با محافظت کامل UV400 و فریم سبک.',
-      description: 'عینک آفتابی رویال با لنز پلاریزه، انعکاس نور خورشید را حذف می‌کند و دیدی شفاف و بدون خیرگی ارائه می‌دهد. محافظت کامل UV400 و فریم سبک و مقاوم.',
-      tags: ['عینک آفتابی', 'پلاریزه', 'UV400', 'تابستان'],
+      name: 'شمش نقره ۱۰ گرمی هدیه', slug: 'silver-bullion-10g', cat: 'bullion',
+      price: 1180000, stock: 0, status: 'out_of_stock',
+      sku: 'SL-BL-999-10', silverType: 'شمش سرمایه‌ای', purity: '999', weightGrams: 10.0,
+      dimensions: '۳۰×۱۸×۳ میلی‌متر', brand: 'Silver Love',
+      appearance: 'شمش کپسول‌دار با طراحی هدیه',
+      careInstructions: 'کپسول را باز نکنید.',
+      authenticity: 'شماره سریال ثبت‌شده + گواهی اصالت',
+      shortDescription: 'شمش نقره ۱۰ گرمی عیار ۹۹۹ با طراحی هدیه — مناسب شروع پس‌انداز نقره.',
+      description: 'شمش ۱۰ گرمی نقره خالص ۹۹۹ داخل کپسول محافظ با بسته‌بندی هدیه و گواهی اصالت. کم‌حجم، باارزش و مناسب مناسبت‌ها.',
+      tags: ['شمش نقره', 'هدیه', 'عیار ۹۹۹'],
     },
     {
-      name: 'دفترچه یادداشت چرمی نوتا', slug: 'nota-leather-notebook', cat: 'home',
-      price: 250000, stock: 2, status: 'draft',
-      image: '/api/uploads/seed-notebook.png',
-      shortDescription: 'دفترچه ۱۹۲ صفحه‌ای با جلد چرم طبیعی و کاغذ گلاسه ۱۲۰ گرمی.',
-      description: 'دفترچه نوتا با جلد چرم طبیعی و کش بستن، ۱۹۲ صفحه کاغذ گلاسه ۱۲۰ گرمی مناسب انواع خودکار. همراه با ریبون نشان‌گذاری صفحه.',
-      tags: ['دفترچه', 'چرمی', 'هدیه', 'نوشت‌افزار'],
-      lowStockThreshold: 5,
+      name: 'نیم‌ست نقره مدل بهار (پیش‌نمایش)', slug: 'silver-half-set-bahar', cat: 'set',
+      price: 3450000, stock: 4, status: 'draft',
+      sku: 'SL-ST-802', silverType: 'نقره دست‌ساز', purity: '925', weightGrams: 15.2,
+      brand: 'Silver Love',
+      appearance: 'گردنبند و گوشواره هماهنگ با طرح شاخه‌های بهاری',
+      careInstructions: 'با دستمال نقره‌شوی تمیز کنید.',
+      authenticity: 'دارای مهر عیار ۹۲۵',
+      shortDescription: 'نیم‌ست گردنبند و گوشواره نقره ۹۲۵ دست‌ساز — به‌زودی.',
+      description: 'نیم‌ست بهار با طرح شاخه‌های گل بهاری، دست‌ساز نقره ۹۲۵ و مجموع وزن ۱۵٫۲ گرم. این محصول در حال آماده‌سازی است و به‌زودی فعال می‌شود.',
+      tags: ['نیم‌ست', 'دست‌ساز', 'به‌زودی'],
     },
   ]
 
@@ -174,19 +239,51 @@ async function main() {
       create: {
         name: p.name, slug: p.slug, description: p.description, shortDescription: p.shortDescription,
         price: p.price, compareAtPrice: p.compareAtPrice ?? null, stock: p.stock,
-        categoryId: cats[p.cat], imageUrl: p.image, status: p.status, tags: JSON.stringify(p.tags),
+        categoryId: cats[p.cat], imageUrl: null, status: p.status, tags: JSON.stringify(p.tags),
         lowStockThreshold: p.lowStockThreshold ?? 5,
+        sku: p.sku ?? null, silverType: p.silverType ?? null, purity: p.purity ?? null,
+        weightGrams: p.weightGrams ?? null, size: p.size ?? null, dimensions: p.dimensions ?? null,
+        brand: p.brand ?? null, appearance: p.appearance ?? null,
+        careInstructions: p.careInstructions ?? null, authenticity: p.authenticity ?? null,
       },
       update: {
-        price: p.price, stock: p.stock, status: p.status, imageUrl: p.image,
+        price: p.price, stock: p.stock, status: p.status,
         categoryId: cats[p.cat], description: p.description, shortDescription: p.shortDescription,
         tags: JSON.stringify(p.tags), compareAtPrice: p.compareAtPrice ?? null,
+        sku: p.sku ?? null, silverType: p.silverType ?? null, purity: p.purity ?? null,
+        weightGrams: p.weightGrams ?? null, size: p.size ?? null, dimensions: p.dimensions ?? null,
+        brand: p.brand ?? null, appearance: p.appearance ?? null,
+        careInstructions: p.careInstructions ?? null, authenticity: p.authenticity ?? null,
       },
     })
     productIds[p.slug] = row.id
     await upsertProductEmbedding(row.id).catch((e) => console.error('embed fail', p.name, e.message))
   }
-  console.log(`✓ ${products.length} products (+embeddings)`)
+  console.log(`✓ ${products.length} silver products (+embeddings)`)
+
+  // ── Silver rate (manual, reference only) ────────────────────────────────
+  await db.silverRate.create({
+    data: {
+      pricePerGram: 98000,
+      unit: 'تومان/گرم',
+      note: 'نرخ نمونه اولیه — هر روز توسط ادمین به‌روزرسانی می‌شود',
+      active: true,
+      createdByEmail: 'admin@shop.local',
+    },
+  })
+  console.log('✓ initial silver rate (98,000 تومان/گرم — sample)')
+
+  // ── Bank account (sample data — replace from the panel) ─────────────────
+  await db.bankAccount.create({
+    data: {
+      bankName: 'بانک نمونه',
+      holderName: 'Silver Love',
+      cardNumber: '6104-XXXX-XXXX-XXXX',
+      note: 'اطلاعات نمونه — از بخش «پرداخت» پنل، کارت واقعی خود را ثبت کنید',
+      active: true,
+    },
+  })
+  console.log('✓ sample bank account')
 
   // ── Customers ───────────────────────────────────────────────────────────
   const custData = [
@@ -206,18 +303,19 @@ async function main() {
   }
   console.log(`✓ ${custData.length} customers`)
 
-  // ── Orders ──────────────────────────────────────────────────────────────
+  // ── Orders (with payment lifecycle) ─────────────────────────────────────
   type OI = { slug: string; qty: number }
   type O = {
     n: number; cust: string; status: string; created: Date; phone: string; address: string; name: string; items: OI[]
+    payment?: { status: string; reviewedByEmail?: string; rejectReason?: string }
   }
   const orders: O[] = [
-    { n: 1001, cust: '701100001', status: 'completed', created: daysAgo(9), name: 'امیر حساری', phone: '09121110001', address: 'تهران، خیابان ولیعصر، کوچه بهار، پلاک ۱۲، واحد ۳', items: [{ slug: 'airflex-white-sneaker', qty: 1 }] },
-    { n: 1002, cust: '701100002', status: 'completed', created: daysAgo(6), name: 'سارا محمدی', phone: '09352220002', address: 'اصفهان، خیابان چهارباغ بالا، کوچه گلستان، پلاک ۸', items: [{ slug: 'sandberg-pro-headphones', qty: 1 }, { slug: 'brew-thermal-mug', qty: 2 }] },
-    { n: 1003, cust: '701100003', status: 'cancelled', created: daysAgo(4), name: 'رضا کریمی', phone: '09193330003', address: 'شیراز، بلوار زند، ساختمان نور، طبقه ۲', items: [{ slug: 'active-5-smartwatch', qty: 1 }] },
-    { n: 1004, cust: '701100001', status: 'shipped', created: daysAgo(2), name: 'امیر حساری', phone: '09121110001', address: 'تهران، خیابان ولیعصر، کوچه بهار، پلاک ۱۲، واحد ۳', items: [{ slug: 'citypack-laptop-backpack', qty: 1 }] },
-    { n: 1005, cust: '701100002', status: 'confirmed', created: daysAgo(1), name: 'سارا محمدی', phone: '09352220002', address: 'اصفهان، خیابان چهارباغ بالا، کوچه گلستان، پلاک ۸', items: [{ slug: 'gateway-walking-shoes', qty: 1 }] },
-    { n: 1006, cust: '701100004', status: 'pending', created: daysAgo(0, 2), name: 'مریم احمدی', phone: '09364440004', address: 'مشهد، بلوار وکیل‌آباد، خیابان لادن، پلاک ۲۱', items: [{ slug: 'royal-polarized-sunglasses', qty: 1 }, { slug: 'nota-leather-notebook', qty: 1 }] },
+    { n: 1001, cust: '701100001', status: 'completed', created: daysAgo(9), name: 'امیر حساری', phone: '09121110001', address: 'تهران، خیابان ولیعصر، کوچه بهار، پلاک ۱۲، واحد ۳', items: [{ slug: 'silver-ring-dragon', qty: 1 }], payment: { status: 'paid', reviewedByEmail: 'admin@shop.local' } },
+    { n: 1002, cust: '701100002', status: 'completed', created: daysAgo(6), name: 'سارا محمدی', phone: '09352220002', address: 'اصفهان، خیابان چهارباغ بالا، کوچه گلستان، پلاک ۸', items: [{ slug: 'silver-necklace-moon', qty: 1 }, { slug: 'silver-earring-hoop', qty: 2 }], payment: { status: 'paid', reviewedByEmail: 'admin@shop.local' } },
+    { n: 1003, cust: '701100003', status: 'cancelled', created: daysAgo(4), name: 'رضا کریمی', phone: '09193330003', address: 'شیراز، بلوار زند، ساختمان نور، طبقه ۲', items: [{ slug: 'silver-set-orchid', qty: 1 }] },
+    { n: 1004, cust: '701100001', status: 'shipped', created: daysAgo(2), name: 'امیر حساری', phone: '09121110001', address: 'تهران، خیابان ولیعصر، کوچه بهار، پلاک ۱۲، واحد ۳', items: [{ slug: 'silver-bullion-50g', qty: 1 }], payment: { status: 'paid', reviewedByEmail: 'admin@shop.local' } },
+    { n: 1005, cust: '701100002', status: 'confirmed', created: daysAgo(1), name: 'سارا محمدی', phone: '09352220002', address: 'اصفهان، خیابان چهارباغ بالا، کوچه گلستان، پلاک ۸', items: [{ slug: 'silver-bracelet-leather', qty: 1 }], payment: { status: 'paid', reviewedByEmail: 'admin@shop.local' } },
+    { n: 1006, cust: '701100004', status: 'pending', created: daysAgo(0, 2), name: 'مریم احمدی', phone: '09364440004', address: 'مشهد، بلوار وکیل‌آباد، خیابان لادن، پلاک ۲۱', items: [{ slug: 'silver-ring-zircon', qty: 1 }, { slug: 'silver-bracelet-noor', qty: 1 }], payment: { status: 'payment_review' } },
   ]
 
   for (const o of orders) {
@@ -239,13 +337,39 @@ async function main() {
       },
       update: { status: o.status, subtotal, total: subtotal, createdAt: o.created },
     })
+    if (o.payment) {
+      const orderRow = await db.order.findUniqueOrThrow({ where: { orderNumber: o.n } })
+      await db.payment.upsert({
+        where: { orderId: orderRow.id },
+        create: {
+          orderId: orderRow.id,
+          status: o.payment.status,
+          amountSnapshot: subtotal,
+          receiptImage: o.payment.status === 'payment_review' ? `sample-receipt-${o.n}.jpg` : null,
+          payerName: o.payment.status === 'payment_review' ? o.name : null,
+          reviewedByEmail: o.payment.reviewedByEmail ?? null,
+          reviewedAt: o.payment.reviewedByEmail ? o.created : null,
+          events: {
+            create: o.payment.status === 'payment_review'
+              ? { type: 'receipt_submitted', note: 'رسید نمونه ثبت شد (seed)' }
+              : { type: 'approved', actorEmail: o.payment.reviewedByEmail, note: 'تأیید نمونه (seed)' },
+          },
+        },
+        update: {
+          status: o.payment.status,
+          amountSnapshot: subtotal,
+          reviewedByEmail: o.payment.reviewedByEmail ?? null,
+          reviewedAt: o.payment.reviewedByEmail ? o.created : null,
+        },
+      })
+    }
   }
   await db.counter.upsert({
     where: { name: 'order' },
     create: { name: 'order', value: 1006 },
     update: { value: Math.max(1006, (await db.counter.findUnique({ where: { name: 'order' } }))?.value ?? 0) },
   })
-  console.log(`✓ ${orders.length} orders (next orderNumber = 1007)`)
+  console.log(`✓ ${orders.length} orders (next orderNumber = 1007, one in payment_review)`)
 
   // ── Summary ─────────────────────────────────────────────────────────────
   const counts = {
@@ -253,8 +377,10 @@ async function main() {
     products: await db.product.count(), customers: await db.customer.count(),
     orders: await db.order.count(), orderItems: await db.orderItem.count(),
     embeddings: await db.productEmbedding.count(), settings: await db.setting.count(),
+    silverRates: await db.silverRate.count(), bankAccounts: await db.bankAccount.count(),
+    payments: await db.payment.count(),
   }
-  console.log('🌱 Seed complete:', counts)
+  console.log('🌱 Silver Love seed complete:', counts)
 }
 
 main()

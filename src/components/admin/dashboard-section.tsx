@@ -33,6 +33,8 @@ import {
   Banknote,
   Users,
   ArrowLeft,
+  Wallet,
+  Gem,
 } from 'lucide-react'
 import { api, fmtDate, fmtMoney, fmtNumber, type DashboardStats } from '@/lib/client'
 
@@ -71,6 +73,7 @@ export function DashboardSection({ onNavigate }: { onNavigate: (s: SectionKey) =
 
   const t = stats.totals
   const weekly = stats.weekly ?? []
+  const silverRate = (stats as { silverRate?: { pricePerGram: number; unit: string } | null }).silverRate ?? null
 
   return (
     <div className="space-y-6">
@@ -84,6 +87,14 @@ export function DashboardSection({ onNavigate }: { onNavigate: (s: SectionKey) =
         <StatCard title="سفارش امروز" value={fmtNumber(t.todayOrders)} icon={ShoppingCart} tone="teal" onClick={() => onNavigate('orders')} />
         <StatCard title="مجموع فروش" value={fmtMoney(t.totalSales)} icon={Banknote} tone="emerald" onClick={() => onNavigate('orders')} />
         <StatCard title="مشتریان" value={fmtNumber(t.customers)} icon={Users} tone="violet" onClick={() => onNavigate('customers')} />
+        <StatCard title="پرداخت‌های منتظر بررسی" value={fmtNumber(t.paymentsReview ?? 0)} icon={Wallet} tone="amber" onClick={() => onNavigate('payments')} />
+        <StatCard
+          title="نرخ نقره (گرم)"
+          value={silverRate ? fmtNumber(silverRate.pricePerGram) : 'ثبت نشده'}
+          icon={Gem}
+          tone="teal"
+          onClick={() => onNavigate('silver')}
+        />
       </div>
 
       {/* Charts */}

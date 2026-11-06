@@ -37,6 +37,8 @@ import {
   KeyRound,
   Loader2,
   Bot,
+  Wallet,
+  Gem,
 } from 'lucide-react'
 import { toast } from 'sonner'
 import { api, type TelegramInfo, type User } from '@/lib/client'
@@ -52,6 +54,8 @@ export const SECTION_KEYS = [
   'products',
   'categories',
   'orders',
+  'payments',
+  'silver',
   'customers',
   'telegram',
   'ai',
@@ -65,6 +69,8 @@ export const SECTION_TITLES: Record<SectionKey, string> = {
   products: 'مدیریت محصولات',
   categories: 'دسته‌بندی‌ها',
   orders: 'سفارش‌ها',
+  payments: 'پرداخت',
+  silver: 'نرخ نقره',
   customers: 'مشتریان',
   telegram: 'تلگرام و ربات',
   ai: 'ابزارهای هوش مصنوعی',
@@ -76,6 +82,8 @@ const NAV_ICONS: Record<SectionKey, LucideIcon> = {
   products: Package,
   categories: Tags,
   orders: ShoppingCart,
+  payments: Wallet,
+  silver: Gem,
   customers: Users,
   telegram: Send,
   ai: Sparkles,

@@ -1,4 +1,4 @@
-// Telegram Commerce Platform — Prisma schema (SQLite)
+// Silver Love — Telegram Commerce Platform — Prisma schema (SQLite)
 // Database is the single source of truth for products, inventory, customers, orders.
 
 generator client {
@@ -65,9 +65,22 @@ model Product {
   createdAt         DateTime          @default(now())
   updatedAt         DateTime          @updatedAt
 
+  // Silver Love — optional product-specific specs (never required, never used for pricing)
+  sku               String? // کد محصول (وارد‌شده توسط فروشنده)
+  silverType        String? // نوع نقره (دست‌ساز، صنعتی، شمش…)
+  purity            String? // عیار (مثل 925)
+  weightGrams       Float? // وزن (گرم)
+  size              String? // سایز (حلقه/زنجیر/…)
+  dimensions        String? // ابعاد
+  brand             String? // برند یا سازنده
+  appearance        String? // مشخصات ظاهری
+  careInstructions  String? // شرایط نگهداری
+  authenticity      String? // اصالت و ضمانت
+
   telegramProducts TelegramProduct[]
   orderItems       OrderItem[]
   embedding        ProductEmbedding?
+  images           ProductImage[]
 }
 
 // ─── Customers & Orders ──────────────────────────────────────────────────────
@@ -100,6 +113,7 @@ model Order {
   createdAt    DateTime    @default(now())
   updatedAt    DateTime    @updatedAt
   items        OrderItem[]
+  payment      Payment?
 
   @@index([status])
   @@index([customerId])
@@ -129,6 +143,7 @@ model TelegramProduct {
   channelId       String
   messageId       Int
   lastContentHash String?
+  hasPhoto        Boolean  @default(false)
   publishedAt     DateTime @default(now())
   updatedAt       DateTime @updatedAt
 
@@ -181,4 +196,90 @@ model ActivityLog {
 
   @@index([type])
   @@index([createdAt])
+}
+
+// ─── Silver Love additions ───────────────────────────────────────────────────
+
+// Product gallery — the primary image is also mirrored into Product.imageUrl
+// for backward compatibility with channel publishing and the bot.
+model ProductImage {
+  id        String   @id @default(cuid())
+  productId String
+  product   Product  @relation(fields: [productId], references: [id], onDelete: Cascade)
+  url       String // relative API URL (/api/uploads/<name>)
+  isPrimary Boolean  @default(false)
+  sortOrder Int      @default(0)
+  createdAt DateTime @default(now())
+
+  @@index([productId])
+}
+
+// Manually-entered silver market rate (reference info only — NEVER used to
+// compute product prices). History is preserved; the latest active row wins.
+model SilverRate {
+  id             String   @id @default(cuid())
+  pricePerGram   Float // تومان به‌ازای هر گرم نقره
+  unit           String   @default("تومان/گرم")
+  note           String?
+  active         Boolean  @default(true)
+  createdByEmail String?
+  createdAt      DateTime @default(now())
+}
+
+// Store bank destinations for manual (card-to-card) payment.
+model BankAccount {
+  id            String   @id @default(cuid())
+  bankName      String
+  holderName    String
+  cardNumber    String
+  sheba         String?
+  accountNumber String?
+  note          String?
+  active        Boolean  @default(true)
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+}
+
+// Manual payment lifecycle per order (one-to-one). Approval is ALWAYS a human
+// decision — no OCR, no hash matching, no auto-expiry, no auto-approval.
+model Payment {
+  id              String         @id @default(cuid())
+  orderId         String         @unique
+  order           Order          @relation(fields: [orderId], references: [id], onDelete: Cascade)
+  status          String         @default("awaiting_payment") // awaiting_payment | payment_review | paid | rejected | refund_pending | refunded
+  amountSnapshot  Float
+  receiptImage    String? // filename inside upload/receipts/ (never publicly served)
+  payerName       String?
+  trackingNumber  String?
+  customerNote    String?
+  reviewedByEmail String?
+  reviewedAt      DateTime?
+  rejectReason    String?
+  createdAt       DateTime       @default(now())
+  updatedAt       DateTime       @updatedAt
+  events          PaymentEvent[]
+}
+
+// Audit trail for payment decisions (who approved/rejected, when, why).
+model PaymentEvent {
+  id         String   @id @default(cuid())
+  paymentId  String
+  payment    Payment  @relation(fields: [paymentId], references: [id], onDelete: Cascade)
+  type       String // receipt_submitted | resubmitted | approved | rejected | info
+  actorEmail String?
+  note       String?
+  createdAt  DateTime @default(now())
+
+  @@index([paymentId])
+}
+
+// AI assistant conversation history (multi-turn memory, survives restarts).
+model ConversationMessage {
+  id             String   @id @default(cuid())
+  telegramUserId String
+  role           String // user | assistant
+  content        String
+  createdAt      DateTime @default(now())
+
+  @@index([telegramUserId, createdAt])
 }

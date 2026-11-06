@@ -26,6 +26,15 @@ export async function requireAuth() {
   return user
 }
 
+/** Admin-only guard (silver rate writes, bank info, payment decisions). */
+export async function requireAdmin() {
+  const user = await requireAuth()
+  if (user.role !== 'admin') {
+    throw new ApiError(403, 'این عملیات فقط برای مدیر مجاز است')
+  }
+  return user
+}
+
 export function handleError(e: unknown): NextResponse {
   if (e instanceof ApiError) return fail(e.message, e.status)
   if (e instanceof ZodError) {

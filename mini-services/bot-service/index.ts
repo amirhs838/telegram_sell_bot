@@ -16,6 +16,7 @@ import {
   getUpdatesPolling,
   resolveMode,
   send,
+  sendPhotoUpload,
   type TelegramUpdate,
 } from './telegram'
 
@@ -43,6 +44,7 @@ function validateSimulateInput(body: unknown): UpdateInput {
   if (typeof b.callbackData === 'string') input.callbackData = b.callbackData
   if (typeof b.callbackId === 'string') input.callbackId = b.callbackId
   if (typeof b.action === 'string') input.action = b.action
+  if (typeof b.photoName === 'string') input.photo = { name: b.photoName } // simulated receipt photo
   return input
 }
 
@@ -94,6 +96,17 @@ function mapTelegramUpdate(u: TelegramUpdate): UpdateInput | null {
       callbackId: u.callback_query.id,
     }
   }
+  if (u.message?.photo && u.message.from && u.message.chat?.type === 'private') {
+    // largest photo variant
+    const sizes = u.message.photo
+    const largest = sizes[sizes.length - 1]
+    return {
+      telegramUserId: String(u.message.from.id),
+      firstName: u.message.from.first_name,
+      username: u.message.from.username,
+      photo: { fileId: largest?.file_id },
+    }
+  }
   if (u.message?.text && u.message.from && u.message.chat?.type === 'private') {
     return {
       telegramUserId: String(u.message.from.id),
@@ -139,7 +152,15 @@ async function pollingLoop(): Promise<void> {
           if (!input) continue
           const replies = await handleUpdate(input)
           for (const r of replies) {
-            await send(input.telegramUserId, r.text, r.keyboard)
+            if (r.imagePath) {
+              // product photo → upload the file; fall back to text on failure
+              const res = await sendPhotoUpload(input.telegramUserId, r.imagePath, r.text, r.keyboard)
+              if (!res.ok) {
+                await send(input.telegramUserId, r.text, r.keyboard)
+              }
+            } else {
+              await send(input.telegramUserId, r.text, r.keyboard)
+            }
           }
         } catch (e) {
           console.error('[bot-service] update handling error:', e)

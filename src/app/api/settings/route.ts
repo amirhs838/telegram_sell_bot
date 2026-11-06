@@ -20,6 +20,11 @@ const patchSchema = z.object({
     .max(100)
     .regex(/^@?[a-zA-Z0-9_]*$/, 'یوزرنیم تلگرام معتبر نیست')
     .optional(),
+  shippingPolicy: z.string().max(2000).optional(),
+  returnPolicy: z.string().max(2000).optional(),
+  warrantyPolicy: z.string().max(2000).optional(),
+  paymentNote: z.string().max(2000).optional(),
+  aiAssistantEnabled: z.enum(['true', 'false']).optional(),
 })
 
 export const PUT = route(async (req: NextRequest) => {
