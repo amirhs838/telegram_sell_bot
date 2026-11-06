@@ -31,10 +31,9 @@ import {
   Clock,
   ShoppingCart,
   Banknote,
+  ReceiptText,
   Users,
   ArrowLeft,
-  Wallet,
-  Gem,
 } from 'lucide-react'
 import { api, fmtDate, fmtMoney, fmtNumber, type DashboardStats } from '@/lib/client'
 
@@ -73,7 +72,7 @@ export function DashboardSection({ onNavigate }: { onNavigate: (s: SectionKey) =
 
   const t = stats.totals
   const weekly = stats.weekly ?? []
-  const silverRate = (stats as { silverRate?: { pricePerGram: number; unit: string } | null }).silverRate ?? null
+  const payCounts = stats.paymentStatusCounts ?? {}
 
   return (
     <div className="space-y-6">
@@ -84,17 +83,52 @@ export function DashboardSection({ onNavigate }: { onNavigate: (s: SectionKey) =
         <StatCard title="کم‌موجود" value={fmtNumber(t.lowStock)} icon={AlertTriangle} tone="amber" onClick={() => onNavigate('products')} />
         <StatCard title="ناموجود" value={fmtNumber(t.outOfStock)} icon={XCircle} tone="rose" onClick={() => onNavigate('products')} />
         <StatCard title="سفارش در انتظار" value={fmtNumber(t.pendingOrders)} icon={Clock} tone="amber" onClick={() => onNavigate('orders')} />
+        <StatCard
+          title="پرداخت‌های منتظر بررسی"
+          value={fmtNumber(t.paymentsAwaitingReview ?? 0)}
+          icon={ReceiptText}
+          tone="violet"
+          onClick={() => onNavigate('payments')}
+        />
         <StatCard title="سفارش امروز" value={fmtNumber(t.todayOrders)} icon={ShoppingCart} tone="teal" onClick={() => onNavigate('orders')} />
         <StatCard title="مجموع فروش" value={fmtMoney(t.totalSales)} icon={Banknote} tone="emerald" onClick={() => onNavigate('orders')} />
         <StatCard title="مشتریان" value={fmtNumber(t.customers)} icon={Users} tone="violet" onClick={() => onNavigate('customers')} />
-        <StatCard title="پرداخت‌های منتظر بررسی" value={fmtNumber(t.paymentsReview ?? 0)} icon={Wallet} tone="amber" onClick={() => onNavigate('payments')} />
-        <StatCard
-          title="نرخ نقره (گرم)"
-          value={silverRate ? fmtNumber(silverRate.pricePerGram) : 'ثبت نشده'}
-          icon={Gem}
-          tone="teal"
-          onClick={() => onNavigate('silver')}
-        />
+      </div>
+
+      {/* Payment status summary */}
+      <div
+        className="flex flex-wrap items-center gap-x-4 gap-y-2 rounded-xl border bg-card p-3 text-sm shadow-sm"
+        role="group"
+        aria-label="خلاصه وضعیت پرداخت سفارش‌ها"
+      >
+        <span className="text-xs font-medium text-muted-foreground">وضعیت پرداخت سفارش‌ها:</span>
+        <button
+          type="button"
+          onClick={() => onNavigate('payments')}
+          className="flex items-center gap-1.5 rounded-md px-1.5 py-1 transition-colors hover:bg-accent focus-visible:ring-2 focus-visible:ring-ring/50 outline-none"
+        >
+          <span className="size-2 rounded-full bg-emerald-500" aria-hidden />
+          پرداخت شده
+          <span className="font-semibold tabular-nums-fa">{fmtNumber(payCounts.paid ?? 0)}</span>
+        </button>
+        <button
+          type="button"
+          onClick={() => onNavigate('payments')}
+          className="flex items-center gap-1.5 rounded-md px-1.5 py-1 transition-colors hover:bg-accent focus-visible:ring-2 focus-visible:ring-ring/50 outline-none"
+        >
+          <span className="size-2 rounded-full bg-sky-500" aria-hidden />
+          رسید در انتظار بررسی
+          <span className="font-semibold tabular-nums-fa">{fmtNumber(payCounts.payment_review ?? 0)}</span>
+        </button>
+        <button
+          type="button"
+          onClick={() => onNavigate('orders')}
+          className="flex items-center gap-1.5 rounded-md px-1.5 py-1 transition-colors hover:bg-accent focus-visible:ring-2 focus-visible:ring-ring/50 outline-none"
+        >
+          <span className="size-2 rounded-full bg-amber-500" aria-hidden />
+          در انتظار پرداخت
+          <span className="font-semibold tabular-nums-fa">{fmtNumber(payCounts.awaiting_payment ?? 0)}</span>
+        </button>
       </div>
 
       {/* Charts */}
@@ -262,7 +296,7 @@ function DashboardSkeleton() {
   return (
     <div className="space-y-6">
       <div className="grid grid-cols-2 gap-3 md:gap-4 lg:grid-cols-4">
-        {Array.from({ length: 8 }).map((_, i) => (
+        {Array.from({ length: 9 }).map((_, i) => (
           <div key={i} className="rounded-xl border p-4">
             <div className="flex items-center justify-between">
               <div className="space-y-2">

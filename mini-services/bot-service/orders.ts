@@ -28,69 +28,40 @@ export class ProductUnavailableError extends Error {
 
 const VALID_STATUSES = ['pending', 'confirmed', 'processing', 'shipped', 'completed', 'cancelled']
 
-export const PAYMENT_STATUSES = [
-  'awaiting_payment',
-  'payment_review',
-  'paid',
-  'rejected',
-  'refund_pending',
-  'refunded',
-] as const
-
-export type OrderItemInput = { productId: string; quantity: number }
-
 export type CreateOrderInput = {
-  customer: { telegramUserId: string; firstName: string; username?: string | null }
+  customer: {
+    telegramUserId: string
+    /** Real Telegram profile name — the ONLY thing written to Customer.firstName */
+    telegramFirstName?: string | null
+    username?: string | null
+  }
   productId: string
   quantity: number
+  /** Full name the customer typed — stored ONLY in the Order.customerName snapshot */
   name: string
   phone: string
   address: string
 }
 
-export type CreateOrderMultiInput = {
-  customer: { telegramUserId: string; firstName: string; username?: string | null }
-  items: OrderItemInput[]
-  name: string
-  phone: string
-  address: string
-}
-
-/**
- * Transactional multi-item order creation:
- * stock check + decrement per item, atomic order number, customer upsert,
- * name/price snapshots, out-of-stock flip, activity log.
- */
-export async function createOrderMulti(input: CreateOrderMultiInput) {
-  const { customer, items, name, phone, address } = input
-  if (!Array.isArray(items) || items.length === 0) {
-    throw new ProductUnavailableError()
-  }
+export async function createOrder(input: CreateOrderInput) {
+  const { customer, productId, quantity, name, phone, address } = input
 
   const order = await db.$transaction(async (tx) => {
-    // a. fetch + validate every product first
-    const products = []
-    for (const it of items) {
-      const product = await tx.product.findUnique({ where: { id: it.productId } })
-      if (!product || product.status !== 'active') {
-        throw new ProductUnavailableError()
-      }
-      if (it.quantity < 1) {
-        throw new InsufficientStockError(product.stock)
-      }
-      products.push({ product, quantity: it.quantity })
+    // a. re-fetch product — must exist and be active
+    const product = await tx.product.findUnique({ where: { id: productId } })
+    if (!product || product.status !== 'active') {
+      throw new ProductUnavailableError()
     }
 
-    // b. atomic conditional decrement per item
-    for (const { product, quantity } of products) {
-      const updated = await tx.product.updateMany({
-        where: { id: product.id, stock: { gte: quantity } },
-        data: { stock: { decrement: quantity } },
-      })
-      if (updated.count === 0) {
-        throw new InsufficientStockError(product.stock)
-      }
+    // b. atomic conditional decrement (race-safe on SQLite single-writer)
+    const updated = await tx.product.updateMany({
+      where: { id: productId, stock: { gte: quantity } },
+      data: { stock: { decrement: quantity } },
+    })
+    if (updated.count === 0) {
+      throw new InsufficientStockError(product.stock)
     }
+    const remainingStock = product.stock - quantity
 
     // c. atomic order number allocation
     const counter = await tx.counter.upsert({
@@ -100,26 +71,26 @@ export async function createOrderMulti(input: CreateOrderMultiInput) {
     })
     const orderNumber = counter.value
 
-    // d. upsert customer by telegramUserId
+    // d. upsert customer by telegramUserId — Customer.firstName always keeps the
+    //    REAL Telegram profile name; the typed full name goes only into the
+    //    Order.customerName snapshot below (bug fix: never overwrite the profile name).
     const dbCustomer = await tx.customer.upsert({
       where: { telegramUserId: customer.telegramUserId },
       create: {
         telegramUserId: customer.telegramUserId,
-        firstName: customer.firstName,
+        firstName: customer.telegramFirstName || name,
         lastName: null,
         phone,
         address,
         telegramUsername: customer.username ?? null,
       },
       update: {
-        firstName: customer.firstName,
         phone,
         address,
         telegramUsername: customer.username ?? null,
+        // firstName intentionally NOT updated — Telegram profile is the source of truth
       },
     })
-
-    const subtotal = products.reduce((s, x) => s + x.product.price * x.quantity, 0)
 
     // e. order (customerName is a snapshot)
     const created = await tx.order.create({
@@ -127,47 +98,34 @@ export async function createOrderMulti(input: CreateOrderMultiInput) {
         orderNumber,
         customerId: dbCustomer.id,
         status: 'pending',
-        subtotal,
+        subtotal: product.price * quantity,
         discount: 0,
-        total: subtotal,
-        customerName: name,
+        total: product.price * quantity,
+        customerName: name, // snapshot of the name the customer typed
+        paymentStatus: 'awaiting_payment',
         address,
         phone,
       },
     })
 
-    // f. order items (name + unit price snapshots)
-    for (const { product, quantity } of products) {
-      await tx.orderItem.create({
-        data: {
-          orderId: created.id,
-          productId: product.id,
-          productNameSnapshot: product.name,
-          unitPriceSnapshot: product.price,
-          quantity,
-          total: product.price * quantity,
-        },
-      })
-    }
-
-    // g. stock hit zero → mark out of stock
-    for (const { product, quantity } of products) {
-      const remaining = product.stock - quantity
-      if (remaining === 0) {
-        await tx.product.update({ where: { id: product.id }, data: { status: 'out_of_stock' } })
-      }
-    }
-
-    // h. payment shell — awaiting payment, exact amount snapshot
-    await tx.payment.create({
+    // f. order item (name + unit price snapshots)
+    await tx.orderItem.create({
       data: {
         orderId: created.id,
-        status: 'awaiting_payment',
-        amountSnapshot: subtotal,
+        productId: product.id,
+        productNameSnapshot: product.name,
+        unitPriceSnapshot: product.price,
+        quantity,
+        total: product.price * quantity,
       },
     })
 
-    // i. activity log — NO phone/address (privacy)
+    // g. stock hit zero → mark out of stock
+    if (remainingStock === 0) {
+      await tx.product.update({ where: { id: product.id }, data: { status: 'out_of_stock' } })
+    }
+
+    // h. activity log — NO phone/address (privacy)
     await tx.activityLog.create({
       data: {
         level: 'info',
@@ -175,23 +133,21 @@ export async function createOrderMulti(input: CreateOrderMultiInput) {
         message: `سفارش #${orderNumber} ثبت شد`,
         data: JSON.stringify({
           orderId: created.id,
-          items: products.map((x) => ({ productId: x.product.id, quantity: x.quantity })),
+          productId: product.id,
+          quantity,
           total: created.total,
           telegramUserId: customer.telegramUserId,
         }),
       },
     })
 
-    return { order: created, products }
+    return { order: created, product, remainingStock }
   })
 
   // Seller notification (best-effort, after commit)
   const { adminChatId: adminChat } = await loadConfig()
   if (adminChat) {
     try {
-      const itemLines = order.products.map(
-        (x) => `🛍 ${x.product.name} × ${x.quantity} — ${formatMoney(x.product.price * x.quantity)}`,
-      )
       await send(
         adminChat,
         [
@@ -203,8 +159,9 @@ export async function createOrderMulti(input: CreateOrderMultiInput) {
           `📱 ${phone}`,
           `📍 ${address}`,
           '',
-          ...itemLines,
-          `💳 مبلغ کل: ${formatMoney(order.order.total)}`,
+          `🛍 ${order.product.name}`,
+          `🔢 تعداد: ${quantity}`,
+          `💰 مبلغ: ${formatMoney(order.order.total)}`,
           '',
           '🟡 در انتظار بررسی',
         ].join('\n'),
@@ -221,17 +178,6 @@ export async function createOrderMulti(input: CreateOrderMultiInput) {
   }
 
   return order.order
-}
-
-/** Single-item convenience wrapper (legacy flow + deep links). */
-export async function createOrder(input: CreateOrderInput) {
-  return createOrderMulti({
-    customer: input.customer,
-    items: [{ productId: input.productId, quantity: input.quantity }],
-    name: input.name,
-    phone: input.phone,
-    address: input.address,
-  })
 }
 
 /**
@@ -323,87 +269,4 @@ function customerStatusMessage(status: string, orderNumber: number): string | nu
     default:
       return null
   }
-}
-
-// ─── Manual payment lifecycle (Silver Love) ────────────────────────────────
-
-export function paymentStatusFa(status: string): string {
-  switch (status) {
-    case 'awaiting_payment':
-      return 'در انتظار پرداخت'
-    case 'payment_review':
-      return 'رسید در انتظار بررسی'
-    case 'paid':
-      return 'پرداخت تأیید شده'
-    case 'rejected':
-      return 'پرداخت رد شده'
-    case 'refund_pending':
-      return 'بازپرداخت در انتظار'
-    case 'refunded':
-      return 'بازپرداخت شد'
-    default:
-      return status
-  }
-}
-
-/** Active bank destination for customer payment instructions. */
-export async function getActiveBankAccount() {
-  return db.bankAccount.findFirst({ where: { active: true }, orderBy: { createdAt: 'asc' } })
-}
-
-/**
- * Attach a receipt image to the customer's latest payable order
- * (awaiting_payment or rejected). Idempotent per state — resubmission is
- * allowed after a rejection. Admin approval is ALWAYS manual (panel).
- */
-export async function attachReceiptToOrder(
-  orderId: string,
-  receipt: { receiptImage: string; payerName?: string | null; trackingNumber?: string | null; customerNote?: string | null },
-): Promise<{ ok: boolean; orderNumber?: number; status?: string; error?: string }> {
-  const payment = await db.payment.findUnique({ where: { orderId }, include: { order: true } })
-  if (!payment) return { ok: false, error: 'payment missing' }
-  if (payment.status === 'paid') {
-    return { ok: false, orderNumber: payment.order.orderNumber, status: payment.status, error: 'already paid' }
-  }
-  if (payment.status === 'refunded' || payment.status === 'refund_pending') {
-    return { ok: false, orderNumber: payment.order.orderNumber, status: payment.status, error: 'refunded' }
-  }
-  const isResubmit = payment.status === 'rejected' || payment.status === 'payment_review'
-  const updated = await db.payment.update({
-    where: { id: payment.id },
-    data: {
-      status: 'payment_review',
-      receiptImage: receipt.receiptImage,
-      payerName: receipt.payerName ?? payment.payerName,
-      trackingNumber: receipt.trackingNumber ?? payment.trackingNumber,
-      customerNote: receipt.customerNote ?? payment.customerNote,
-      rejectReason: null,
-      events: {
-        create: {
-          type: isResubmit ? 'resubmitted' : 'receipt_submitted',
-          note: 'رسید جدید توسط مشتری ارسال شد',
-        },
-      },
-    },
-  })
-  await db.activityLog.create({
-    data: {
-      level: 'info',
-      type: 'payment.receipt_submitted',
-      message: `رسید پرداخت سفارش #${payment.order.orderNumber} دریافت شد — در انتظار بررسی ادمین`,
-      data: JSON.stringify({ orderId: orderId, paymentId: payment.id }),
-    },
-  })
-  return { ok: true, orderNumber: payment.order.orderNumber, status: updated.status }
-}
-
-/** Customer's most recent order whose payment can receive a receipt. */
-export async function findPayableOrderForCustomer(telegramUserId: string) {
-  const customer = await db.customer.findUnique({ where: { telegramUserId } })
-  if (!customer) return null
-  return db.order.findFirst({
-    where: { customerId: customer.id, payment: { status: { in: ['awaiting_payment', 'rejected'] } } },
-    orderBy: { createdAt: 'desc' },
-    include: { payment: true },
-  })
 }

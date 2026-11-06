@@ -16,7 +16,8 @@ import {
   getUpdatesPolling,
   resolveMode,
   send,
-  sendPhotoUpload,
+  sendPhoto,
+  type PhotoSource,
   type TelegramUpdate,
 } from './telegram'
 
@@ -44,7 +45,15 @@ function validateSimulateInput(body: unknown): UpdateInput {
   if (typeof b.callbackData === 'string') input.callbackData = b.callbackData
   if (typeof b.callbackId === 'string') input.callbackId = b.callbackId
   if (typeof b.action === 'string') input.action = b.action
-  if (typeof b.photoName === 'string') input.photo = { name: b.photoName } // simulated receipt photo
+  if (b.photo && typeof b.photo === 'object') {
+    const p = b.photo as { fileId?: unknown; caption?: unknown }
+    if (typeof p.fileId === 'string' && p.fileId) {
+      input.photo = {
+        fileId: p.fileId,
+        ...(typeof p.caption === 'string' && p.caption ? { caption: p.caption } : {}),
+      }
+    }
+  }
   return input
 }
 
@@ -73,7 +82,7 @@ Bun.serve({
           return json({ error: e instanceof Error ? e.message : 'invalid input' }, 400)
         }
         const replies: Reply[] = await handleUpdate(input)
-        return json({ replies })
+        return json({ replies: replies.map(sanitizeReplyForSim) })
       }
 
       return json({ error: 'not found' }, 404)
@@ -86,6 +95,25 @@ Bun.serve({
 
 // ─── Telegram long polling (activates when a real bot is connected) ──────────────
 
+/** JSON-safe view of a Reply for the simulator: buffers → size summary. */
+function sanitizeReplyForSim(r: Reply): Record<string, unknown> {
+  let photo: Record<string, unknown> | undefined
+  if (typeof r.photo === 'string') {
+    photo = { kind: 'url', url: r.photo }
+  } else if (r.photo && typeof r.photo === 'object') {
+    photo = {
+      kind: 'buffer',
+      filename: r.photo.filename,
+      bytes: r.photo.buffer.length,
+    }
+  }
+  return {
+    text: r.text,
+    ...(r.keyboard ? { keyboard: r.keyboard } : {}),
+    ...(photo ? { photo } : {}),
+  }
+}
+
 function mapTelegramUpdate(u: TelegramUpdate): UpdateInput | null {
   if (u.callback_query) {
     return {
@@ -96,26 +124,40 @@ function mapTelegramUpdate(u: TelegramUpdate): UpdateInput | null {
       callbackId: u.callback_query.id,
     }
   }
-  if (u.message?.photo && u.message.from && u.message.chat?.type === 'private') {
-    // largest photo variant
-    const sizes = u.message.photo
-    const largest = sizes[sizes.length - 1]
-    return {
-      telegramUserId: String(u.message.from.id),
-      firstName: u.message.from.first_name,
-      username: u.message.from.username,
-      photo: { fileId: largest?.file_id },
+  if (u.message && u.message.from && u.message.chat?.type === 'private') {
+    // photos take priority over text (a caption rides along as customerNote)
+    const photos = u.message.photo
+    if (Array.isArray(photos) && photos.length > 0) {
+      const largest = photos.reduce((a, b) =>
+        b.width * b.height > a.width * a.height ? b : photos[0],
+      )
+      return {
+        telegramUserId: String(u.message.from.id),
+        firstName: u.message.from.first_name,
+        username: u.message.from.username,
+        photo: { fileId: largest.file_id, caption: u.message.caption },
+      }
     }
-  }
-  if (u.message?.text && u.message.from && u.message.chat?.type === 'private') {
-    return {
-      telegramUserId: String(u.message.from.id),
-      firstName: u.message.from.first_name,
-      username: u.message.from.username,
-      text: u.message.text,
+    if (u.message.text) {
+      return {
+        telegramUserId: String(u.message.from.id),
+        firstName: u.message.from.first_name,
+        username: u.message.from.username,
+        text: u.message.text,
+      }
     }
   }
   return null
+}
+
+/** Deliver one reply: photo replies go through multipart sendPhoto. */
+async function deliver(chatId: string, r: Reply): Promise<void> {
+  if (r.photo) {
+    const source: PhotoSource = r.photo
+    await sendPhoto(chatId, source, r.text, r.keyboard)
+  } else {
+    await send(chatId, r.text, r.keyboard)
+  }
 }
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms))
@@ -140,7 +182,8 @@ async function pollingLoop(): Promise<void> {
         currentToken = token
         offset = 0 // offsets are per-bot; start fresh
       }
-      const updates = await getUpdatesPolling(offset, 30)
+      // 25s server-side long-poll; the HTTP timeout (35s) always exceeds it
+      const updates = await getUpdatesPolling(offset, 25)
       if (updates === null) {
         await sleep(3000) // backoff on API failure
         continue
@@ -152,15 +195,7 @@ async function pollingLoop(): Promise<void> {
           if (!input) continue
           const replies = await handleUpdate(input)
           for (const r of replies) {
-            if (r.imagePath) {
-              // product photo → upload the file; fall back to text on failure
-              const res = await sendPhotoUpload(input.telegramUserId, r.imagePath, r.text, r.keyboard)
-              if (!res.ok) {
-                await send(input.telegramUserId, r.text, r.keyboard)
-              }
-            } else {
-              await send(input.telegramUserId, r.text, r.keyboard)
-            }
+            await deliver(input.telegramUserId, r)
           }
         } catch (e) {
           console.error('[bot-service] update handling error:', e)

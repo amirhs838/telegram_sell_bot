@@ -3,8 +3,7 @@
  *
  * Two modes (resolved dynamically, panel/DB config wins over env):
  *  - REAL  (a bot token exists in DB Setting or env && not mock-forced): real HTTP
- *          calls to api.telegram.org (12s timeout, errors logged to ActivityLog,
- *          never thrown).
+ *          calls to api.telegram.org (errors logged to ActivityLog, never thrown).
  *  - MOCK  (no token anywhere, or env TELEGRAM_MOCK === 'true' with no panel
  *          token): every outgoing call is recorded as an ActivityLog row
  *          (type 'telegram_out', clearly labeled simulation).
@@ -12,14 +11,18 @@
  * The config is re-read from the Setting table every ~15s, so connecting a bot
  * from the admin panel takes effect without restarting this service.
  */
-import path from 'node:path'
-import fs from 'node:fs/promises'
 import type { InlineButton } from '../../src/lib/telegram-render'
 import { db } from './db'
 
 const TG_API = 'https://api.telegram.org'
 const HTTP_TIMEOUT_MS = 12_000
+/** Long-poll uses a 25s server-side wait; the HTTP timeout must exceed it. */
+const LONG_POLL_TIMEOUT_MS = 35_000
+const DOWNLOAD_TIMEOUT_MS = 30_000
 const CONFIG_TTL_MS = 15_000
+
+/** Photo source for sendPhoto: an http(s) URL string, or an in-memory file. */
+export type PhotoSource = string | { buffer: Buffer; filename: string }
 
 type TgRuntimeConfig = {
   botToken: string
@@ -111,15 +114,16 @@ async function logEvent(
 
 export type TgResult = { ok: boolean; result?: unknown; error?: string }
 
-export async function callTelegramApi(
+async function callTelegramApi(
   method: string,
   payload: Record<string, unknown>,
+  timeoutMs = HTTP_TIMEOUT_MS,
 ): Promise<TgResult> {
   const cfg = await loadConfig()
   const token = cfg.botToken
   if (!token) return { ok: false, error: 'no token' }
   const controller = new AbortController()
-  const timer = setTimeout(() => controller.abort(), HTTP_TIMEOUT_MS)
+  const timer = setTimeout(() => controller.abort(), timeoutMs)
   try {
     const res = await fetch(`${TG_API}/bot${token}/${method}`, {
       method: 'POST',
@@ -173,59 +177,127 @@ export async function send(
   return result
 }
 
+function mimeFor(filename: string): string {
+  const ext = filename.toLowerCase().split('.').pop() ?? ''
+  if (ext === 'png') return 'image/png'
+  if (ext === 'jpg' || ext === 'jpeg') return 'image/jpeg'
+  if (ext === 'webp') return 'image/webp'
+  if (ext === 'gif') return 'image/gif'
+  return 'application/octet-stream'
+}
+
 /**
- * Send a photo by uploading a local file (multipart sendPhoto).
- * Mock mode → ActivityLog row. Never throws.
+ * Send a photo with an HTML caption + optional inline keyboard.
+ * `source` is either an http(s) URL string or {buffer, filename} (multipart upload).
+ * Mock mode → ActivityLog row with type 'photo' instead of a real call.
+ * Never throws.
  */
-export async function sendPhotoUpload(
+export async function sendPhoto(
   chatId: string | number,
-  filePath: string,
+  source: PhotoSource,
   caption: string,
   keyboard?: InlineButton[][],
 ): Promise<TgResult> {
   await loadConfig()
+  const describe = typeof source === 'string' ? source : source.filename
   if (isMockMode()) {
-    await logEvent('info', 'telegram_out', `[حالت شبیه‌سازی] sendPhoto(file) → ${chatId}`, {
+    await logEvent('info', 'telegram_out', `[حالت شبیه‌سازی] sendPhoto → ${chatId}`, {
       chatId: String(chatId),
-      file: path.basename(filePath),
-      preview: caption.slice(0, 400),
+      type: 'photo',
+      source: describe,
+      captionPreview: caption.slice(0, 600),
+      hasKeyboard: Array.isArray(keyboard) && keyboard.length > 0,
     })
     return { ok: true }
   }
   const cfg = await loadConfig()
   if (!cfg.botToken) return { ok: false, error: 'no token' }
+  const controller = new AbortController()
+  const timer = setTimeout(() => controller.abort(), DOWNLOAD_TIMEOUT_MS)
   try {
-    const buf = await fs.readFile(filePath)
     const form = new FormData()
     form.append('chat_id', String(chatId))
     form.append('caption', caption)
     form.append('parse_mode', 'HTML')
-    if (keyboard?.length) {
+    if (keyboard && keyboard.length > 0) {
       form.append('reply_markup', JSON.stringify({ inline_keyboard: keyboard }))
     }
-    form.append(
-      'photo',
-      new Blob([new Uint8Array(buf)], { type: 'image/jpeg' }),
-      path.basename(filePath),
-    )
+    if (typeof source === 'string') {
+      form.append('photo', source)
+    } else {
+      form.append(
+        'photo',
+        new Blob([new Uint8Array(source.buffer)], { type: mimeFor(source.filename) }),
+        source.filename,
+      )
+    }
     const res = await fetch(`${TG_API}/bot${cfg.botToken}/sendPhoto`, {
       method: 'POST',
       body: form,
-      signal: AbortSignal.timeout(HTTP_TIMEOUT_MS * 2),
+      signal: controller.signal,
     })
     const json = (await res.json().catch(() => null)) as
-      | { ok: boolean; description?: string }
+      | { ok: boolean; result?: unknown; description?: string }
       | null
-    if (!json || !json.ok) {
-      const err = json?.description ?? `HTTP ${res.status}`
-      await logEvent('error', 'telegram_error', `sendPhoto(file) → ${chatId} failed: ${err}`)
-      return { ok: false, error: err }
+    if (!json) {
+      await logEvent('error', 'telegram_error', `sendPhoto → ${chatId} bad response (${res.status})`)
+      return { ok: false, error: `bad response (${res.status})` }
     }
-    return { ok: true }
+    if (!json.ok) {
+      await logEvent('error', 'telegram_error', `sendPhoto → ${chatId} failed: ${json.description}`)
+      return { ok: false, error: json.description || `telegram ${res.status}` }
+    }
+    return { ok: true, result: json.result }
   } catch (e) {
     const msg = e instanceof Error ? e.message : String(e)
-    await logEvent('error', 'telegram_error', `sendPhoto(file) failed: ${msg}`)
+    await logEvent('error', 'telegram_error', `sendPhoto → ${chatId} failed: ${msg}`)
     return { ok: false, error: msg }
+  } finally {
+    clearTimeout(timer)
+  }
+}
+
+/** Resolve a Telegram file_id → (file_path). Mock mode → not-ok result. Never throws. */
+export async function getFileInfo(fileId: string): Promise<TgResult> {
+  await loadConfig()
+  if (isMockMode()) {
+    await logEvent('info', 'telegram_out', `[حالت شبیه‌سازی] getFile → ${fileId}`, {
+      type: 'file_info',
+      fileId,
+    })
+    return { ok: false, error: 'mock mode: no real file to download' }
+  }
+  return callTelegramApi('getFile', { file_id: fileId })
+}
+
+/**
+ * Download a Telegram file by its file_path (from getFile).
+ * URL: https://api.telegram.org/file/bot<token>/<file_path>
+ * Never throws; returns the raw Buffer on success.
+ */
+export async function downloadFile(filePath: string): Promise<{ ok: boolean; buffer?: Buffer; error?: string }> {
+  const cfg = await loadConfig()
+  const token = cfg.botToken
+  if (!token) return { ok: false, error: 'no token' }
+  const controller = new AbortController()
+  const timer = setTimeout(() => controller.abort(), DOWNLOAD_TIMEOUT_MS)
+  try {
+    const res = await fetch(`${TG_API}/file/bot${token}/${filePath}`, {
+      signal: controller.signal,
+    })
+    if (!res.ok) {
+      const msg = `download failed (${res.status})`
+      await logEvent('error', 'telegram_error', `downloadFile failed: ${msg}`)
+      return { ok: false, error: msg }
+    }
+    const buf = Buffer.from(await res.arrayBuffer())
+    return { ok: true, buffer: buf }
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : String(e)
+    await logEvent('error', 'telegram_error', `downloadFile failed: ${msg}`)
+    return { ok: false, error: msg }
+  } finally {
+    clearTimeout(timer)
   }
 }
 
@@ -252,7 +324,8 @@ export type TelegramUpdate = {
     chat: { id: number | string; type: string }
     from?: { id: number; first_name?: string; username?: string }
     text?: string
-    photo?: Array<{ file_id: string; width: number; height: number }>
+    photo?: { file_id: string; file_unique_id?: string; width: number; height: number }[]
+    caption?: string
   }
   callback_query?: {
     id: string
@@ -261,16 +334,24 @@ export type TelegramUpdate = {
   }
 }
 
+/**
+ * Long-poll getUpdates. `timeoutSeconds` is the server-side wait — the HTTP
+ * timeout (35s) always exceeds it so the request is never aborted mid-poll.
+ */
 export async function getUpdatesPolling(
   offset: number,
-  timeoutSeconds = 30,
+  timeoutSeconds = 25,
 ): Promise<TelegramUpdate[] | null> {
   await loadConfig()
-  const result = await callTelegramApi('getUpdates', {
-    offset,
-    timeout: timeoutSeconds,
-    allowed_updates: ['message', 'callback_query'],
-  })
+  const result = await callTelegramApi(
+    'getUpdates',
+    {
+      offset,
+      timeout: timeoutSeconds,
+      allowed_updates: ['message', 'callback_query'],
+    },
+    LONG_POLL_TIMEOUT_MS,
+  )
   if (!result.ok) return null
   return (result.result as TelegramUpdate[]) ?? []
 }

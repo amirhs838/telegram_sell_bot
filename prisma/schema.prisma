@@ -1,4 +1,4 @@
-// Silver Love — Telegram Commerce Platform — Prisma schema (SQLite)
+// Telegram Commerce Platform — Prisma schema (SQLite)
 // Database is the single source of truth for products, inventory, customers, orders.
 
 generator client {
@@ -52,35 +52,51 @@ model Product {
   slug              String            @unique
   description       String?
   shortDescription  String?
+  // Final seller-approved price (Toman). NEVER auto-computed from silver rate,
+  // weight or karat — see MASTER PROMPT §3 pricing law.
   price             Float             @default(0)
   compareAtPrice    Float?
   stock             Int               @default(0)
   lowStockThreshold Int               @default(5)
   categoryId        String?
   category          Category?         @relation(fields: [categoryId], references: [id], onDelete: SetNull)
-  imageUrl          String?
+  imageUrl          String? // denormalized PRIMARY image (kept in sync with images[])
   status            String            @default("draft") // draft | active | inactive | out_of_stock
   aiGenerated       Boolean           @default(false)
   tags              String? // JSON array string
   createdAt         DateTime          @default(now())
   updatedAt         DateTime          @updatedAt
 
-  // Silver Love — optional product-specific specs (never required, never used for pricing)
-  sku               String? // کد محصول (وارد‌شده توسط فروشنده)
-  silverType        String? // نوع نقره (دست‌ساز، صنعتی، شمش…)
-  purity            String? // عیار (مثل 925)
+  // ─── Silver Love: optional per-type specs (never required, never priced) ───
+  productCode       String? @unique // کد محصول
+  silverType        String? // نوع نقره (استرلینگ، عیار ۹۲۵، …)
+  fineness          Int? // عیار (875 / 925 / 950 / 999)
   weightGrams       Float? // وزن (گرم)
-  size              String? // سایز (حلقه/زنجیر/…)
+  size              String? // سایز (حلقه/دستبند) یا Free
   dimensions        String? // ابعاد
   brand             String? // برند یا سازنده
   appearance        String? // مشخصات ظاهری
   careInstructions  String? // شرایط نگهداری
-  authenticity      String? // اصالت و ضمانت
+  authenticityNote  String? // اصالت و ضمانت
 
+  images      ProductImage[]
   telegramProducts TelegramProduct[]
   orderItems       OrderItem[]
   embedding        ProductEmbedding?
-  images           ProductImage[]
+}
+
+// ─── Product gallery (multiple images, one primary) ─────────────────────────
+
+model ProductImage {
+  id        String   @id @default(cuid())
+  productId String
+  product   Product  @relation(fields: [productId], references: [id], onDelete: Cascade)
+  url       String // relative /api/uploads/<name> or absolute URL
+  isPrimary Boolean  @default(false)
+  sortOrder Int      @default(0)
+  createdAt DateTime @default(now())
+
+  @@index([productId])
 }
 
 // ─── Customers & Orders ──────────────────────────────────────────────────────
@@ -93,6 +109,10 @@ model Customer {
   lastName        String?
   phone           String?
   address         String?
+  // Operator handoff flag raised by the AI assistant (panel sees these)
+  handoffRequested     Boolean  @default(false)
+  handoffNote          String?
+  handoffRequestedAt   DateTime?
   createdAt       DateTime  @default(now())
   updatedAt       DateTime  @updatedAt
   orders          Order[]
@@ -104,18 +124,23 @@ model Order {
   customerId   String
   customer     Customer    @relation(fields: [customerId], references: [id], onDelete: Restrict)
   status       String      @default("pending") // pending|confirmed|processing|shipped|completed|cancelled
+  // Manual payment dimension (separate from fulfilment status):
+  // awaiting_payment|payment_review|paid|rejected|refund_pending|refunded
+  paymentStatus String     @default("awaiting_payment")
   subtotal     Float
   discount     Float       @default(0)
   total        Float
   customerName String // snapshot
   address      String
   phone        String
+  trackingCode String? // کد رهگیری پستی (admin-managed)
   createdAt    DateTime    @default(now())
   updatedAt    DateTime    @updatedAt
   items        OrderItem[]
-  payment      Payment?
+  payments     Payment[]
 
   @@index([status])
+  @@index([paymentStatus])
   @@index([customerId])
 }
 
@@ -133,6 +158,71 @@ model OrderItem {
   @@index([orderId])
 }
 
+// ─── Manual card-to-card payments (no gateway — admin approves by hand) ──────
+
+model Payment {
+  id             String    @id @default(cuid())
+  orderId        String
+  order          Order     @relation(fields: [orderId], references: [id], onDelete: Cascade)
+  amount         Float // snapshot of order total at submission time
+  receiptUrl     String // PRIVATE path: /api/receipts/<name> (never public)
+  payerName      String?
+  trackingNumber String? // شماره پیگیری واریز (informational only — no dedup logic)
+  customerNote   String?
+  status         String    @default("awaiting_review") // awaiting_review|approved|rejected
+  reviewNote     String? // admin note — REQUIRED when rejecting
+  reviewedBy     String? // admin user id (audit)
+  reviewedByName String?
+  reviewedAt     DateTime?
+  createdAt      DateTime  @default(now())
+  updatedAt      DateTime  @updatedAt
+
+  @@index([orderId])
+  @@index([status])
+}
+
+// Bank card destinations the admin manages from the panel (multiple allowed)
+model PaymentDestination {
+  id            String   @id @default(cuid())
+  bankName      String
+  accountHolder String
+  cardNumber    String
+  sheba         String?
+  accountNumber String?
+  note          String?
+  active        Boolean  @default(true)
+  sortOrder     Int      @default(0)
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+}
+
+// ─── Manual silver rate (admin-entered; reference info ONLY — never prices products) ───
+
+model SilverRate {
+  id           String   @id @default(cuid())
+  ratePerGram  Float // تومان per gram of silver
+  unit         String   @default("تومان / گرم")
+  note         String? // توضیحات یا منبع نرخ
+  active       Boolean  @default(true)
+  createdBy    String? // admin user id
+  createdByName String?
+  createdAt    DateTime @default(now())
+
+  @@index([createdAt])
+}
+
+// ─── AI assistant conversation memory (survives restarts) ───────────────────
+
+model ChatMessage {
+  id             String   @id @default(cuid())
+  telegramUserId String
+  role           String // user | assistant
+  content        String
+  createdAt      DateTime @default(now())
+
+  @@index([telegramUserId, createdAt])
+}
+
 // ─── Telegram integration ────────────────────────────────────────────────────
 
 // Mapping product → channel post, enables editing existing posts (no duplicates)
@@ -143,7 +233,6 @@ model TelegramProduct {
   channelId       String
   messageId       Int
   lastContentHash String?
-  hasPhoto        Boolean  @default(false)
   publishedAt     DateTime @default(now())
   updatedAt       DateTime @updatedAt
 
@@ -196,90 +285,4 @@ model ActivityLog {
 
   @@index([type])
   @@index([createdAt])
-}
-
-// ─── Silver Love additions ───────────────────────────────────────────────────
-
-// Product gallery — the primary image is also mirrored into Product.imageUrl
-// for backward compatibility with channel publishing and the bot.
-model ProductImage {
-  id        String   @id @default(cuid())
-  productId String
-  product   Product  @relation(fields: [productId], references: [id], onDelete: Cascade)
-  url       String // relative API URL (/api/uploads/<name>)
-  isPrimary Boolean  @default(false)
-  sortOrder Int      @default(0)
-  createdAt DateTime @default(now())
-
-  @@index([productId])
-}
-
-// Manually-entered silver market rate (reference info only — NEVER used to
-// compute product prices). History is preserved; the latest active row wins.
-model SilverRate {
-  id             String   @id @default(cuid())
-  pricePerGram   Float // تومان به‌ازای هر گرم نقره
-  unit           String   @default("تومان/گرم")
-  note           String?
-  active         Boolean  @default(true)
-  createdByEmail String?
-  createdAt      DateTime @default(now())
-}
-
-// Store bank destinations for manual (card-to-card) payment.
-model BankAccount {
-  id            String   @id @default(cuid())
-  bankName      String
-  holderName    String
-  cardNumber    String
-  sheba         String?
-  accountNumber String?
-  note          String?
-  active        Boolean  @default(true)
-  createdAt     DateTime @default(now())
-  updatedAt     DateTime @updatedAt
-}
-
-// Manual payment lifecycle per order (one-to-one). Approval is ALWAYS a human
-// decision — no OCR, no hash matching, no auto-expiry, no auto-approval.
-model Payment {
-  id              String         @id @default(cuid())
-  orderId         String         @unique
-  order           Order          @relation(fields: [orderId], references: [id], onDelete: Cascade)
-  status          String         @default("awaiting_payment") // awaiting_payment | payment_review | paid | rejected | refund_pending | refunded
-  amountSnapshot  Float
-  receiptImage    String? // filename inside upload/receipts/ (never publicly served)
-  payerName       String?
-  trackingNumber  String?
-  customerNote    String?
-  reviewedByEmail String?
-  reviewedAt      DateTime?
-  rejectReason    String?
-  createdAt       DateTime       @default(now())
-  updatedAt       DateTime       @updatedAt
-  events          PaymentEvent[]
-}
-
-// Audit trail for payment decisions (who approved/rejected, when, why).
-model PaymentEvent {
-  id         String   @id @default(cuid())
-  paymentId  String
-  payment    Payment  @relation(fields: [paymentId], references: [id], onDelete: Cascade)
-  type       String // receipt_submitted | resubmitted | approved | rejected | info
-  actorEmail String?
-  note       String?
-  createdAt  DateTime @default(now())
-
-  @@index([paymentId])
-}
-
-// AI assistant conversation history (multi-turn memory, survives restarts).
-model ConversationMessage {
-  id             String   @id @default(cuid())
-  telegramUserId String
-  role           String // user | assistant
-  content        String
-  createdAt      DateTime @default(now())
-
-  @@index([telegramUserId, createdAt])
 }

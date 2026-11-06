@@ -11,6 +11,11 @@ export const GET = route(async () => {
   return ok({ settings, telegram: await getTelegramStatus() })
 })
 
+// Boolean-ish: accepts real booleans or 'true'/'false' strings from forms.
+const booleanish = z
+  .union([z.boolean(), z.string()])
+  .transform((v) => (typeof v === 'boolean' ? v : v.trim().toLowerCase() === 'true'))
+
 const patchSchema = z.object({
   storeName: z.string().trim().min(1, 'نام فروشگاه نمی‌تواند خالی باشد').max(100).optional(),
   storeDescription: z.string().max(1000).optional(),
@@ -20,11 +25,8 @@ const patchSchema = z.object({
     .max(100)
     .regex(/^@?[a-zA-Z0-9_]*$/, 'یوزرنیم تلگرام معتبر نیست')
     .optional(),
-  shippingPolicy: z.string().max(2000).optional(),
-  returnPolicy: z.string().max(2000).optional(),
-  warrantyPolicy: z.string().max(2000).optional(),
-  paymentNote: z.string().max(2000).optional(),
-  aiAssistantEnabled: z.enum(['true', 'false']).optional(),
+  aiEnabled: booleanish.optional(),
+  aiTone: z.string().trim().max(1000, 'لحن هوش مصنوعی حداکثر ۱۰۰۰ کاراکتر است').optional(),
 })
 
 export const PUT = route(async (req: NextRequest) => {

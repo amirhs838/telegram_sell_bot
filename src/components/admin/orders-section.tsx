@@ -39,21 +39,11 @@ import {
   useDebounced,
   orderStatusLabel,
 } from '@/components/admin/bits'
-import type { PaymentStatus } from '@/lib/client'
-
-const PAYMENT_LABEL: Record<PaymentStatus, { label: string; cls: string }> = {
-  awaiting_payment: { label: '💳 در انتظار پرداخت', cls: 'bg-slate-200 text-slate-700 dark:bg-slate-800 dark:text-slate-300' },
-  payment_review: { label: '🕐 رسید در انتظار بررسی', cls: 'bg-amber-200 text-amber-800 dark:bg-amber-900/60 dark:text-amber-300' },
-  paid: { label: '✅ پرداخت تأیید شده', cls: 'bg-emerald-200 text-emerald-800 dark:bg-emerald-900/60 dark:text-emerald-300' },
-  rejected: { label: '🔴 پرداخت رد شده', cls: 'bg-rose-200 text-rose-700 dark:bg-rose-900/60 dark:text-rose-300' },
-  refund_pending: { label: '↩️ بازپرداخت در انتظار', cls: 'bg-sky-200 text-sky-800 dark:bg-sky-900/60 dark:text-sky-300' },
-  refunded: { label: '↩️ بازپرداخت شد', cls: 'bg-sky-200 text-sky-800 dark:bg-sky-900/60 dark:text-sky-300' },
-}
-
-function PaymentStatusBadge({ status }: { status: PaymentStatus }) {
-  const meta = PAYMENT_LABEL[status] ?? { label: status, cls: '' }
-  return <span className={`rounded-full px-2 py-0.5 text-[11px] font-medium ${meta.cls}`}>{meta.label}</span>
-}
+import { ReceiptViewButton } from '@/components/admin/receipt-image'
+import {
+  ApprovePaymentDialog,
+  RejectPaymentDialog,
+} from '@/components/admin/payments-section'
 import {
   Search,
   Eye,
@@ -63,9 +53,19 @@ import {
   Phone,
   User,
   AtSign,
+  Truck,
+  CreditCard,
 } from 'lucide-react'
 import { toast } from 'sonner'
-import { api, qs, fmtDate, fmtNumber, type Order, type OrderStatus } from '@/lib/client'
+import {
+  api,
+  qs,
+  fmtDate,
+  fmtNumber,
+  PAYMENT_STATUS_FA,
+  type Order,
+  type OrderStatus,
+} from '@/lib/client'
 
 const TABS: { value: string; label: string }[] = [
   { value: 'all', label: 'همه' },
@@ -75,6 +75,14 @@ const TABS: { value: string; label: string }[] = [
   { value: 'shipped', label: 'ارسال شده' },
   { value: 'completed', label: 'تکمیل' },
   { value: 'cancelled', label: 'لغو شده' },
+]
+
+const PAYMENT_FILTERS: { value: string; label: string }[] = [
+  { value: 'all', label: 'همه پرداخت‌ها' },
+  { value: 'awaiting_payment', label: 'در انتظار پرداخت' },
+  { value: 'payment_review', label: 'رسید در انتظار بررسی' },
+  { value: 'paid', label: 'پرداخت شده' },
+  { value: 'rejected', label: 'رد شده' },
 ]
 
 const ALL_STATUSES: OrderStatus[] = [
@@ -88,6 +96,7 @@ const ALL_STATUSES: OrderStatus[] = [
 
 export function OrdersSection() {
   const [status, setStatus] = useState('all')
+  const [paymentStatus, setPaymentStatus] = useState('all')
   const [searchInput, setSearchInput] = useState('')
   const search = useDebounced(searchInput, 300)
   const [orders, setOrders] = useState<Order[]>([])
@@ -98,12 +107,23 @@ export function OrdersSection() {
   const [viewing, setViewing] = useState<Order | null>(null)
   const [patchingId, setPatchingId] = useState<string | null>(null)
 
+  const [approveTarget, setApproveTarget] = useState<{
+    paymentId: string
+    orderNumber: number
+    amount: number
+  } | null>(null)
+  const [rejectTarget, setRejectTarget] = useState<{ paymentId: string; orderNumber: number } | null>(null)
+
   const load = useCallback(async () => {
     setLoading(true)
     setError(null)
     try {
       const d = await api<{ items: Order[]; total?: number }>(
-        `/api/orders${qs({ status: status === 'all' ? '' : status, search })}`,
+        `/api/orders${qs({
+          status: status === 'all' ? '' : status,
+          paymentStatus: paymentStatus === 'all' ? '' : paymentStatus,
+          search,
+        })}`,
       )
       setOrders(d.items ?? [])
       setTotal(d.total ?? d.items?.length ?? 0)
@@ -112,7 +132,7 @@ export function OrdersSection() {
     } finally {
       setLoading(false)
     }
-  }, [status, search])
+  }, [status, paymentStatus, search])
 
   useEffect(() => {
     load()
@@ -142,6 +162,20 @@ export function OrdersSection() {
         description="مدیریت و پیگیری سفارش‌های ثبت‌شده از طریق ربات تلگرام"
       />
 
+      {/* Payment status filter */}
+      <Tabs value={paymentStatus} onValueChange={(v) => setPaymentStatus(v)}>
+        <div className="max-w-full overflow-x-auto scroll-thin">
+          <TabsList className="h-auto w-max">
+            {PAYMENT_FILTERS.map((t) => (
+              <TabsTrigger key={t.value} value={t.value} className="whitespace-nowrap">
+                {t.label}
+              </TabsTrigger>
+            ))}
+          </TabsList>
+        </div>
+      </Tabs>
+
+      {/* Order status tabs + search */}
       <Tabs
         value={status}
         onValueChange={(v) => setStatus(v)}
@@ -179,8 +213,8 @@ export function OrdersSection() {
             icon={ShoppingCart}
             title="سفارشی یافت نشد"
             hint={
-              search
-                ? 'عبارت جستجو را تغییر دهید.'
+              search || paymentStatus !== 'all'
+                ? 'فیلترها یا عبارت جستجو را تغییر دهید.'
                 : 'سفارش‌ها از طریق ربات تلگرام ثبت می‌شوند و اینجا نمایش داده می‌شوند.'
             }
           />
@@ -194,6 +228,7 @@ export function OrdersSection() {
                   <TableHead>اقلام</TableHead>
                   <TableHead>مبلغ</TableHead>
                   <TableHead>وضعیت</TableHead>
+                  <TableHead>پرداخت</TableHead>
                   <TableHead>تاریخ</TableHead>
                   <TableHead className="w-10" />
                 </TableRow>
@@ -202,6 +237,7 @@ export function OrdersSection() {
                 {orders.map((o) => {
                   const first = o.items?.[0]
                   const rest = (o.items?.length ?? 0) - 1
+                  const psFa = PAYMENT_STATUS_FA[o.paymentStatus]
                   return (
                     <TableRow key={o.id}>
                       <TableCell>
@@ -234,10 +270,16 @@ export function OrdersSection() {
                         <MoneyText value={o.total} className="text-sm" />
                       </TableCell>
                       <TableCell>
-                        <div className="flex flex-wrap items-center gap-1">
-                          <OrderStatusBadge status={o.status} />
-                          {o.payment && <PaymentStatusBadge status={o.payment.status} />}
-                        </div>
+                        <OrderStatusBadge status={o.status} />
+                      </TableCell>
+                      <TableCell>
+                        {psFa ? (
+                          <Badge variant="outline" className={psFa.badgeClass}>
+                            {psFa.label}
+                          </Badge>
+                        ) : (
+                          <span className="text-xs text-muted-foreground">—</span>
+                        )}
                       </TableCell>
                       <TableCell className="whitespace-nowrap text-xs text-muted-foreground">
                         {fmtDate(o.createdAt)}
@@ -274,7 +316,7 @@ export function OrdersSection() {
                 <DialogTitle className="flex flex-wrap items-center gap-2">
                   <span dir="ltr">#{fmtNumber(viewing.orderNumber)}</span>
                   <OrderStatusBadge status={viewing.status} />
-                  {viewing.payment && <PaymentStatusBadge status={viewing.payment.status} />}
+                  <PaymentStatusBadge status={viewing.paymentStatus} />
                 </DialogTitle>
                 <DialogDescription>ثبت شده در {fmtDate(viewing.createdAt)}</DialogDescription>
               </DialogHeader>
@@ -353,6 +395,32 @@ export function OrdersSection() {
                   </div>
                 </div>
 
+                {/* Payment info */}
+                <PaymentInfoBlock
+                  order={viewing}
+                  onApprove={() =>
+                    viewing.payment &&
+                    setApproveTarget({
+                      paymentId: viewing.payment.id,
+                      orderNumber: viewing.orderNumber,
+                      amount: viewing.total,
+                    })
+                  }
+                  onReject={() =>
+                    viewing.payment &&
+                    setRejectTarget({ paymentId: viewing.payment.id, orderNumber: viewing.orderNumber })
+                  }
+                />
+
+                {/* Tracking code */}
+                <TrackingCodeBlock
+                  order={viewing}
+                  onSaved={(code) => {
+                    setViewing((v) => (v && v.id === viewing.id ? { ...v, trackingCode: code } : v))
+                    load()
+                  }}
+                />
+
                 {/* Status changer */}
                 <div className="flex flex-wrap items-center gap-2 rounded-xl border bg-muted/30 p-3">
                   <span className="text-sm font-medium">تغییر وضعیت:</span>
@@ -388,6 +456,214 @@ export function OrdersSection() {
           )}
         </DialogContent>
       </Dialog>
+
+      {/* Payment review actions (shared dialogs) */}
+      <ApprovePaymentDialog
+        target={approveTarget}
+        onClose={() => setApproveTarget(null)}
+        onDone={(done) => {
+          if (done && approveTarget) {
+            // find order number → update the viewed order if it matches
+            setViewing((v) =>
+              v && approveTarget.orderNumber === v.orderNumber
+                ? {
+                    ...v,
+                    paymentStatus: 'paid',
+                    payment: v.payment ? { ...v.payment, status: 'paid' } : v.payment,
+                  }
+                : v,
+            )
+          }
+          load()
+        }}
+      />
+      <RejectPaymentDialog
+        target={rejectTarget}
+        onClose={() => setRejectTarget(null)}
+        onDone={(done) => {
+          if (done && rejectTarget) {
+            setViewing((v) =>
+              v && rejectTarget.orderNumber === v.orderNumber
+                ? {
+                    ...v,
+                    paymentStatus: 'rejected',
+                    payment: v.payment ? { ...v.payment, status: 'rejected' } : v.payment,
+                  }
+                : v,
+            )
+          }
+          load()
+        }}
+      />
+    </div>
+  )
+}
+
+// ---------------------------------------------------------------------------
+// Payment status badge (Persian label map)
+// ---------------------------------------------------------------------------
+
+function PaymentStatusBadge({ status }: { status: string }) {
+  const fa = PAYMENT_STATUS_FA[status]
+  if (!fa) return null
+  return (
+    <Badge variant="outline" className={fa.badgeClass}>
+      <CreditCard className="size-3" aria-hidden />
+      {fa.label}
+    </Badge>
+  )
+}
+
+// ---------------------------------------------------------------------------
+// Payment info block inside the order detail dialog
+// ---------------------------------------------------------------------------
+
+function PaymentInfoBlock({
+  order,
+  onApprove,
+  onReject,
+}: {
+  order: Order
+  onApprove: () => void
+  onReject: () => void
+}) {
+  const payment = order.payment
+  const canReview = payment?.status === 'awaiting_review'
+
+  return (
+    <div className="rounded-xl border p-4">
+      <div className="mb-2 flex flex-wrap items-center justify-between gap-2">
+        <p className="flex items-center gap-1.5 text-sm font-semibold">
+          <CreditCard className="size-4 text-emerald-600" aria-hidden />
+          اطلاعات پرداخت
+        </p>
+        <PaymentStatusBadge status={order.paymentStatus} />
+      </div>
+
+      {!payment ? (
+        <p className="text-sm text-muted-foreground">
+          هنوز پرداختی برای این سفارش ثبت نشده است.
+        </p>
+      ) : (
+        <div className="space-y-2 text-sm">
+          <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
+            <p>
+              <span className="text-muted-foreground">مبلغ سفارش: </span>
+              <MoneyText value={order.total} />
+            </p>
+            <p>
+              <span className="text-muted-foreground">پرداخت‌کننده: </span>
+              {payment.payerName || '—'}
+            </p>
+            <p>
+              <span className="text-muted-foreground">کد پیگیری: </span>
+              <span dir="ltr">{payment.trackingNumber || '—'}</span>
+            </p>
+            <p>
+              <span className="text-muted-foreground">زمان ارسال رسید: </span>
+              {fmtDate(payment.createdAt)}
+            </p>
+          </div>
+          {payment.customerNote && (
+            <p>
+              <span className="text-muted-foreground">یادداشت مشتری: </span>
+              {payment.customerNote}
+            </p>
+          )}
+          {payment.reviewNote && (
+            <p>
+              <span className="text-muted-foreground">نتیجه بررسی: </span>
+              {payment.reviewNote}
+            </p>
+          )}
+          {payment.reviewedAt && (
+            <p className="text-xs text-muted-foreground">بررسی‌شده در {fmtDate(payment.reviewedAt)}</p>
+          )}
+          <div className="flex flex-wrap items-center gap-2 pt-1">
+            <ReceiptViewButton url={payment.receiptUrl} />
+            {canReview && (
+              <>
+                <Button
+                  size="sm"
+                  onClick={onApprove}
+                  className="min-h-9 bg-emerald-600 text-white hover:bg-emerald-700"
+                >
+                  تأیید پرداخت
+                </Button>
+                <Button
+                  size="sm"
+                  variant="outline"
+                  onClick={onReject}
+                  className="min-h-9 border-rose-200 text-rose-700 hover:bg-rose-50"
+                >
+                  رد پرداخت
+                </Button>
+              </>
+            )}
+          </div>
+        </div>
+      )}
+    </div>
+  )
+}
+
+// ---------------------------------------------------------------------------
+// Tracking code editor inside the order detail dialog
+// ---------------------------------------------------------------------------
+
+function TrackingCodeBlock({
+  order,
+  onSaved,
+}: {
+  order: Order
+  onSaved: (code: string | null) => void
+}) {
+  const [code, setCode] = useState(order.trackingCode ?? '')
+  const [saving, setSaving] = useState(false)
+
+  async function save() {
+    if (code.trim() === (order.trackingCode ?? '')) return
+    setSaving(true)
+    try {
+      await api(`/api/orders/${order.id}`, {
+        method: 'PATCH',
+        body: JSON.stringify({ trackingCode: code.trim() || null }),
+      })
+      toast.success('کد رهگیری ذخیره شد')
+      onSaved(code.trim() || null)
+    } catch (err) {
+      toast.error((err as Error).message)
+    } finally {
+      setSaving(false)
+    }
+  }
+
+  return (
+    <div className="rounded-xl border p-4">
+      <p className="mb-2 flex items-center gap-1.5 text-sm font-semibold">
+        <Truck className="size-4 text-emerald-600" aria-hidden />
+        کد رهگیری مرسوله
+      </p>
+      <div className="flex flex-col gap-2 sm:flex-row">
+        <Input
+          dir="ltr"
+          className="text-left sm:flex-1"
+          value={code}
+          onChange={(e) => setCode(e.target.value)}
+          placeholder="کد رهگیری پستی…"
+          aria-label="کد رهگیری"
+          disabled={saving}
+        />
+        <Button onClick={save} disabled={saving || code.trim() === (order.trackingCode ?? '')}>
+          {saving && <Loader2 className="size-4 animate-spin" aria-hidden />}
+          ذخیره کد رهگیری
+        </Button>
+      </div>
+      {order.trackingCode && (
+        <p className="mt-2 text-xs text-muted-foreground">
+          کد فعلی: <span dir="ltr">{order.trackingCode}</span>
+        </p>
+      )}
     </div>
   )
 }

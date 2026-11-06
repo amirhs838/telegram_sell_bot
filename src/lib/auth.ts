@@ -1,5 +1,5 @@
 import 'server-only'
-import { cookies } from 'next/headers'
+import { cookies, headers } from 'next/headers'
 import crypto from 'node:crypto'
 import bcrypt from 'bcryptjs'
 import { db } from '@/lib/db'
@@ -37,10 +37,32 @@ export async function createSession(userId: string) {
   return token
 }
 
+/**
+ * Resolves the session user from either:
+ * 1. An `Authorization: Bearer <token>` header (primary path — required because
+ *    the admin panel is often embedded in a cross-origin preview iframe where
+ *    third-party cookie restrictions silently drop SameSite=Lax cookies), or
+ * 2. The httpOnly session cookie (classic same-site browsers).
+ */
 export async function getSessionUser(): Promise<SessionUser | null> {
-  const store = await cookies()
-  const token = store.get(SESSION_COOKIE)?.value
+  let token: string | undefined
+
+  try {
+    const h = await headers()
+    const auth = h.get('authorization')
+    if (auth && auth.toLowerCase().startsWith('bearer ')) {
+      token = auth.slice(7).trim() || undefined
+    }
+  } catch {
+    /* headers() unavailable outside request scope */
+  }
+
+  if (!token) {
+    const store = await cookies()
+    token = store.get(SESSION_COOKIE)?.value
+  }
   if (!token) return null
+
   const session = await db.session.findUnique({
     where: { token },
     include: { user: true },

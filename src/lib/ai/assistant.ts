@@ -1,18 +1,11 @@
-// Silver Love — Tool-based Persian SALES assistant for the Telegram bot.
-//
-// The model acts as an experienced, warm silver-jewelry salesperson:
-// needs discovery → consultative recommendation → objection handling →
-// natural closing. It NEVER invents facts: every price/stock/spec/rate/policy
-// number must come from a TOOL_RESULT. Product prices are the seller's manual
-// final prices — the assistant never computes or discounts anything.
-//
-// Protocol (SDK has no native tool-calling): the model returns ONLY
-//   {"tool":"<name>","args":{…}}  or  {"reply":"<final>", "image_products"?:[ids]}
-// The server executes tools against the DB and feeds results back (max 6 rounds).
-//
-// Order creation is a PROPOSAL only: request_order validates items and returns
-// a preview; the final order is created by the bot AFTER the customer taps the
-// inline confirmation button — the customer's explicit confirmation is mandatory.
+// Tool-based Persian sales assistant for the Telegram bot (Silver Love).
+// The SDK has no native tool-calling, so we use a JSON tool-protocol loop:
+// the model returns ONLY `{"tool":"<name>","args":{…}}` or `{"reply":"<final>"}`,
+// the server executes tools against the DB and feeds results back (max 6 rounds).
+// Safety: the model is never allowed to invent products/prices/stock/weight/
+// fineness/shipping — every factual number in a reply must come from a
+// TOOL_RESULT payload. The silver market rate may ONLY come from the
+// get_silver_rate tool (never from model knowledge or the internet).
 import { z } from 'zod'
 import { db } from '@/lib/db'
 import { chatJSONMessages, AiError } from '@/lib/ai/client'
@@ -20,82 +13,53 @@ import { semanticSearch } from '@/lib/ai/embedding'
 import { orderStatusFa } from '@/lib/telegram-render'
 
 const MAX_TOOL_ITERATIONS = 6
-const HISTORY_MESSAGES = 12
 
-const SYSTEM_PROMPT = `تو «فروشنده فروشگاه نقره Silver Love» هستی — یک فروشنده حرفه‌ای، گرم و باحوصله در تلگرام.
+const SYSTEM_PROMPT = `تو نماینده فروش و مشاور فروشگاه نقره «Silver Love» در تلگرام هستی؛ حرفه‌ای، گرم و مشاوره‌محور — نه یک منوی رباتیک.
 
-# شخصیت و لحن
-- صمیمی، محترمانه و مشاوره‌ای؛ لحن طبیعی و انسانی، نه رباتیک و خشک.
-- پاسخ سؤال ساده = پاسخ کوتاه و مستقیم. مشتریِ مشاوره‌خواه = گفتگوی طبیعی.
-- اصرار و فشار نمی‌آوری؛ مشتری را با رضایت خودش به خرید می‌رسانی.
-- اگر مستقیم پرسیدند انسان هستی، صادقانه بگو دستیار هوشمند Silver Love هستی و برای پیگیری انسانی می‌توانی به اپراتور وصلت کنی.
+سبک فروش و گفتگو:
+- نیازسنجی را در دل مکالمه طبیعی انجام بده: نوع محصول (انگشتر، گردنبند، دستبند، …)، برای خود مشتری است یا هدیه، سبک موردعلاقه، بودجه و در صورت لزوم سایز. هر بار فقط یک یا دو سؤال بپرس، نه یک فرم کامل.
+- پیشنهادها را «فقط» از موجودی واقعی فروشگاه با ابزارها انتخاب کن و تفاوت‌های گزینه‌ها (قیمت، عیار، وزن، سایز، مدل) را شفاف مقایسه کن.
+- به تردیدها و اعتراض‌ها (قیمت، عیار، وزن، ارسال، تعویض، اصالت) فقط با داده واقعی ابزارها یا تنظیمات فروشگاه پاسخ بده؛ اگر داده‌ای نداری، صادقانه بگو و پیشنهاد پیگیری انسانی بده.
+- گاهی (نه در هر پیام) یک پیشنهاد مکمل کوتاه و مرتبط بده (مثلاً زنجیر هماهنگ با گردنبند).
+- به‌طور طبیعی به خرید دعوت کن: یادآوری کن که با دکمه/منوی محصولات می‌تواند همان‌جا سفارش ثبت کند.
+- پاسخ سؤال‌های ساده، کوتاه و مستقیم است؛ به هر پیام منو نچسبان و کلام رباتیک تکرار نکن.
+- همیشه فارسی، گرم و محترمانه پاسخ بده.
 
-# فرایند فروش مشاوره‌ای
-1. نیازسنجی طبیعی: هدف خرید (خودش/هدیه)، سبک و طراحی، بودجه، سایز، کاربرد روزمره یا مناسبت. «هر بار فقط یک سؤال» بپرس و بر اساس پاسخ قبلی ادامه بده؛ اگر مشتری محصول مشخصی خواست، مستقیم برو سراغ آن.
-2. جستجوی واقعی: قبل از معرفی هر محصول حتماً search_products یا get_product صدا بزن. فقط محصول موجود (stock>0 و status=active) را قابل خرید معرفی کن.
-3. معرفی: نام + قیمت دقیق از ابزار + مشخصات مهم (عیار/وزن/سایز اگر هست) + «چرا برای این مشتری مناسبه». حداکثر ۳ محصول در یک پاسخ.
-4. مقایسه: اگر چند گزینه بود، تفاوت‌ها را طبیعی توضیح بده (مثلاً «این مدل ظریف‌تره و برای روزمره مناسبه، اون یکی جلوه بیشتری داره»).
-5. پاسخ به اعتراض/سؤال: چرایی قیمت، تفاوت عیارها، وزن، سایز، ارسال، تعویض، ضمانت اصالت، نحوه ثبت سفارش — همه از get_store_info یا اطلاعات ابزارها. هیچ قانون/ضمانت/تخفیفی از خودت نساز.
-6. پیشنهاد مکمل: در زمان مناسب یک پیشنهاد مرتبط (مثلاً دستبند هماهنگ با انگشتر) — نه بیشتر.
-7. نرخ نقره: فقط از get_silver_rate؛ اگر ثبت نشده یا قدیمی است صادقانه بگو «نرخ به‌روز ثبت نشده». نرخ نقره هرگز برای محاسبه قیمت محصول استفاده نمی‌شود.
+قوانین الزامی (شکست‌ناپذیر):
+- هرگز قیمت، موجودی، وزن، عیار، ضمانت، شرایط ارسال یا تخفیف از خودت نساز — همه فقط از نتایج ابزارها.
+- هرگز قیمت لحظه‌ای نقره را از اینترنت یا دانش خودت نیاور؛ نرخ نقره فقط از ابزار get_silver_rate. اگر نرخ ثبت نشده بود، صادقانه بگو «نرخ نقره فعلاً در سیستم ثبت نشده است».
+- قیمت هر محصول همان قیمتِ برگشتی از ابزار است؛ هرگز آن را با نرخ نقره یا وزن بازمحاسبه نکن.
+- اگر پاسخ سؤالی را نداری، صادقانه اعتراف کن و ابزار request_operator را برای ارجاع به همکار انسانی بزن.
+- اگر مستقیماً پرسیدند «انسان هستی؟»، صادقانه بگو دستیار هوشمند فروشگاه هستی و در صورت تمایل همکار انسانی ادامه می‌دهد؛ هرگز ادعای انسان بودن نکن.
+- اطلاعات پرداخت و سیاست‌های فروشگاه فقط از ابزار get_store_policies.
 
-# سفارش‌گیری (خیلی مهم)
-- فقط وقتی مشتری صریحاً اعلام کرد می‌خواهد بخرد: نام و نام خانوادگی، شماره موبایل و آدرس را مرحله‌به‌مرحله بگیر.
-- سپس خلاصه سفارش (محصولات، تعداد، مبلغ کل از ابزار، نام، موبایل، آدرس) را بنویس و تأیید صریح بگیر.
-- فقط بعد از تأیید صریح مشتری، ابزار request_order را صدا بزن.
-- هرگز خودت سفارش نساز، مبلغ نساز یا تخفیف نده.
-
-# ابزارها (پروتکل)
-در هر نوبت «فقط» یک شیء JSON، بدون متن اضافه و بدون markdown:
+پروتکل: در هر نوبت «فقط» یک شیء JSON برگردان، بدون متن اضافه، بدون markdown:
 - صدا زدن ابزار: {"tool":"نام ابزار","args":{...}}
-- پاسخ نهایی: {"reply":"متن فارسی","image_products":["شناسه محصولات برای ارسال عکس"]}
+- پاسخ نهایی به کاربر: {"reply":"متن پاسخ فارسی"}
 
-- search_products → {"query":"متن (اختیاری)","category":"نام دسته (اختیاری)","max_price":"حداکثر تومان (اختیاری)","min_price":"حداقل (اختیاری)"}
-- get_product → {"product_id":"شناسه"}
-- check_stock → {"product_id":"شناسه"}
-- get_categories → {}
-- compare_products → {"product_ids":["شناسه ۱","شناسه ۲"]}
-- get_customer_orders → {"telegram_user_id":"شناسه تلگرام کاربر","limit":1 تا 5}
-- get_silver_rate → {}
-- get_store_info → {}
-- transfer_to_operator → {"summary":"خلاصه مکالمه و نیاز مشتری برای اپراتور"}
+ابزارهای موجود:
+- search_products → args: {"query":"متن جستجو (اختیاری)","category":"نام دسته (اختیاری)","max_price":"حداکثر قیمت تومان (اختیاری)","min_price":"حداقل قیمت (اختیاری)"}
+- get_product → args: {"product_id":"شناسه محصول"}
+- check_stock → args: {"product_id":"شناسه محصول"}
+- compare_products → args: {"product_ids":["شناسه",...]} یا {"names":["نام محصول",...]} — حداکثر ۳ محصول
+- get_categories → args: {}
+- get_silver_rate → args: {} — نرخ دستی ثبت‌شده نقره در فروشگاه
+- get_store_policies → args: {} — معرفی فروشگاه، سیاست‌ها و اطلاعات پرداخت کارت به کارت
+- get_customer_orders → args: {"telegram_user_id":"شناسه تلگرام کاربر","limit":1 تا 5}
+- request_operator → args: {"reason":"دلیل ارجاع"} — وقتی مشتری صریحاً همکار می‌خواهد یا پاسخ سؤال را نداری
 
-قواعد قطعی:
-- قیمت/موجودی/وزن/عیار/سایز/ضمانت/ارسال/تخفیف را هرگز حدس نزن؛ فقط از TOOL_RESULT.
-- image_products فقط وقتی محصول واقعی با عکس معرفی می‌کنی (حداکثر ۳ شناسه).
-- اگر ابزار خطا داد یا نتیجه‌ای نبود، صادقانه بگو و ابزار دیگری امتحان کن؛ اطلاعات نبود ⇒ صادقانه اعلام کن و در صورت نیاز transfer_to_operator.
-- قیمت‌ها در TOOL_RESULT به تومان است.`
-
-const finalActionSchema = z.object({
-  reply: z.string().min(1),
-  image_products: z.array(z.string()).max(3).optional(),
-})
+نکته‌ها:
+- اعداد قیمت‌ها در نتایج ابزار به تومان هستند.
+- قبل از معرفی محصول، ابتدا search_products را صدا بزن؛ قیمت/موجودی را فقط از TOOL_RESULT بردار.
+- شناسه تلگرام کاربر جاری در انتهای پیام او آمده؛ برای get_customer_orders همان را بفرست.
+- اگر ابزار خطا داد یا نتیجه‌ای نبود، صادقانه بگو و در صورت نیاز ابزار دیگری را امتحان کن.`
 
 const actionSchema = z.union([
-  finalActionSchema,
+  z.object({ reply: z.string().min(1) }),
   z.object({ tool: z.string().min(1), args: z.record(z.string(), z.unknown()).optional() }),
 ])
 
 type AssistantAction = z.infer<typeof actionSchema>
-
-export type AssistantActionPayload = {
-  type: 'create_order'
-  items: Array<{ productId: string; quantity: number }>
-  name: string
-  phone: string
-  address: string
-}
-
-export type AssistantResult = {
-  reply: string
-  /** product image URLs (relative) the bot should send after the text */
-  images: string[]
-  toolsUsed: string[]
-  /** validated order proposal — the bot asks for the customer's explicit tap before executing */
-  action?: AssistantActionPayload
-  /** operator handoff request with conversation summary */
-  handoff?: { summary: string }
-}
 
 const faMoney = (v: number): string => new Intl.NumberFormat('fa-IR').format(v)
 
@@ -108,37 +72,23 @@ function toFiniteNumber(v: unknown): number | undefined {
   return undefined
 }
 
-const TOOL_ERROR = { error: 'اجرای ابزار ناموفق بود' }
-
-function specLines(p: {
-  purity: string | null
-  weightGrams: number | null
-  size: string | null
-  silverType: string | null
-  sku: string | null
-}) {
-  const specs: Record<string, string | number | null> = {}
-  if (p.sku) specs.sku = p.sku
-  if (p.silverType) specs.silver_type = p.silverType
-  if (p.purity) specs.purity = p.purity
-  if (p.weightGrams != null && p.weightGrams > 0) specs.weight_grams = p.weightGrams
-  if (p.size) specs.size = p.size
-  return specs
+function stringArray(v: unknown): string[] {
+  return Array.isArray(v) ? v.filter((x): x is string => typeof x === 'string') : []
 }
 
-type ToolCtx = {
-  pendingAction?: AssistantActionPayload
-  pendingHandoff?: { summary: string }
-  /** product image URLs collected for the final reply */
-  pendingImages: string[]
+const TOOL_ERROR = { error: 'اجرای ابزار ناموفق بود' }
+
+type ToolContext = {
+  telegramUserId: string
+  /** record a concrete product id that surfaced in tool results (≤3 shown to the user) */
+  trackProduct: (id: string) => void
 }
 
 /** Execute one tool call against the DB. Always returns a JSON-serializable value. */
 async function executeTool(
   name: string,
   args: Record<string, unknown>,
-  ctx: ToolCtx,
-  telegramUserId: string,
+  ctx: ToolContext,
 ): Promise<unknown> {
   switch (name) {
     case 'search_products': {
@@ -156,15 +106,13 @@ async function executeTool(
         minPrice: toFiniteNumber(args.min_price),
         maxPrice: toFiniteNumber(args.max_price),
       })
+      for (const h of hits) ctx.trackProduct(h.product.id)
       return hits.map((h) => ({
         id: h.product.id,
         name: h.product.name,
         price: h.product.price,
         stock: h.product.stock,
-        status: h.product.status,
         short_description: h.product.shortDescription,
-        has_image: Boolean(h.product.imageUrl),
-        ...specLines(h.product),
       }))
     }
 
@@ -176,19 +124,27 @@ async function executeTool(
         include: { category: { select: { name: true } } },
       })
       if (!p) return { error: 'محصولی با این شناسه یافت نشد' }
+      ctx.trackProduct(p.id)
       return {
         id: p.id,
         name: p.name,
-        price: p.price,
+        price: p.price, // final stored price (Toman) — never recomputed
+        compare_at_price: p.compareAtPrice,
         stock: p.stock,
         status: p.status,
         short_description: p.shortDescription,
         description: p.description,
         category: p.category?.name ?? null,
         image_url: p.imageUrl,
+        product_code: p.productCode,
+        silver_type: p.silverType,
+        fineness: p.fineness,
+        weight_grams: p.weightGrams,
+        size: p.size,
+        dimensions: p.dimensions,
+        brand: p.brand,
+        authenticity_note: p.authenticityNote,
         care_instructions: p.careInstructions,
-        authenticity: p.authenticity,
-        ...specLines(p),
       }
     }
 
@@ -203,6 +159,49 @@ async function executeTool(
       return { name: p.name, stock: p.stock, status: p.status }
     }
 
+    case 'compare_products': {
+      const ids = stringArray(args.product_ids).slice(0, 3)
+      const names = stringArray(args.names).slice(0, 3)
+      if (ids.length === 0 && names.length === 0) {
+        return { error: 'product_ids یا names لازم است' }
+      }
+      let products
+      if (ids.length > 0) {
+        const rows = await db.product.findMany({
+          where: { id: { in: ids }, status: 'active' },
+          include: { category: { select: { name: true } } },
+        })
+        const order = new Map(ids.map((id, i) => [id, i]))
+        products = rows
+          .sort((a, b) => (order.get(a.id) ?? 99) - (order.get(b.id) ?? 99))
+          .slice(0, 3)
+      } else {
+        products = await db.product.findMany({
+          where: { status: 'active', OR: names.map((n) => ({ name: { contains: n } })) },
+          take: 3,
+          include: { category: { select: { name: true } } },
+        })
+      }
+      if (products.length === 0) {
+        return { products: [], message: 'محصول فعالی برای مقایسه یافت نشد' }
+      }
+      for (const p of products) ctx.trackProduct(p.id)
+      return {
+        products: products.map((p) => ({
+          id: p.id,
+          name: p.name,
+          price: p.price,
+          stock: p.stock,
+          fineness: p.fineness,
+          weight_grams: p.weightGrams,
+          size: p.size,
+          silver_type: p.silverType,
+          product_code: p.productCode,
+          category: p.category?.name ?? null,
+        })),
+      }
+    }
+
     case 'get_categories': {
       const cats = await db.category.findMany({
         select: { name: true, _count: { select: { products: { where: { status: 'active' } } } } },
@@ -211,22 +210,55 @@ async function executeTool(
       return cats.map((c) => ({ name: c.name, product_count: c._count.products }))
     }
 
-    case 'compare_products': {
-      const ids = Array.isArray(args.product_ids)
-        ? args.product_ids.filter((v): v is string => typeof v === 'string').slice(0, 4)
-        : []
-      if (ids.length < 2) return { error: 'حداقل دو product_ids لازم است' }
-      const rows = await db.product.findMany({
-        where: { id: { in: ids } },
-        select: {
-          id: true, name: true, price: true, stock: true, status: true,
-          shortDescription: true, purity: true, weightGrams: true, size: true, silverType: true,
-        },
+    case 'get_silver_rate': {
+      // Manual admin-entered reference rate — the ONLY allowed source for the
+      // silver market price. Never fetched from the internet.
+      const rate = await db.silverRate.findFirst({
+        where: { active: true },
+        orderBy: { createdAt: 'desc' },
       })
-      return rows
+      if (!rate) {
+        return {
+          rate: null,
+          message: 'هیچ نرخ نقره‌ای در سیستم ثبت نشده است؛ صادقانه به مشتری بگو نرخ فعلاً ثبت نشده.',
+        }
+      }
+      return {
+        rate_per_gram: rate.ratePerGram,
+        unit: rate.unit,
+        note: rate.note,
+        created_at: rate.createdAt.toISOString(),
+      }
+    }
+
+    case 'get_store_policies': {
+      const rows = await db.setting.findMany()
+      const map = new Map(rows.map((r) => [r.key, r.value]))
+      const dests = await db.paymentDestination.findMany({
+        where: { active: true },
+        orderBy: { sortOrder: 'asc' },
+      })
+      return {
+        store_name: map.get('storeName') ?? '',
+        store_description: map.get('storeDescription') ?? '',
+        support_username: map.get('supportUsername') ?? '',
+        shipping_policy: map.get('shippingPolicy') ?? '',
+        return_policy: map.get('returnPolicy') ?? '',
+        exchange_policy: map.get('exchangePolicy') ?? '',
+        warranty_policy: map.get('warrantyPolicy') ?? '',
+        payment_destinations: dests.map((d) => ({
+          bank_name: d.bankName,
+          account_holder: d.accountHolder,
+          card_number: d.cardNumber,
+          sheba: d.sheba,
+          note: d.note,
+        })),
+      }
     }
 
     case 'get_customer_orders': {
+      const telegramUserId = typeof args.telegram_user_id === 'string' ? args.telegram_user_id : ''
+      if (!telegramUserId) return { error: 'telegram_user_id ارسال نشده است' }
       const limitRaw = toFiniteNumber(args.limit)
       const limit = Math.min(5, Math.max(1, Math.trunc(limitRaw ?? 5)))
       const customer = await db.customer.findUnique({ where: { telegramUserId } })
@@ -235,12 +267,12 @@ async function executeTool(
         where: { customerId: customer.id },
         orderBy: { createdAt: 'desc' },
         take: limit,
-        select: { orderNumber: true, status: true, total: true, createdAt: true, payment: { select: { status: true } } },
+        select: { orderNumber: true, status: true, paymentStatus: true, total: true, createdAt: true },
       })
       return orders.map((o) => ({
         order_number: o.orderNumber,
         status_fa: orderStatusFa(o.status).label,
-        payment_status: o.payment?.status ?? null,
+        payment_status: o.paymentStatus,
         total: o.total,
         created_at_short: new Intl.DateTimeFormat('fa-IR', {
           year: 'numeric',
@@ -250,104 +282,23 @@ async function executeTool(
       }))
     }
 
-    case 'get_silver_rate': {
-      const rate = await db.silverRate.findFirst({
-        where: { active: true },
-        orderBy: { createdAt: 'desc' },
+    case 'request_operator': {
+      const reason = typeof args.reason === 'string' ? args.reason.trim().slice(0, 500) : ''
+      const res = await db.customer.updateMany({
+        where: { telegramUserId: ctx.telegramUserId },
+        data: {
+          handoffRequested: true,
+          handoffNote: reason || null,
+          handoffRequestedAt: new Date(),
+        },
       })
-      if (!rate) {
-        return { registered: false, note: 'هیچ نرخ نقره‌ای توسط فروشگاه ثبت نشده است' }
+      if (res.count === 0) {
+        return { ok: false, message: 'مشتری در سیستم یافت نشد' }
       }
-      return {
-        registered: true,
-        price_per_gram_toman: rate.pricePerGram,
-        unit: rate.unit,
-        set_at: rate.createdAt,
-        note: rate.note,
-        warning: 'این نرخ صرفاً مرجع است و در قیمت محصولات محاسبه نمی‌شود',
-      }
-    }
-
-    case 'get_store_info': {
-      const [rows, bank] = await Promise.all([
-        db.setting.findMany({
-          where: {
-            key: {
-              in: ['storeName', 'storeDescription', 'shippingPolicy', 'returnPolicy', 'warrantyPolicy', 'paymentNote', 'supportUsername'],
-            },
-          },
-        }),
-        db.bankAccount.findFirst({ where: { active: true }, orderBy: { createdAt: 'asc' } }),
-      ])
-      const map = Object.fromEntries(rows.map((r) => [r.key, r.value]))
-      return {
-        store_name: map['storeName'] ?? 'Silver Love',
-        description: map['storeDescription'] ?? null,
-        shipping_policy: map['shippingPolicy'] || 'ثبت نشده',
-        return_policy: map['returnPolicy'] || 'ثبت نشده',
-        warranty_policy: map['warrantyPolicy'] || 'ثبت نشده',
-        payment_note: map['paymentNote'] || 'ثبت نشده',
-        support_username: map['supportUsername'] || null,
-        bank_destination: bank
-          ? { bank: bank.bankName, holder: bank.holderName, card: bank.cardNumber }
-          : null,
-      }
-    }
-
-    case 'transfer_to_operator': {
-      const summary = typeof args.summary === 'string' ? args.summary.trim().slice(0, 800) : ''
-      ctx.pendingHandoff = { summary }
       return {
         ok: true,
-        note: 'درخواست انتقال ثبت شد — در پاسخ نهایی به مشتری بگو به همکار ما وصلش می‌کنی',
-      }
-    }
-
-    case 'request_order': {
-      // PROPOSAL ONLY — the bot creates the order after the customer's explicit tap
-      if (ctx.pendingAction) return { error: 'در این پیام قبلاً یک سفارش پیشنهاد شده است' }
-      const rawItems = Array.isArray(args.items) ? args.items : []
-      const items: Array<{ productId: string; quantity: number }> = []
-      for (const it of rawItems.slice(0, 10)) {
-        if (!it || typeof it !== 'object') continue
-        const rec = it as Record<string, unknown>
-        const productId = typeof rec.product_id === 'string' ? rec.product_id : ''
-        const qty = toFiniteNumber(rec.quantity) ?? 1
-        if (!productId || qty < 1) continue
-        items.push({ productId, quantity: Math.min(99, Math.trunc(qty)) })
-      }
-      const name = typeof args.name === 'string' ? args.name.trim() : ''
-      const phone = typeof args.phone === 'string' ? args.phone.trim() : ''
-      const address = typeof args.address === 'string' ? args.address.trim() : ''
-      if (items.length === 0 || !name || !phone || !address) {
-        return { error: 'items، name، phone و address الزامی هستند' }
-      }
-      // validate from DB — real totals only
-      const products = await db.product.findMany({
-        where: { id: { in: items.map((i) => i.productId) } },
-        select: { id: true, name: true, price: true, stock: true, status: true },
-      })
-      if (products.length !== items.length) {
-        return { error: 'برخی محصولات یافت نشدند' }
-      }
-      const lines = []
-      let total = 0
-      for (const it of items) {
-        const p = products.find((x) => x.id === it.productId)!
-        if (p.status !== 'active' || p.stock < it.quantity) {
-          return { error: `محصول «${p.name}» فعال نیست یا موجودی کافی ندارد (${p.stock})` }
-        }
-        const lineTotal = p.price * it.quantity
-        total += lineTotal
-        lines.push({ product: p.name, quantity: it.quantity, unit_price: p.price, total: lineTotal })
-      }
-      ctx.pendingAction = { type: 'create_order', items, name, phone, address }
-      return {
-        proposal_created: true,
-        total_toman: total,
-        lines,
-        customer: { name, phone, address },
-        note: 'پیشنهاد ثبت شد؛ سفارش نهایی فقط پس از تأیید دکمه‌ای مشتری توسط ربات ساخته می‌شود. به مشتری بگو برای ثبت، روی دکمه تأیید بزند.',
+        message:
+          'درخواست ارجاع به همکار انسانی ثبت شد؛ به مشتری بگو به‌زودی همکار فروشگاه ادامه مکالمه را پیگیری می‌کند.',
       }
     }
 
@@ -356,50 +307,17 @@ async function executeTool(
   }
 }
 
-// ─── Conversation memory (survives restarts — DB-backed) ────────────────────
+export type HistoryMessage = { role: 'user' | 'assistant'; content: string }
 
-async function loadHistory(telegramUserId: string) {
-  try {
-    const rows = await db.conversationMessage.findMany({
-      where: { telegramUserId },
-      orderBy: { createdAt: 'desc' },
-      take: HISTORY_MESSAGES,
-    })
-    return rows
-      .reverse()
-      .map((r) => ({ role: r.role === 'assistant' ? ('assistant' as const) : ('user' as const), content: r.content }))
-  } catch {
-    return []
-  }
-}
+export type AssistantResult = { reply: string; toolsUsed: string[]; productIds: string[] }
 
-async function saveTurn(telegramUserId: string, userMessage: string, assistantReply: string) {
-  try {
-    await db.conversationMessage.createMany({
-      data: [
-        { telegramUserId, role: 'user', content: userMessage.slice(0, 2000) },
-        { telegramUserId, role: 'assistant', content: assistantReply.slice(0, 4000) },
-      ],
-    })
-    // keep the tail bounded
-    const count = await db.conversationMessage.count({ where: { telegramUserId } })
-    if (count > 60) {
-      const old = await db.conversationMessage.findMany({
-        where: { telegramUserId },
-        orderBy: { createdAt: 'asc' },
-        take: count - 60,
-        select: { id: true },
-      })
-      await db.conversationMessage.deleteMany({ where: { id: { in: old.map((r) => r.id) } } })
-    }
-  } catch {
-    // memory is best-effort
-  }
-}
-
-/** Deterministic fallback so the user always gets something useful. */
-async function fallbackReply(message: string): Promise<string> {
+/** Deterministic search fallback so the user always gets something useful. */
+async function searchFallback(
+  message: string,
+  headline: string,
+): Promise<{ reply: string; productIds: string[] }> {
   const hits = await semanticSearch(message, { limit: 3 }).catch(() => [])
+  const productIds = hits.map((h) => h.product.id)
   const lines: string[] = []
   if (hits.length > 0) {
     hits.forEach((h, i) => {
@@ -409,17 +327,72 @@ async function fallbackReply(message: string): Promise<string> {
   } else {
     lines.push('فعلاً محصولی متناسب با درخواست شما پیدا نکردم.')
   }
-  return [
-    'دستیار هوشمند موقتاً نتوانست پاسخ کامل بدهد، اما این نتایج را برایتان پیدا کردم:',
+  const reply = [
+    headline,
     '',
     ...lines,
     '',
     'برای مشاهده و سفارش از منوی محصولات استفاده کنید.',
   ].join('\n')
+  return { reply, productIds }
+}
+
+/** Fallback used when the panel has disabled the AI (Setting aiEnabled=false). */
+export async function fallbackWithoutAi(
+  message: string,
+): Promise<{ reply: string; productIds: string[] }> {
+  return searchFallback(
+    message,
+    'پاسخ‌گویی هوشمند فعلاً غیرفعال است، اما این گزینه‌های مرتبط را برایتان پیدا کردم:',
+  )
+}
+
+/** Compact customer context injected into the system prompt (from the DB only). */
+async function buildCustomerContext(
+  telegramUserId: string,
+  firstName?: string,
+): Promise<string> {
+  try {
+    const customer = await db.customer.findUnique({
+      where: { telegramUserId },
+      select: {
+        firstName: true,
+        handoffRequested: true,
+        orders: {
+          orderBy: { createdAt: 'desc' },
+          take: 1,
+          select: { orderNumber: true, status: true },
+        },
+        _count: { select: { orders: true } },
+      },
+    })
+    const idLine = `- شناسه تلگرام: ${telegramUserId}`
+    if (!customer) {
+      const nameLine = firstName ? `\n- نام: ${firstName}` : ''
+      return `📌 زمینه مشتری:\n- مشتری جدید است و هنوز سفارشی ثبت نکرده.${nameLine}\n${idLine}`
+    }
+    const last = customer.orders[0]
+    return [
+      '📌 زمینه مشتری (برای شخصی‌سازی پاسخ؛ عیناً تکرار نکن):',
+      `- نام: ${customer.firstName}`,
+      `- تعداد سفارش‌های گذشته: ${customer._count.orders}`,
+      last
+        ? `- آخرین سفارش: #${last.orderNumber} — ${orderStatusFa(last.status).label}`
+        : '- هنوز سفارشی ثبت نکرده',
+      customer.handoffRequested ? '- درخواست گفتگو با همکار انسانی ثبت شده است' : '',
+      idLine,
+    ]
+      .filter(Boolean)
+      .join('\n')
+  } catch {
+    return ''
+  }
 }
 
 /**
  * Run the tool-loop assistant for one user message.
+ * `history` carries the persistent ChatMessage memory (user+assistant turns);
+ * only the system prompt + last 12 turns are sent to the model.
  * Never throws for model-behavior issues — degrades to the deterministic
  * fallback reply. Only unexpected infra failures propagate as AiError.
  */
@@ -427,23 +400,36 @@ export async function runAssistant(input: {
   telegramUserId: string
   message: string
   firstName?: string
+  history?: HistoryMessage[]
+  aiTone?: string
 }): Promise<AssistantResult> {
   const { telegramUserId, message, firstName } = input
   const toolsUsed: string[] = []
-  const ctx: ToolCtx = { pendingImages: [] }
+  const surfacedProductIds: string[] = []
+  const trackProduct = (id: string): void => {
+    if (id && !surfacedProductIds.includes(id) && surfacedProductIds.length < 6) {
+      surfacedProductIds.push(id)
+    }
+  }
 
+  let system = SYSTEM_PROMPT
+  if (input.aiTone && input.aiTone.trim()) {
+    system += `\n\nلحن مکالمه فروشگاه: ${input.aiTone.trim()}`
+  }
+  const ctxBlock = await buildCustomerContext(telegramUserId, firstName)
+  if (ctxBlock) system += `\n\n${ctxBlock}`
+
+  const history = (input.history ?? []).slice(-12)
   const intro = firstName
     ? `${message}\n\n(نام کاربر: ${firstName} — شناسه تلگرام: ${telegramUserId})`
     : `${message}\n\n(شناسه تلگرام کاربر: ${telegramUserId})`
 
-  const history = await loadHistory(telegramUserId)
   const messages: { role: 'assistant' | 'user'; content: string }[] = [
-    { role: 'assistant', content: SYSTEM_PROMPT },
-    ...history,
+    { role: 'assistant', content: system },
+    ...history.map((h) => ({ role: h.role, content: h.content })),
     { role: 'user', content: intro },
   ]
 
-  let finalReply: string | null = null
   try {
     for (let i = 0; i < MAX_TOOL_ITERATIONS; i++) {
       let action: AssistantAction
@@ -454,20 +440,11 @@ export async function runAssistant(input: {
       }
 
       if ('reply' in action) {
-        finalReply = action.reply
-        // resolve requested product images
-        const ids = action.image_products ?? []
-        if (ids.length > 0) {
-          const rows = await db.product.findMany({
-            where: { id: { in: ids }, imageUrl: { not: null } },
-            select: { imageUrl: true },
-          })
-          ctx.pendingImages = rows
-            .map((r) => r.imageUrl)
-            .filter((v): v is string => Boolean(v))
-            .slice(0, 3)
+        return {
+          reply: action.reply,
+          toolsUsed,
+          productIds: surfacedProductIds.slice(0, 3),
         }
-        break
       }
 
       const toolName = action.tool
@@ -475,7 +452,7 @@ export async function runAssistant(input: {
 
       let result: unknown
       try {
-        result = await executeTool(toolName, action.args ?? {}, ctx, telegramUserId)
+        result = await executeTool(toolName, action.args ?? {}, { telegramUserId, trackProduct })
       } catch (e) {
         console.error(`[ai:assistant] tool ${toolName} failed`, e)
         result = TOOL_ERROR
@@ -495,17 +472,9 @@ export async function runAssistant(input: {
     console.error('[ai:assistant] unexpected error', e)
   }
 
-  if (finalReply === null) {
-    finalReply = await fallbackReply(message)
-  }
-
-  await saveTurn(telegramUserId, message, finalReply)
-
-  return {
-    reply: finalReply,
-    images: ctx.pendingImages,
-    toolsUsed,
-    action: ctx.pendingAction,
-    handoff: ctx.pendingHandoff,
-  }
+  const fb = await searchFallback(
+    message,
+    'دستیار هوشمند موقتاً نتوانست پاسخ کامل بدهد، اما این نتایج را برایتان پیدا کردم:',
+  )
+  return { reply: fb.reply, toolsUsed, productIds: fb.productIds }
 }

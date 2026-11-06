@@ -4,5 +4,8 @@
   "scripts": {
     "dev": "bun --hot index.ts",
     "start": "bun index.ts"
+  },
+  "devDependencies": {
+    "@types/bun": "^1.4.4"
   }
 }

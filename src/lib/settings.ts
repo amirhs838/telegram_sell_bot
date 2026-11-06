@@ -5,11 +5,9 @@ export type StoreSettings = {
   storeDescription: string
   supportUsername: string
   currency: string
-  shippingPolicy: string
-  returnPolicy: string
-  warrantyPolicy: string
-  paymentNote: string
-  aiAssistantEnabled: string // 'true' | 'false'
+  // AI assistant toggles
+  aiEnabled: boolean
+  aiTone: string
 }
 
 const DEFAULTS: StoreSettings = {
@@ -17,11 +15,8 @@ const DEFAULTS: StoreSettings = {
   storeDescription: 'به فروشگاه ما خوش آمدید — خرید راحت از طریق تلگرام',
   supportUsername: '',
   currency: 'IRT',
-  shippingPolicy: '',
-  returnPolicy: '',
-  warrantyPolicy: '',
-  paymentNote: '',
-  aiAssistantEnabled: 'true',
+  aiEnabled: true,
+  aiTone: '',
 }
 
 export const SETTING_KEYS = [
@@ -29,11 +24,8 @@ export const SETTING_KEYS = [
   'storeDescription',
   'supportUsername',
   'currency',
-  'shippingPolicy',
-  'returnPolicy',
-  'warrantyPolicy',
-  'paymentNote',
-  'aiAssistantEnabled',
+  'aiEnabled',
+  'aiTone',
 ] as const
 
 export async function getSettings(): Promise<StoreSettings> {
@@ -46,18 +38,9 @@ export async function getSettings(): Promise<StoreSettings> {
     storeDescription: map['storeDescription'] ?? DEFAULTS.storeDescription,
     supportUsername: map['supportUsername'] ?? DEFAULTS.supportUsername,
     currency: map['currency'] ?? DEFAULTS.currency,
-    shippingPolicy: map['shippingPolicy'] ?? DEFAULTS.shippingPolicy,
-    returnPolicy: map['returnPolicy'] ?? DEFAULTS.returnPolicy,
-    warrantyPolicy: map['warrantyPolicy'] ?? DEFAULTS.warrantyPolicy,
-    paymentNote: map['paymentNote'] ?? DEFAULTS.paymentNote,
-    aiAssistantEnabled: map['aiAssistantEnabled'] ?? DEFAULTS.aiAssistantEnabled,
+    aiEnabled: map['aiEnabled'] === undefined ? DEFAULTS.aiEnabled : map['aiEnabled'] === 'true',
+    aiTone: map['aiTone'] ?? DEFAULTS.aiTone,
   }
-}
-
-/** AI assistant on/off switch (panel-controlled, never model-decided). */
-export async function isAiAssistantEnabled(): Promise<boolean> {
-  const s = await getSettings()
-  return s.aiAssistantEnabled !== 'false'
 }
 
 export async function updateSettings(patch: Partial<StoreSettings>): Promise<StoreSettings> {

@@ -5,9 +5,9 @@ import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
 import { Card, CardContent } from '@/components/ui/card'
-import { Loader2, Send, Info } from 'lucide-react'
+import { Loader2, Gem, Info } from 'lucide-react'
 import { toast } from 'sonner'
-import { api, type User } from '@/lib/client'
+import { api, setToken, clearToken, type LoginResponse, type User } from '@/lib/client'
 
 export function LoginView({ onSuccess }: { onSuccess: (user: User) => void }) {
   const [email, setEmail] = useState('')
@@ -24,7 +24,7 @@ export function LoginView({ onSuccess }: { onSuccess: (user: User) => void }) {
     try {
       // silent401: a failed login attempt is NOT an expired session — show the
       // server's own Persian message («ایمیل یا رمز عبور اشتباه است») instead.
-      const res = await api<{ user: User }>(
+      const res = await api<LoginResponse>(
         '/api/auth/login',
         {
           method: 'POST',
@@ -32,6 +32,9 @@ export function LoginView({ onSuccess }: { onSuccess: (user: User) => void }) {
         },
         { silent401: true },
       )
+      // Persist the bearer token — required when the panel runs inside a
+      // cross-origin iframe that strips session cookies.
+      if (res.token) setToken(res.token)
       toast.success(`خوش آمدید، ${res.user.name || 'مدیر'} 👋`)
       onSuccess(res.user)
     } catch (err) {
@@ -46,12 +49,14 @@ export function LoginView({ onSuccess }: { onSuccess: (user: User) => void }) {
       <Card className="w-full max-w-sm rounded-xl border shadow-sm">
         <CardContent className="p-6">
           <div className="flex flex-col items-center text-center">
-            <span className="flex size-14 items-center justify-center rounded-2xl bg-primary text-primary-foreground shadow-sm">
-              <Send className="size-7" aria-hidden />
+            <span className="flex size-14 items-center justify-center rounded-2xl bg-emerald-600 text-white shadow-sm">
+              <Gem className="size-7" aria-hidden />
             </span>
-            <h1 className="mt-4 text-xl font-bold">فروشگاه تلگرامی</h1>
+            <h1 dir="ltr" className="mt-4 text-2xl font-bold tracking-wide text-emerald-800">
+              Silver Love
+            </h1>
             <p className="mt-1 text-sm text-muted-foreground">
-              برای ورود به پنل مدیریت، اطلاعات حساب خود را وارد کنید
+              پنل مدیریت فروشگاه نقره
             </p>
           </div>
 
@@ -107,7 +112,7 @@ export function LoginView({ onSuccess }: { onSuccess: (user: User) => void }) {
       </Card>
 
       <p className="mt-6 text-xs text-muted-foreground">
-        پنل مدیریت فروشگاه تلگرامی — نسخه ۱.۰
+        Silver Love — پنل مدیریت فروشگاه نقره
       </p>
     </div>
   )

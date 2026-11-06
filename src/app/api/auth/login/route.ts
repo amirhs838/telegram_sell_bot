@@ -31,6 +31,9 @@ export const POST = route(async (req: NextRequest) => {
     throw new ApiError(401, 'ایمیل یا رمز عبور اشتباه است')
   }
 
-  await createSession(user.id)
-  return ok({ user: { id: user.id, name: user.name, email: user.email, role: user.role } })
+  const token = await createSession(user.id)
+  // `token` is returned in the body so that browsers running the panel inside a
+  // cross-origin iframe (where session cookies are dropped) can still authenticate
+  // every request via the Authorization header. Same Session row backs both paths.
+  return ok({ token, user: { id: user.id, name: user.name, email: user.email, role: user.role } })
 })

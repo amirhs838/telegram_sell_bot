@@ -3,7 +3,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { Loader2 } from 'lucide-react'
 import { toast } from 'sonner'
-import { api, type User } from '@/lib/client'
+import { api, clearToken, type User } from '@/lib/client'
 import { LoginView } from '@/components/admin/login-view'
 import {
   AdminShell,
@@ -14,12 +14,12 @@ import { DashboardSection } from '@/components/admin/dashboard-section'
 import { ProductsSection } from '@/components/admin/products-section'
 import { CategoriesSection } from '@/components/admin/categories-section'
 import { OrdersSection } from '@/components/admin/orders-section'
+import { PaymentsSection } from '@/components/admin/payments-section'
+import { SilverRateSection } from '@/components/admin/silver-rate-section'
 import { CustomersSection } from '@/components/admin/customers-section'
 import { TelegramSection } from '@/components/admin/telegram-section'
 import { AiSection } from '@/components/admin/ai-section'
 import { SettingsSection } from '@/components/admin/settings-section'
-import { PaymentsSection } from '@/components/admin/payments-section'
-import { SilverRateSection } from '@/components/admin/silver-rate-section'
 
 function sectionFromHash(): SectionKey {
   if (typeof window === 'undefined') return 'dashboard'
@@ -95,6 +95,7 @@ export default function Home() {
     } catch {
       /* session may already be gone */
     }
+    clearToken()
     setUser(null)
     setStatus('anon')
     window.location.hash = '#/dashboard'
@@ -123,7 +124,7 @@ export default function Home() {
       {section === 'categories' && <CategoriesSection />}
       {section === 'orders' && <OrdersSection />}
       {section === 'payments' && <PaymentsSection />}
-      {section === 'silver' && <SilverRateSection />}
+      {section === 'silver-rate' && <SilverRateSection />}
       {section === 'customers' && <CustomersSection />}
       {section === 'telegram' && <TelegramSection />}
       {section === 'ai' && <AiSection />}

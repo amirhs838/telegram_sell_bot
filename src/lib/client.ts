@@ -40,6 +40,13 @@ export type ProductImage = {
   sortOrder: number
 }
 
+/** Payload shape accepted by POST/PATCH /api/products (`images` full-replacement). */
+export type ProductImageInput = {
+  url: string
+  isPrimary?: boolean
+  sortOrder?: number
+}
+
 export type Product = {
   id: string
   name: string
@@ -58,19 +65,19 @@ export type Product = {
   tags: string[] | null
   createdAt: string
   updatedAt: string
-  // Silver specs (optional)
-  sku: string | null
-  silverType: string | null
-  purity: string | null
-  weightGrams: number | null
-  size: string | null
-  dimensions: string | null
-  brand: string | null
-  appearance: string | null
-  careInstructions: string | null
-  authenticity: string | null
-  images: ProductImage[]
   telegramPost: TelegramPost | null
+  // Silver-specific spec fields (all optional, null when unset)
+  productCode?: string | null
+  silverType?: string | null
+  fineness?: number | null
+  weightGrams?: number | null
+  size?: string | null
+  dimensions?: string | null
+  brand?: string | null
+  appearance?: string | null
+  careInstructions?: string | null
+  authenticityNote?: string | null
+  images?: ProductImage[]
 }
 
 export type OrderItem = {
@@ -96,6 +103,47 @@ export type PaymentStatus =
   | 'refund_pending'
   | 'refunded'
 
+/** Persian labels + outline badge classes for payment statuses. */
+export const PAYMENT_STATUS_FA: Record<string, { label: string; badgeClass: string }> = {
+  awaiting_payment: {
+    label: 'در انتظار پرداخت',
+    badgeClass: 'bg-amber-50 text-amber-700 border-amber-200',
+  },
+  payment_review: {
+    label: 'رسید در انتظار بررسی',
+    badgeClass: 'bg-sky-50 text-sky-700 border-sky-200',
+  },
+  paid: {
+    label: 'پرداخت شده',
+    badgeClass: 'bg-emerald-50 text-emerald-700 border-emerald-200',
+  },
+  rejected: {
+    label: 'رد شده',
+    badgeClass: 'bg-rose-50 text-rose-700 border-rose-200',
+  },
+  refund_pending: {
+    label: 'بازپرداخت در انتظار',
+    badgeClass: 'bg-violet-50 text-violet-700 border-violet-200',
+  },
+  refunded: {
+    label: 'بازپرداخت شده',
+    badgeClass: 'bg-slate-100 text-slate-600 border-slate-200',
+  },
+}
+
+/** Latest payment attached to an order (order serializer). */
+export type PaymentSummary = {
+  id: string
+  status: string
+  receiptUrl: string
+  payerName: string | null
+  trackingNumber: string | null
+  customerNote: string | null
+  reviewNote: string | null
+  reviewedAt: string | null
+  createdAt: string
+}
+
 export type Order = {
   id: string
   orderNumber: number
@@ -110,11 +158,67 @@ export type Order = {
   updatedAt: string
   customer: OrderCustomer | null
   items: OrderItem[]
-  payment: {
-    status: PaymentStatus
-    rejectReason: string | null
-    amountSnapshot: number
-  } | null
+  paymentStatus: string
+  trackingCode: string | null
+  payment: PaymentSummary | null
+}
+
+/** A payment record as returned by GET /api/payments. */
+export type PaymentRecord = {
+  id: string
+  status: string
+  amount: number
+  receiptUrl: string
+  payerName: string | null
+  trackingNumber: string | null
+  customerNote: string | null
+  reviewNote: string | null
+  reviewedByName: string | null
+  reviewedAt: string | null
+  createdAt: string
+  order: {
+    id: string
+    orderNumber: number
+    total: number
+    status: string
+    paymentStatus: string
+    customerName: string
+    phone: string | null
+    items: {
+      productNameSnapshot: string
+      quantity: number
+      unitPriceSnapshot: number
+    }[]
+  }
+}
+
+/** Card-to-card payment destination (admin-managed). */
+export type PaymentDestination = {
+  id: string
+  bankName: string
+  accountHolder: string
+  cardNumber: string
+  sheba: string | null
+  accountNumber: string | null
+  note: string | null
+  active: boolean
+  sortOrder: number
+}
+
+/** One registered silver rate row (current or history). */
+export type SilverRateRecord = {
+  id: string
+  ratePerGram: number
+  unit: string
+  note: string | null
+  active: boolean
+  createdByName: string | null
+  createdAt: string
+}
+
+export type SilverRateInfo = {
+  current: SilverRateRecord | null
+  history: SilverRateRecord[]
 }
 
 export type Customer = {
@@ -140,8 +244,7 @@ export type DashboardTotals = {
   todayOrders: number
   totalSales: number
   customers: number
-  paymentsReview?: number
-  paymentsPaid?: number
+  paymentsAwaitingReview: number
 }
 
 export type WeeklyPoint = { date: string; orders: number; sales: number }
@@ -157,10 +260,10 @@ export type RecentOrder = {
 
 export type DashboardStats = {
   totals: DashboardTotals
-  silverRate?: { pricePerGram: number; unit: string } | null
   weekly: WeeklyPoint[]
   recentOrders: RecentOrder[]
   statusCounts: Record<OrderStatus, number>
+  paymentStatusCounts: Record<string, number>
 }
 
 export type Settings = {
@@ -168,11 +271,8 @@ export type Settings = {
   storeDescription: string
   supportUsername: string
   currency: string
-  shippingPolicy: string
-  returnPolicy: string
-  warrantyPolicy: string
-  paymentNote: string
-  aiAssistantEnabled: string
+  aiEnabled: boolean
+  aiTone: string
 }
 
 export type TelegramInfo = {
@@ -246,6 +346,36 @@ export type BotReply = {
 }
 
 // ---------------------------------------------------------------------------
+// Auth token (localStorage fallback for cross-origin iframe previews)
+// ---------------------------------------------------------------------------
+
+const TOKEN_KEY = 'tcb_token'
+
+export function getToken(): string | null {
+  try {
+    return localStorage.getItem(TOKEN_KEY)
+  } catch {
+    return null
+  }
+}
+
+export function setToken(token: string) {
+  try {
+    localStorage.setItem(TOKEN_KEY, token)
+  } catch {
+    /* storage unavailable */
+  }
+}
+
+export function clearToken() {
+  try {
+    localStorage.removeItem(TOKEN_KEY)
+  } catch {
+    /* storage unavailable */
+  }
+}
+
+// ---------------------------------------------------------------------------
 // Fetch helper
 // ---------------------------------------------------------------------------
 
@@ -273,12 +403,17 @@ export async function api<T>(
   if (init?.body && !(init.body instanceof FormData)) {
     headers['Content-Type'] = 'application/json'
   }
+  // Bearer token beats cookie-restricted contexts (preview iframes block
+  // third-party cookies, so the httpOnly session cookie may never be sent).
+  const token = getToken()
+  if (token) headers['Authorization'] = `Bearer ${token}`
   const res = await fetch(path, {
     ...init,
     headers: { ...headers, ...(init?.headers as Record<string, string> | undefined) },
   })
 
   if (res.status === 401) {
+    clearToken()
     // Prefer the server's own Persian message (e.g. «ایمیل یا رمز عبور اشتباه است»
     // on a failed login) over the generic session-expired text.
     let serverMsg = ''
@@ -321,6 +456,8 @@ export async function api<T>(
   return data as T
 }
 
+export type LoginResponse = { token: string; user: User }
+
 /** Builds a query string, skipping empty values. */
 export function qs(params: Record<string, string | number | undefined | null>): string {
   const sp = new URLSearchParams()
@@ -360,6 +497,38 @@ export function fmtRel(d: string | Date): string {
   if (abs < 86400) return rtf.format(Math.round(diffSec / 3600), 'hour')
   if (abs < 2592000) return rtf.format(Math.round(diffSec / 86400), 'day')
   return fmtDay(d)
+}
+
+/**
+ * Fetches a PRIVATE receipt image with the bearer token attached, converts the
+ * response to a blob URL for <img> display. Caller MUST revoke the returned
+ * object URL (see ReceiptImage component which does this on unmount).
+ * Never put receipt URLs directly into <img src> — they require auth.
+ */
+export async function fetchReceiptBlobUrl(url: string): Promise<string> {
+  const headers: Record<string, string> = {}
+  const token = getToken()
+  if (token) headers['Authorization'] = `Bearer ${token}`
+  const res = await fetch(url, { headers })
+  if (!res.ok) {
+    let msg = `دریافت تصویر رسید ناموفق بود (${res.status})`
+    try {
+      const d: unknown = await res.json()
+      if (
+        d &&
+        typeof d === 'object' &&
+        'error' in d &&
+        typeof (d as { error: unknown }).error === 'string'
+      ) {
+        msg = (d as { error: string }).error
+      }
+    } catch {
+      /* not JSON */
+    }
+    throw new ApiError(msg, res.status)
+  }
+  const blob = await res.blob()
+  return URL.createObjectURL(blob)
 }
 
 /** Converts Telegram HTML parse-mode text into plain text (chat simulator). */

@@ -5,6 +5,7 @@ import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
 import { Textarea } from '@/components/ui/textarea'
+import { Badge } from '@/components/ui/badge'
 import {
   Dialog,
   DialogContent,
@@ -20,17 +21,25 @@ import {
   SelectTrigger,
   SelectValue,
 } from '@/components/ui/select'
+import {
+  Collapsible,
+  CollapsibleContent,
+  CollapsibleTrigger,
+} from '@/components/ui/collapsible'
 import { AiSuggestionList } from '@/components/admin/ai-suggestion'
 import {
   Loader2,
   Sparkles,
-  X,
+  Upload,
   ImagePlus,
   Bot,
-  Star,
-  ChevronUp,
-  ChevronDown,
   Gem,
+  Star,
+  Trash2,
+  ChevronRight,
+  ChevronLeft,
+  ChevronDown,
+  X,
 } from 'lucide-react'
 import { toast } from 'sonner'
 import {
@@ -38,11 +47,10 @@ import {
   type AiSuggestion,
   type Category,
   type Product,
+  type ProductImageInput,
   type ProductStatus,
 } from '@/lib/client'
 import { cn } from '@/lib/utils'
-
-type GalleryItem = { url: string; isPrimary: boolean }
 
 type FormState = {
   name: string
@@ -54,19 +62,17 @@ type FormState = {
   shortDescription: string
   description: string
   tags: string
-  // gallery
-  images: GalleryItem[]
-  // Silver specs (optional)
-  sku: string
+  // Silver spec (optional)
+  productCode: string
   silverType: string
-  purity: string
+  fineness: string
   weightGrams: string
   size: string
   dimensions: string
   brand: string
   appearance: string
   careInstructions: string
-  authenticity: string
+  authenticityNote: string
 }
 
 const EMPTY_FORM: FormState = {
@@ -79,17 +85,29 @@ const EMPTY_FORM: FormState = {
   shortDescription: '',
   description: '',
   tags: '',
-  images: [],
-  sku: '',
+  productCode: '',
   silverType: '',
-  purity: '',
+  fineness: '',
   weightGrams: '',
   size: '',
   dimensions: '',
   brand: '',
   appearance: '',
   careInstructions: '',
-  authenticity: '',
+  authenticityNote: '',
+}
+
+type GalleryImage = { url: string; isPrimary: boolean; sortOrder: number }
+
+function seedImages(p: Product | null): GalleryImage[] {
+  if (p?.images?.length) {
+    return [...p.images]
+      .sort((a, b) => a.sortOrder - b.sortOrder)
+      .map((im) => ({ url: im.url, isPrimary: im.isPrimary, sortOrder: im.sortOrder }))
+  }
+  // Legacy single image becomes the first gallery entry
+  if (p?.imageUrl) return [{ url: p.imageUrl, isPrimary: true, sortOrder: 0 }]
+  return []
 }
 
 function toForm(p: Product | null): FormState {
@@ -104,17 +122,16 @@ function toForm(p: Product | null): FormState {
     shortDescription: p.shortDescription ?? '',
     description: p.description ?? '',
     tags: (p.tags ?? []).join('، '),
-    images: (p.images ?? []).map((i) => ({ url: i.url, isPrimary: i.isPrimary })),
-    sku: p.sku ?? '',
+    productCode: p.productCode ?? '',
     silverType: p.silverType ?? '',
-    purity: p.purity ?? '',
+    fineness: p.fineness != null ? String(p.fineness) : '',
     weightGrams: p.weightGrams != null ? String(p.weightGrams) : '',
     size: p.size ?? '',
     dimensions: p.dimensions ?? '',
     brand: p.brand ?? '',
     appearance: p.appearance ?? '',
     careInstructions: p.careInstructions ?? '',
-    authenticity: p.authenticity ?? '',
+    authenticityNote: p.authenticityNote ?? '',
   }
 }
 
@@ -124,9 +141,6 @@ function parseTags(raw: string): string[] {
     .map((t) => t.trim())
     .filter(Boolean)
 }
-
-/** Optional string field → null when empty. */
-const opt = (v: string) => (v.trim() ? v.trim() : null)
 
 export function ProductFormDialog({
   open,
@@ -142,19 +156,25 @@ export function ProductFormDialog({
   onSaved: () => void
 }) {
   const [form, setForm] = useState<FormState>(EMPTY_FORM)
+  const [images, setImages] = useState<GalleryImage[]>([])
+  const [specsOpen, setSpecsOpen] = useState(false)
   const [saving, setSaving] = useState(false)
   const [roughInfo, setRoughInfo] = useState('')
   const [generating, setGenerating] = useState(false)
   const [suggestion, setSuggestion] = useState<AiSuggestion | null>(null)
   const [uploading, setUploading] = useState(false)
+  const [previewUrl, setPreviewUrl] = useState<string | null>(null)
   const fileRef = useRef<HTMLInputElement>(null)
   const isEdit = Boolean(product)
 
   useEffect(() => {
     if (open) {
       setForm(toForm(product))
+      setImages(seedImages(product))
       setSuggestion(null)
       setRoughInfo('')
+      setSpecsOpen(false)
+      setPreviewUrl(null)
     }
   }, [open, product])
 
@@ -162,69 +182,67 @@ export function ProductFormDialog({
     setForm((f) => ({ ...f, [key]: value }))
   }
 
-  // ─── Gallery management ────────────────────────────────────────────────────
+  // ---------------------------------------------------------------------------
+  // Gallery manager helpers
+  // ---------------------------------------------------------------------------
 
   async function uploadImages(e: ChangeEvent<HTMLInputElement>) {
     const files = Array.from(e.target.files ?? [])
     e.target.value = ''
     if (files.length === 0) return
-    if (form.images.length + files.length > 12) {
-      toast.error('حداکثر ۱۲ تصویر برای هر محصول مجاز است')
-      return
-    }
     setUploading(true)
+    let ok = 0
     try {
-      const uploaded: GalleryItem[] = []
-      for (const file of files) {
+      for (let i = 0; i < files.length; i++) {
         const fd = new FormData()
-        fd.append('file', file)
-        const res = await api<{ url: string; name: string; size: number }>('/api/uploads', {
-          method: 'POST',
-          body: fd,
-        })
-        uploaded.push({ url: res.url, isPrimary: false })
+        fd.append('file', files[i])
+        try {
+          const res = await api<{ url: string; name: string; size: number }>('/api/uploads', {
+            method: 'POST',
+            body: fd,
+          })
+          setImages((prev) => {
+            const next = [...prev, { url: res.url, isPrimary: prev.length === 0, sortOrder: prev.length }]
+            return next
+          })
+          ok++
+        } catch (err) {
+          toast.error(`آپلود فایل ${i + 1} ناموفق بود: ${(err as Error).message}`)
+        }
       }
-      setForm((f) => {
-        const images = [...f.images, ...uploaded]
-        if (!images.some((i) => i.isPrimary) && images.length > 0) images[0].isPrimary = true
-        return { ...f, images }
-      })
-      toast.success(`${uploaded.length} تصویر آپلود شد`)
-    } catch (err) {
-      toast.error((err as Error).message)
+      if (ok > 0) toast.success(`${ok} تصویر آپلود شد`)
     } finally {
       setUploading(false)
     }
   }
 
-  function removeImage(idx: number) {
-    setForm((f) => {
-      const images = f.images.filter((_, i) => i !== idx)
-      if (!images.some((i) => i.isPrimary) && images.length > 0) images[0].isPrimary = true
-      return { ...f, images }
+  function makePrimary(index: number) {
+    setImages((prev) => prev.map((im, i) => ({ ...im, isPrimary: i === index })))
+  }
+
+  function moveImage(index: number, dir: -1 | 1) {
+    setImages((prev) => {
+      const target = index + dir
+      if (target < 0 || target >= prev.length) return prev
+      const next = [...prev]
+      const [item] = next.splice(index, 1)
+      next.splice(target, 0, item)
+      return next.map((im, i) => ({ ...im, sortOrder: i }))
     })
   }
 
-  function setPrimary(idx: number) {
-    setForm((f) => ({
-      ...f,
-      images: f.images.map((im, i) => ({ ...im, isPrimary: i === idx })),
-    }))
-  }
-
-  function moveImage(idx: number, dir: -1 | 1) {
-    setForm((f) => {
-      const images = [...f.images]
-      const j = idx + dir
-      if (j < 0 || j >= images.length) return f
-      const a = images[idx]
-      images[idx] = images[j]
-      images[j] = a
-      return { ...f, images }
+  function removeImage(index: number) {
+    setImages((prev) => {
+      const next = prev.filter((_, i) => i !== index)
+      // keep exactly one primary when possible
+      if (!next.some((im) => im.isPrimary) && next.length > 0) next[0] = { ...next[0], isPrimary: true }
+      return next.map((im, i) => ({ ...im, sortOrder: i }))
     })
   }
 
-  // ─── AI content (unchanged behavior — never touches price/stock) ───────────
+  // ---------------------------------------------------------------------------
+  // AI content generation (untouched panel)
+  // ---------------------------------------------------------------------------
 
   async function generate() {
     if (roughInfo.trim().length < 10) {
@@ -288,7 +306,9 @@ export function ProductFormDialog({
     toast.success('پیشنهادها روی فرم اعمال شد (قیمت و موجودی دست‌نخورده ماند)')
   }
 
-  // ─── Save ──────────────────────────────────────────────────────────────────
+  // ---------------------------------------------------------------------------
+  // Save
+  // ---------------------------------------------------------------------------
 
   async function save() {
     const name = form.name.trim()
@@ -307,9 +327,14 @@ export function ProductFormDialog({
       toast.error('قیمت قبل از تخفیف معتبر نیست')
       return
     }
-    const weight = form.weightGrams.trim() ? Number(form.weightGrams) : null
-    if (weight !== null && (!Number.isFinite(weight) || weight < 0)) {
-      toast.error('وزن معتبر نیست')
+    const fineness = form.fineness.trim() ? Number(form.fineness) : null
+    if (fineness !== null && !Number.isFinite(fineness)) {
+      toast.error('عیار معتبر وارد کنید')
+      return
+    }
+    const weightGrams = form.weightGrams.trim() ? Number(form.weightGrams) : null
+    if (weightGrams !== null && !Number.isFinite(weightGrams)) {
+      toast.error('وزن معتبر وارد کنید')
       return
     }
 
@@ -323,19 +348,23 @@ export function ProductFormDialog({
       shortDescription: form.shortDescription.trim() || null,
       description: form.description.trim() || null,
       tags: parseTags(form.tags),
-      // gallery (primary is mirrored server-side into imageUrl)
-      images: form.images.map((i) => ({ url: i.url, isPrimary: i.isPrimary })),
-      // Silver specs — the seller decides everything; the system never prices products
-      sku: opt(form.sku),
-      silverType: opt(form.silverType),
-      purity: opt(form.purity),
-      weightGrams: weight,
-      size: opt(form.size),
-      dimensions: opt(form.dimensions),
-      brand: opt(form.brand),
-      appearance: opt(form.appearance),
-      careInstructions: opt(form.careInstructions),
-      authenticity: opt(form.authenticity),
+      // gallery wins — legacy imageUrl is intentionally not sent
+      images: images.map<ProductImageInput>((im, i) => ({
+        url: im.url,
+        isPrimary: im.isPrimary,
+        sortOrder: i,
+      })),
+      // silver specs (null when empty)
+      productCode: form.productCode.trim() || null,
+      silverType: form.silverType.trim() || null,
+      fineness,
+      weightGrams,
+      size: form.size.trim() || null,
+      dimensions: form.dimensions.trim() || null,
+      brand: form.brand.trim() || null,
+      appearance: form.appearance.trim() || null,
+      careInstructions: form.careInstructions.trim() || null,
+      authenticityNote: form.authenticityNote.trim() || null,
     }
 
     setSaving(true)
@@ -371,29 +400,6 @@ export function ProductFormDialog({
     statusOptions.push({ value: 'out_of_stock', label: 'ناموجود' })
   }
 
-  const specField = (
-    id: string,
-    label: string,
-    key: keyof FormState,
-    placeholder?: string,
-    type: 'text' | 'number' = 'text',
-  ) => (
-    <div className="space-y-1.5">
-      <Label htmlFor={id}>{label}</Label>
-      <Input
-        id={id}
-        dir={type === 'number' ? 'ltr' : undefined}
-        className={type === 'number' ? 'text-left' : undefined}
-        type={type}
-        min={type === 'number' ? 0 : undefined}
-        step={type === 'number' ? '0.1' : undefined}
-        value={form[key] as string}
-        onChange={(e) => set(key, e.target.value as FormState[typeof key])}
-        placeholder={placeholder}
-      />
-    </div>
-  )
-
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent className="max-h-[90vh] overflow-y-auto sm:max-w-2xl">
@@ -413,7 +419,7 @@ export function ProductFormDialog({
                 id="p-name"
                 value={form.name}
                 onChange={(e) => set('name', e.target.value)}
-                placeholder="مثلاً: انگشتر نقره مردانه مدل اژدها"
+                placeholder="مثلاً: گردنبند نقره زنانه قلب"
               />
             </div>
             <div className="space-y-1.5">
@@ -433,7 +439,7 @@ export function ProductFormDialog({
               </Select>
             </div>
             <div className="space-y-1.5">
-              <Label htmlFor="p-price">قیمت نهایی فروش (تومان) *</Label>
+              <Label htmlFor="p-price">قیمت نهایی (تومان) *</Label>
               <Input
                 id="p-price"
                 dir="ltr"
@@ -442,10 +448,10 @@ export function ProductFormDialog({
                 min={0}
                 value={form.price}
                 onChange={(e) => set('price', e.target.value)}
-                placeholder="2450000"
+                placeholder="1500000"
               />
               <p className="text-xs text-muted-foreground">
-                قیمت نهایی را خودتان تعیین می‌کنید — سیستم هیچ محاسبه‌ای انجام نمی‌دهد
+                قیمت را دستی وارد کنید — سیستم هیچ محاسبه‌ای انجام نمی‌دهد
               </p>
             </div>
             <div className="space-y-1.5">
@@ -458,7 +464,7 @@ export function ProductFormDialog({
                 min={0}
                 value={form.compareAtPrice}
                 onChange={(e) => set('compareAtPrice', e.target.value)}
-                placeholder="2800000"
+                placeholder="1800000"
               />
             </div>
             <div className="space-y-1.5">
@@ -516,166 +522,253 @@ export function ProductFormDialog({
                 id="p-tags"
                 value={form.tags}
                 onChange={(e) => set('tags', e.target.value)}
-                placeholder="انگشتر، دست‌ساز، نقره ۹۲۵"
+                placeholder="نقره، گردنبند، هدیه"
               />
             </div>
-          </div>
 
-          {/* ── Gallery (multi-image) ── */}
-          <div className="space-y-2 rounded-xl border p-3">
-            <div className="flex items-center justify-between">
-              <Label>تصاویر محصول</Label>
-              <span className="text-xs text-muted-foreground">
-                {form.images.length} / ۱۲
-              </span>
-            </div>
-            <input
-              ref={fileRef}
-              type="file"
-              multiple
-              accept="image/jpeg,image/png,image/webp,image/gif"
-              className="sr-only"
-              onChange={uploadImages}
-            />
-            <Button
-              type="button"
-              variant="outline"
-              onClick={() => fileRef.current?.click()}
-              disabled={uploading || form.images.length >= 12}
-            >
-              {uploading ? (
-                <Loader2 className="size-4 animate-spin" aria-hidden />
+            {/* Gallery manager */}
+            <div className="space-y-2 md:col-span-2">
+              <div className="flex flex-wrap items-center justify-between gap-2">
+                <Label>تصاویر محصول</Label>
+                <input
+                  ref={fileRef}
+                  type="file"
+                  multiple
+                  accept="image/jpeg,image/png,image/webp,image/gif"
+                  className="sr-only"
+                  onChange={uploadImages}
+                  aria-label="انتخاب چند تصویر برای آپلود"
+                />
+                <Button
+                  type="button"
+                  variant="outline"
+                  size="sm"
+                  onClick={() => fileRef.current?.click()}
+                  disabled={uploading}
+                >
+                  {uploading ? (
+                    <Loader2 className="size-4 animate-spin" aria-hidden />
+                  ) : (
+                    <ImagePlus className="size-4" aria-hidden />
+                  )}
+                  {uploading ? 'در حال آپلود…' : 'افزودن تصاویر'}
+                </Button>
+              </div>
+
+              {images.length === 0 ? (
+                <button
+                  type="button"
+                  onClick={() => fileRef.current?.click()}
+                  disabled={uploading}
+                  className="flex min-h-24 w-full flex-col items-center justify-center gap-1.5 rounded-xl border border-dashed text-sm text-muted-foreground transition-colors hover:border-emerald-300 hover:bg-emerald-50/40 focus-visible:ring-2 focus-visible:ring-ring/50 outline-none disabled:opacity-60"
+                >
+                  {uploading ? (
+                    <Loader2 className="size-5 animate-spin text-emerald-600" aria-hidden />
+                  ) : (
+                    <Upload className="size-5" aria-hidden />
+                  )}
+                  {uploading ? 'در حال آپلود تصاویر…' : 'برای افزودن تصویر کلیک کنید (چندتایی پشتیبانی می‌شود)'}
+                  <span className="text-xs">JPG، PNG، WebP یا GIF — حداکثر ۵ مگابایت</span>
+                </button>
               ) : (
-                <ImagePlus className="size-4" aria-hidden />
-              )}
-              {uploading ? 'در حال آپلود…' : 'افزودن تصویر (چندتایی)'}
-            </Button>
-            <p className="text-xs text-muted-foreground">
-              JPG، PNG، WebP یا GIF — حداکثر ۵ مگابایت برای هر فایل. اولین تصویر به‌صورت
-              پیش‌فرض «تصویر اصلی» است؛ با ستاره آن را عوض کنید.
-            </p>
-            {form.images.length > 0 && (
-              <ul className="grid grid-cols-2 gap-2 sm:grid-cols-3">
-                {form.images.map((im, idx) => (
-                  <li
-                    key={`${im.url}-${idx}`}
-                    className={cn(
-                      'group relative overflow-hidden rounded-lg border bg-muted/30',
-                      im.isPrimary && 'border-emerald-500 ring-1 ring-emerald-500',
-                    )}
-                  >
-                    <img
-                      src={im.url}
-                      alt={`تصویر ${idx + 1} محصول`}
-                      className="aspect-square w-full object-cover"
-                    />
-                    {im.isPrimary && (
-                      <span className="absolute right-1 top-1 flex items-center gap-1 rounded-md bg-emerald-600 px-1.5 py-0.5 text-[10px] font-medium text-white">
-                        <Star className="size-3" aria-hidden /> اصلی
-                      </span>
-                    )}
-                    <div className="flex items-center justify-between border-t bg-card p-1">
-                      <div className="flex items-center gap-0.5">
-                        <Button
+                <ul className="grid grid-cols-3 gap-2 sm:grid-cols-4 md:grid-cols-5">
+                  {images.map((im, i) => (
+                    <li
+                      key={`${im.url}-${i}`}
+                      className="group relative aspect-square overflow-hidden rounded-lg border bg-muted/40"
+                    >
+                      <img
+                        src={im.url}
+                        alt={`تصویر ${i + 1} محصول`}
+                        className="size-full cursor-zoom-in object-cover"
+                        onClick={() => setPreviewUrl(im.url)}
+                      />
+                      {im.isPrimary && (
+                        <Badge className="absolute start-1 top-1 gap-1 bg-emerald-600 px-1.5 py-0 text-[10px] text-white hover:bg-emerald-600">
+                          <Star className="size-2.5" aria-hidden />
+                          تصویر اصلی
+                        </Badge>
+                      )}
+                      <div className="absolute inset-x-0 bottom-0 flex items-center justify-center gap-0.5 bg-black/55 p-0.5 opacity-0 transition-opacity group-hover:opacity-100 group-focus-within:opacity-100">
+                        <button
                           type="button"
-                          variant="ghost"
-                          size="icon"
-                          className="size-7"
-                          aria-label="انتقال به عقب"
-                          disabled={idx === 0}
-                          onClick={() => moveImage(idx, -1)}
+                          onClick={() => makePrimary(i)}
+                          className={cn(
+                            'flex size-7 items-center justify-center rounded text-white transition-colors hover:bg-white/20 focus-visible:ring-2 focus-visible:ring-white/60 outline-none',
+                            im.isPrimary && 'text-amber-300',
+                          )}
+                          aria-label={im.isPrimary ? 'تصویر اصلی' : 'تنظیم به‌عنوان تصویر اصلی'}
                         >
-                          <ChevronUp className="size-3.5" aria-hidden />
-                        </Button>
-                        <Button
+                          <Star className="size-3.5" aria-hidden />
+                        </button>
+                        <button
                           type="button"
-                          variant="ghost"
-                          size="icon"
-                          className="size-7"
-                          aria-label="انتقال به جلو"
-                          disabled={idx === form.images.length - 1}
-                          onClick={() => moveImage(idx, 1)}
+                          onClick={() => moveImage(i, -1)}
+                          disabled={i === 0}
+                          className="flex size-7 items-center justify-center rounded text-white transition-colors hover:bg-white/20 focus-visible:ring-2 focus-visible:ring-white/60 outline-none disabled:opacity-40"
+                          aria-label="جابجایی به سمت راست"
                         >
-                          <ChevronDown className="size-3.5" aria-hidden />
-                        </Button>
-                      </div>
-                      <div className="flex items-center gap-0.5">
-                        {!im.isPrimary && (
-                          <Button
-                            type="button"
-                            variant="ghost"
-                            size="icon"
-                            className="size-7"
-                            aria-label="انتخاب به‌عنوان تصویر اصلی"
-                            onClick={() => setPrimary(idx)}
-                          >
-                            <Star className="size-3.5 text-amber-500" aria-hidden />
-                          </Button>
-                        )}
-                        <Button
+                          <ChevronRight className="size-3.5" aria-hidden />
+                        </button>
+                        <button
                           type="button"
-                          variant="ghost"
-                          size="icon"
-                          className="size-7 text-rose-500"
+                          onClick={() => moveImage(i, 1)}
+                          disabled={i === images.length - 1}
+                          className="flex size-7 items-center justify-center rounded text-white transition-colors hover:bg-white/20 focus-visible:ring-2 focus-visible:ring-white/60 outline-none disabled:opacity-40"
+                          aria-label="جابجایی به سمت چپ"
+                        >
+                          <ChevronLeft className="size-3.5" aria-hidden />
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => removeImage(i)}
+                          className="flex size-7 items-center justify-center rounded text-white transition-colors hover:bg-rose-600/80 focus-visible:ring-2 focus-visible:ring-white/60 outline-none"
                           aria-label="حذف تصویر"
-                          onClick={() => removeImage(idx)}
                         >
-                          <X className="size-3.5" aria-hidden />
-                        </Button>
+                          <Trash2 className="size-3.5" aria-hidden />
+                        </button>
                       </div>
-                    </div>
-                  </li>
-                ))}
-              </ul>
-            )}
-          </div>
-
-          {/* ── Silver specs (optional) ── */}
-          <div className="rounded-xl border p-3">
-            <p className="mb-3 flex items-center gap-1.5 text-sm font-medium">
-              <Gem className="size-4 text-slate-500" aria-hidden />
-              مشخصات نقره (اختیاری — مطابق نوع کالا پر کنید)
-            </p>
-            <div className="grid grid-cols-1 gap-3 md:grid-cols-2">
-              {specField('p-sku', 'کد محصول', 'sku', 'SL-RG-101')}
-              {specField('p-silver-type', 'نوع نقره', 'silverType', 'دست‌ساز / ماشین‌ساز / شمش')}
-              {specField('p-purity', 'عیار', 'purity', '925')}
-              {specField('p-weight', 'وزن (گرم)', 'weightGrams', '12.5', 'number')}
-              {specField('p-size', 'سایز', 'size', '۵۴ تا ۵۸')}
-              {specField('p-dimensions', 'ابعاد', 'dimensions', '۵۰×۲۹×۵ میلی‌متر')}
-              {specField('p-brand', 'برند یا سازنده', 'brand', 'Silver Love')}
-              <div className="space-y-1.5 md:col-span-2">
-                <Label htmlFor="p-appearance">مشخصات ظاهری</Label>
-                <Textarea
-                  id="p-appearance"
-                  rows={2}
-                  value={form.appearance}
-                  onChange={(e) => set('appearance', e.target.value)}
-                  placeholder="نقش برجسته، پرداخت مات و براق…"
-                />
-              </div>
-              <div className="space-y-1.5">
-                <Label htmlFor="p-care">شرایط نگهداری</Label>
-                <Textarea
-                  id="p-care"
-                  rows={2}
-                  value={form.careInstructions}
-                  onChange={(e) => set('careInstructions', e.target.value)}
-                  placeholder="دور از عطر و مواد شیمیایی…"
-                />
-              </div>
-              <div className="space-y-1.5">
-                <Label htmlFor="p-authenticity">اصالت و ضمانت</Label>
-                <Textarea
-                  id="p-authenticity"
-                  rows={2}
-                  value={form.authenticity}
-                  onChange={(e) => set('authenticity', e.target.value)}
-                  placeholder="دارای مهر عیار ۹۲۵ و گواهی اصالت…"
-                />
-              </div>
+                    </li>
+                  ))}
+                </ul>
+              )}
+              <p className="text-xs text-muted-foreground">
+                با ستاره، تصویر اصلی را انتخاب کنید؛ با فلش‌ها ترتیب را تغییر دهید. ذخیره نهایی با دکمه پایین فرم انجام می‌شود.
+              </p>
             </div>
           </div>
+
+          {/* Silver specs (optional) */}
+          <Collapsible open={specsOpen} onOpenChange={setSpecsOpen}>
+            <CollapsibleTrigger asChild>
+              <Button
+                type="button"
+                variant="outline"
+                className="w-full justify-between"
+                aria-expanded={specsOpen}
+              >
+                <span className="flex items-center gap-2">
+                  <Gem className="size-4 text-emerald-600" aria-hidden />
+                  مشخصات نقره (اختیاری)
+                </span>
+                <ChevronDown
+                  className={cn('size-4 transition-transform', specsOpen && 'rotate-180')}
+                  aria-hidden
+                />
+              </Button>
+            </CollapsibleTrigger>
+            <CollapsibleContent>
+              <div className="mt-3 grid grid-cols-1 gap-4 rounded-xl border p-4 sm:grid-cols-2">
+                <div className="space-y-1.5">
+                  <Label htmlFor="p-code">کد محصول</Label>
+                  <Input
+                    id="p-code"
+                    dir="ltr"
+                    className="text-left"
+                    value={form.productCode}
+                    onChange={(e) => set('productCode', e.target.value)}
+                    placeholder="SL-1024"
+                  />
+                </div>
+                <div className="space-y-1.5">
+                  <Label htmlFor="p-silver-type">نوع نقره</Label>
+                  <Input
+                    id="p-silver-type"
+                    value={form.silverType}
+                    onChange={(e) => set('silverType', e.target.value)}
+                    placeholder="مثلاً: نقره استرلینگ"
+                  />
+                </div>
+                <div className="space-y-1.5">
+                  <Label htmlFor="p-fineness">عیار</Label>
+                  <Input
+                    id="p-fineness"
+                    dir="ltr"
+                    className="text-left"
+                    type="number"
+                    min={0}
+                    max={1000}
+                    value={form.fineness}
+                    onChange={(e) => set('fineness', e.target.value)}
+                    placeholder="925"
+                  />
+                </div>
+                <div className="space-y-1.5">
+                  <Label htmlFor="p-weight">وزن (گرم)</Label>
+                  <div className="flex items-center gap-2">
+                    <Input
+                      id="p-weight"
+                      dir="ltr"
+                      className="text-left"
+                      type="number"
+                      min={0}
+                      step={0.1}
+                      value={form.weightGrams}
+                      onChange={(e) => set('weightGrams', e.target.value)}
+                      placeholder="12.5"
+                    />
+                    <span className="shrink-0 text-sm text-muted-foreground">گرم</span>
+                  </div>
+                </div>
+                <div className="space-y-1.5">
+                  <Label htmlFor="p-size">سایز</Label>
+                  <Input
+                    id="p-size"
+                    value={form.size}
+                    onChange={(e) => set('size', e.target.value)}
+                    placeholder="مثلاً: ۵۴"
+                  />
+                </div>
+                <div className="space-y-1.5">
+                  <Label htmlFor="p-dimensions">ابعاد</Label>
+                  <Input
+                    id="p-dimensions"
+                    value={form.dimensions}
+                    onChange={(e) => set('dimensions', e.target.value)}
+                    placeholder="مثلاً: ۲×۳ سانتی‌متر"
+                  />
+                </div>
+                <div className="space-y-1.5">
+                  <Label htmlFor="p-brand">برند</Label>
+                  <Input
+                    id="p-brand"
+                    value={form.brand}
+                    onChange={(e) => set('brand', e.target.value)}
+                    placeholder="Silver Love"
+                  />
+                </div>
+                <div className="space-y-1.5">
+                  <Label htmlFor="p-appearance">ظاهر و طراحی</Label>
+                  <Input
+                    id="p-appearance"
+                    value={form.appearance}
+                    onChange={(e) => set('appearance', e.target.value)}
+                    placeholder="مثلاً: مات، با آبکاری رودیوم"
+                  />
+                </div>
+                <div className="space-y-1.5 sm:col-span-2">
+                  <Label htmlFor="p-care">دستور نگهداری</Label>
+                  <Textarea
+                    id="p-care"
+                    rows={2}
+                    value={form.careInstructions}
+                    onChange={(e) => set('careInstructions', e.target.value)}
+                    placeholder="مثلاً: پس از استفاده با دستمال نرم تمیز و در بسته‌بندی نگهداری کنید"
+                  />
+                </div>
+                <div className="space-y-1.5 sm:col-span-2">
+                  <Label htmlFor="p-authenticity">یادداشت اصالت</Label>
+                  <Textarea
+                    id="p-authenticity"
+                    rows={2}
+                    value={form.authenticityNote}
+                    onChange={(e) => set('authenticityNote', e.target.value)}
+                    placeholder="مثلاً: دارای مهر عیار و کارت اصالت"
+                  />
+                </div>
+              </div>
+            </CollapsibleContent>
+          </Collapsible>
 
           {/* AI panel */}
           <div className="rounded-xl border border-emerald-200 bg-emerald-50/50 p-3">
@@ -687,7 +780,7 @@ export function ProductFormDialog({
               rows={3}
               value={roughInfo}
               onChange={(e) => setRoughInfo(e.target.value)}
-              placeholder="اطلاعات خام محصول… مثلاً: انگشتر نقره ۹۲۵ دست‌ساز، وزن ۱۲ گرم، نقش اژدها، مناسب هدیه"
+              placeholder="اطلاعات خام محصول… مثلاً: گردنبند نقره ۹۲۵، طرح قلب، وزن ۱۲ گرم، مناسب هدیه ولنتاین"
               className="bg-card"
             />
             <div className="mt-2 flex items-center gap-2">
@@ -730,6 +823,34 @@ export function ProductFormDialog({
             {isEdit ? 'ذخیره تغییرات' : 'ایجاد محصول'}
           </Button>
         </DialogFooter>
+
+        {/* Image preview dialog */}
+        <Dialog open={Boolean(previewUrl)} onOpenChange={(o) => !o && setPreviewUrl(null)}>
+          <DialogContent className="sm:max-w-lg">
+            <DialogHeader>
+              <DialogTitle className="sr-only">پیش‌نمایش تصویر</DialogTitle>
+            </DialogHeader>
+            {previewUrl && (
+              <div className="relative">
+                <img
+                  src={previewUrl}
+                  alt="پیش‌نمایش تصویر محصول"
+                  className="max-h-[70vh] w-full rounded-lg object-contain"
+                />
+                <Button
+                  type="button"
+                  variant="secondary"
+                  size="icon"
+                  className="absolute end-2 top-2"
+                  onClick={() => setPreviewUrl(null)}
+                  aria-label="بستن پیش‌نمایش"
+                >
+                  <X className="size-4" />
+                </Button>
+              </div>
+            )}
+          </DialogContent>
+        </Dialog>
       </DialogContent>
     </Dialog>
   )

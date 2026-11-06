@@ -28,6 +28,8 @@ import {
   Package,
   Tags,
   ShoppingCart,
+  Banknote,
+  CircleDollarSign,
   Users,
   Send,
   Sparkles,
@@ -37,7 +39,6 @@ import {
   KeyRound,
   Loader2,
   Bot,
-  Wallet,
   Gem,
 } from 'lucide-react'
 import { toast } from 'sonner'
@@ -55,7 +56,7 @@ export const SECTION_KEYS = [
   'categories',
   'orders',
   'payments',
-  'silver',
+  'silver-rate',
   'customers',
   'telegram',
   'ai',
@@ -69,8 +70,8 @@ export const SECTION_TITLES: Record<SectionKey, string> = {
   products: 'مدیریت محصولات',
   categories: 'دسته‌بندی‌ها',
   orders: 'سفارش‌ها',
-  payments: 'پرداخت',
-  silver: 'نرخ نقره',
+  payments: 'پرداخت‌ها',
+  'silver-rate': 'نرخ نقره',
   customers: 'مشتریان',
   telegram: 'تلگرام و ربات',
   ai: 'ابزارهای هوش مصنوعی',
@@ -82,8 +83,8 @@ const NAV_ICONS: Record<SectionKey, LucideIcon> = {
   products: Package,
   categories: Tags,
   orders: ShoppingCart,
-  payments: Wallet,
-  silver: Gem,
+  payments: Banknote,
+  'silver-rate': CircleDollarSign,
   customers: Users,
   telegram: Send,
   ai: Sparkles,
@@ -107,7 +108,7 @@ export function AdminShell({
   onLogout: () => void
   children: ReactNode
 }) {
-  const [storeName, setStoreName] = useState('فروشگاه تلگرامی')
+  const [storeName, setStoreName] = useState('Silver Love')
   const [mockMode, setMockMode] = useState<boolean | null>(null)
   const [mobileOpen, setMobileOpen] = useState(false)
   const [pwOpen, setPwOpen] = useState(false)
@@ -161,12 +162,12 @@ export function AdminShell({
 
   const brand = (
     <div className="flex items-center gap-3 border-b px-4 py-4">
-      <span className="flex size-10 items-center justify-center rounded-xl bg-primary text-primary-foreground">
-        <Send className="size-5" aria-hidden />
+      <span className="flex size-10 items-center justify-center rounded-xl bg-emerald-600 text-white">
+        <Gem className="size-5" aria-hidden />
       </span>
       <div className="min-w-0">
         <p className="truncate text-sm font-bold">{storeName}</p>
-        <p className="text-xs text-muted-foreground">پنل مدیریت</p>
+        <p className="text-xs text-muted-foreground">پنل مدیریت فروشگاه نقره</p>
       </div>
     </div>
   )
@@ -266,7 +267,7 @@ export function AdminShell({
           </main>
 
           <footer className="mt-auto border-t py-4 text-center text-xs text-muted-foreground">
-            پنل مدیریت فروشگاه تلگرامی — نسخه ۱.۰
+            پنل مدیریت Silver Love — نسخه ۲.۰
           </footer>
         </div>
       </div>

@@ -8,8 +8,8 @@ import { uniqueSlug } from '@/lib/slug'
 import {
   PRODUCT_INCLUDE,
   PRODUCT_STATUSES,
-  normalizeImages,
-  pickPrimaryImageUrl,
+  isProductCodeViolation,
+  normalizeGalleryInput,
   productCreateSchema,
   serializeProduct,
 } from './shared'
@@ -76,39 +76,58 @@ export const POST = route(async (req: NextRequest) => {
   }
 
   const slug = await uniqueSlug(body.name, 'product')
-  const gallery = normalizeImages(body.images)
 
-  const product = await db.product.create({
-    data: {
-      name: body.name,
-      slug,
-      description: body.description ?? null,
-      shortDescription: body.shortDescription ?? null,
-      price: body.price,
-      compareAtPrice: body.compareAtPrice ?? null,
-      stock: body.stock,
-      categoryId,
-      imageUrl: body.imageUrl ?? pickPrimaryImageUrl(gallery),
-      status: body.status,
-      aiGenerated: body.aiGenerated ?? false,
-      tags: body.tags ? JSON.stringify(body.tags) : null,
-      // Silver specs (optional, free-form, never used for pricing)
-      sku: body.sku ?? null,
-      silverType: body.silverType ?? null,
-      purity: body.purity ?? null,
-      weightGrams: body.weightGrams ?? null,
-      size: body.size ?? null,
-      dimensions: body.dimensions ?? null,
-      brand: body.brand ?? null,
-      appearance: body.appearance ?? null,
-      careInstructions: body.careInstructions ?? null,
-      authenticity: body.authenticity ?? null,
-      ...(gallery.length
-        ? { images: { create: gallery } }
-        : {}),
-    },
-    include: PRODUCT_INCLUDE,
-  })
+  // Gallery: when provided, the primary image syncs Product.imageUrl.
+  const gallery = normalizeGalleryInput(body.images)
+
+  let product
+  try {
+    product = await db.product.create({
+      data: {
+        name: body.name,
+        slug,
+        description: body.description ?? null,
+        shortDescription: body.shortDescription ?? null,
+        price: body.price,
+        compareAtPrice: body.compareAtPrice ?? null,
+        stock: body.stock,
+        categoryId,
+        imageUrl: gallery.find((img) => img.isPrimary)?.url ?? null,
+        status: body.status,
+        aiGenerated: body.aiGenerated ?? false,
+        tags: body.tags ? JSON.stringify(body.tags) : null,
+        // ─── Silver Love specs (optional, never priced) ───
+        productCode: body.productCode ?? null,
+        silverType: body.silverType ?? null,
+        fineness: body.fineness ?? null,
+        weightGrams: body.weightGrams ?? null,
+        size: body.size ?? null,
+        dimensions: body.dimensions ?? null,
+        brand: body.brand ?? null,
+        appearance: body.appearance ?? null,
+        careInstructions: body.careInstructions ?? null,
+        authenticityNote: body.authenticityNote ?? null,
+        // Gallery rows are created in the same call.
+        ...(gallery.length
+          ? {
+              images: {
+                create: gallery.map((img) => ({
+                  url: img.url,
+                  isPrimary: img.isPrimary,
+                  sortOrder: img.sortOrder,
+                })),
+              },
+            }
+          : {}),
+      },
+      include: PRODUCT_INCLUDE,
+    })
+  } catch (e) {
+    if (isProductCodeViolation(e)) {
+      throw new ApiError(422, 'کد محصول تکراری است')
+    }
+    throw e
+  }
 
   await logEvent('product.created', `محصول «${product.name}» ایجاد شد`, {
     productId: product.id,

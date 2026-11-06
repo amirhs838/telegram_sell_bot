@@ -10,6 +10,18 @@ export const ORDER_STATUSES = [
   'cancelled',
 ] as const
 
+// Manual payment dimension (separate from fulfilment status).
+export const PAYMENT_STATUSES = [
+  'awaiting_payment',
+  'payment_review',
+  'paid',
+  'rejected',
+  'refund_pending',
+  'refunded',
+] as const
+
+export type PaymentStatus = (typeof PAYMENT_STATUSES)[number]
+
 export function serializeOrderItem(i: OrderItem) {
   return {
     id: i.id,
@@ -23,13 +35,29 @@ export function serializeOrderItem(i: OrderItem) {
 
 type ListCustomer = { id: string; firstName: string; telegramUsername: string | null }
 
+type LatestPayment = Pick<
+  Payment,
+  | 'id'
+  | 'status'
+  | 'receiptUrl'
+  | 'payerName'
+  | 'trackingNumber'
+  | 'customerNote'
+  | 'reviewNote'
+  | 'reviewedAt'
+  | 'createdAt'
+>
+
 export function serializeOrder(
-  o: Order & { customer: ListCustomer; items: OrderItem[]; payment?: Payment | null },
+  o: Order & { customer: ListCustomer; items: OrderItem[]; payments?: LatestPayment[] },
 ) {
+  const payment = o.payments?.[0] ?? null
   return {
     id: o.id,
     orderNumber: o.orderNumber,
     status: o.status,
+    paymentStatus: o.paymentStatus,
+    trackingCode: o.trackingCode,
     subtotal: o.subtotal,
     discount: o.discount,
     total: o.total,
@@ -40,11 +68,18 @@ export function serializeOrder(
     updatedAt: o.updatedAt,
     customer: o.customer,
     items: o.items.map(serializeOrderItem),
-    payment: o.payment
+    // Latest payment attempt (receipt summary) or null.
+    payment: payment
       ? {
-          status: o.payment.status,
-          rejectReason: o.payment.rejectReason,
-          amountSnapshot: o.payment.amountSnapshot,
+          id: payment.id,
+          status: payment.status,
+          receiptUrl: payment.receiptUrl,
+          payerName: payment.payerName,
+          trackingNumber: payment.trackingNumber,
+          customerNote: payment.customerNote,
+          reviewNote: payment.reviewNote,
+          reviewedAt: payment.reviewedAt,
+          createdAt: payment.createdAt,
         }
       : null,
   }
@@ -53,5 +88,8 @@ export function serializeOrder(
 export const ORDER_INCLUDE = {
   customer: { select: { id: true, firstName: true, telegramUsername: true } },
   items: true,
-  payment: true,
+  payments: {
+    orderBy: [{ createdAt: 'desc' as const }, { id: 'desc' as const }],
+    take: 1,
+  },
 } satisfies Prisma.OrderInclude

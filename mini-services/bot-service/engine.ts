@@ -3,11 +3,19 @@
  *
  * Pure-ish core: handleUpdate(input) → Reply[]. It returns replies instead of
  * sending them itself; the caller (/simulate response or the polling loop) is
- * responsible for delivery. Side effects inside (orders, notifications) are
+ * responsible for delivery. A Reply may carry a `photo` source — the polling
+ * loop delivers it via sendPhoto (multipart) while /simulate reports it
+ * JSON-safely. Side effects inside (orders, payments, notifications) are
  * wrapped and never throw.
  *
  * All customer-facing strings are Persian.
+ *
+ * Pricing law: product captions ALWAYS show the stored `price` — never a value
+ * computed from silver rate × weight (see prisma/schema.prisma Product.price).
  */
+import { randomBytes } from 'node:crypto'
+import { mkdir, readFile, writeFile } from 'node:fs/promises'
+import path from 'node:path'
 import {
   type InlineButton,
   escapeHtml,
@@ -15,16 +23,15 @@ import {
   formatNumber,
   orderStatusFa,
 } from '../../src/lib/telegram-render'
-import path from 'node:path'
-import fsSync from 'node:fs'
 import { db } from './db'
 import {
   InsufficientStockError,
   ProductUnavailableError,
-  createOrderMulti,
+  createOrder,
   setOrderStatus,
 } from './orders'
 import {
+  getActivePaymentDestinations,
   getCategory,
   getProduct,
   getStoreSettings,
@@ -32,24 +39,17 @@ import {
   listCategories,
   searchActiveProducts,
 } from './store'
-import { answerCallback, loadConfig, send } from './telegram'
 import {
-  attachReceiptToOrder,
-  createOrderMulti,
-  findPayableOrderForCustomer,
-  getActiveBankAccount,
-  paymentStatusFa,
-} from './orders'
-import { saveIncomingReceipt } from './receipts'
+  answerCallback,
+  downloadFile,
+  getFileInfo,
+  loadConfig,
+  type PhotoSource,
+  send,
+  sendPhoto,
+} from './telegram'
 
-export type Reply = {
-  text: string
-  keyboard?: InlineButton[][]
-  /** local absolute path — polling loop uploads it via sendPhoto */
-  imagePath?: string
-  /** original panel URL — used by the panel simulator to render the image */
-  imageUrl?: string
-}
+export type Reply = { text: string; keyboard?: InlineButton[][]; photo?: PhotoSource }
 
 export type BotFlow =
   | 'await_quantity'
@@ -60,8 +60,6 @@ export type BotFlow =
   | 'await_search'
   | 'await_receipt'
 
-export type CartLine = { productId: string; qty: number }
-
 export type BotState = {
   flow?: BotFlow
   productId?: string
@@ -69,10 +67,8 @@ export type BotState = {
   name?: string
   phone?: string
   address?: string
-  cart?: CartLine[]
-  checkout?: 'single' | 'cart' | 'ai'
-  aiItems?: CartLine[]
-  awaitingReceiptOrderId?: string
+  /** set while flow === 'await_receipt' — the order awaiting its payment receipt */
+  orderId?: string
 }
 
 export type UpdateInput = {
@@ -80,26 +76,80 @@ export type UpdateInput = {
   firstName?: string
   username?: string
   text?: string
+  /** largest photo in a private-chat message (Telegram) */
+  photo?: { fileId: string; caption?: string }
   callbackData?: string
   callbackId?: string
   action?: string // 'reset' (simulator convenience)
-  photo?: { fileId?: string; name?: string } // receipt photo (real: fileId, simulator: name)
 }
 
 const SESSION_TTL_MS = 30 * 60 * 1000
 const PRODUCTS_PER_PAGE = 5
 const DEFAULT_LOW_STOCK = 5
+const PHOTO_CAPTION_MAX = 1000 // Telegram photo caption limit is 1024
+const EXTRA_PHOTOS_MAX = 4
+
+// ─── Local file helpers (product photos + receipts) ──────────────────────────
+
+const META_DIR = (import.meta as unknown as { dir?: string }).dir
+/** Project root (this file lives at <root>/mini-services/bot-service). */
+const PROJECT_ROOT = META_DIR ? path.resolve(META_DIR, '..', '..') : process.cwd()
+
+function uploadCandidates(name: string): string[] {
+  const safe = path.basename(name) // no path traversal
+  const dirs = [path.join(process.cwd(), 'upload'), path.join(PROJECT_ROOT, 'upload')]
+  return [...new Set(dirs.map((d) => path.join(d, safe)))]
+}
+
+async function readLocalUpload(name: string): Promise<Buffer | null> {
+  for (const p of uploadCandidates(name)) {
+    try {
+      return await readFile(p)
+    } catch {
+      // try next candidate
+    }
+  }
+  return null
+}
+
+/** Save a downloaded receipt photo → /api/receipts/<name> (private serving). */
+async function saveReceiptFile(buf: Buffer): Promise<string | null> {
+  try {
+    const dir = path.join(PROJECT_ROOT, 'upload', 'receipts')
+    await mkdir(dir, { recursive: true })
+    const name = `${Date.now()}-${randomBytes(4).toString('hex')}.jpg`
+    await writeFile(path.join(dir, name), buf)
+    return `/api/receipts/${name}`
+  } catch (e) {
+    console.error('[bot-service] saveReceiptFile failed:', e)
+    return null
+  }
+}
+
+/**
+ * Resolve a stored image URL to a sendPhoto source:
+ *  - http(s) URL  → used as-is (Telegram fetches it)
+ *  - /api/uploads/<name> → local file read from <root>/upload/<name>
+ *  - anything else / missing file → null (caller falls back to a text card)
+ */
+async function resolvePhotoSource(url: string | null | undefined): Promise<PhotoSource | null> {
+  if (!url) return null
+  const trimmed = url.trim()
+  if (/^https?:\/\//i.test(trimmed)) return trimmed
+  if (trimmed.startsWith('/api/uploads/')) {
+    const buf = await readLocalUpload(trimmed.slice('/api/uploads/'.length))
+    if (buf) return { buffer: buf, filename: path.basename(trimmed) }
+  }
+  return null
+}
 
 // ─── Menus ───────────────────────────────────────────────────────────────────
 
 const MAIN_MENU: InlineButton[][] = [
   [{ text: '🛍 محصولات', callback_data: 'menu:products' }],
-  [{ text: '🛒 سبد خرید', callback_data: 'menu:cart' }],
   [{ text: '📦 سفارش‌های من', callback_data: 'menu:orders' }],
-  [
-    { text: '🔎 جستجوی محصول', callback_data: 'menu:search' },
-    { text: '☎️ پشتیبانی', callback_data: 'menu:support' },
-  ],
+  [{ text: '🔎 جستجوی محصول', callback_data: 'menu:search' }],
+  [{ text: '☎️ پشتیبانی', callback_data: 'menu:support' }],
 ]
 
 const CANCEL_ORDER_ROW: InlineButton[] = [{ text: '❌ انصراف', callback_data: 'order:cancel' }]
@@ -168,27 +218,12 @@ function productButtonLabel(p: { name: string; price: number }): string {
   return `${p.name} — ${formatMoney(p.price)}`
 }
 
-/**
- * Resolve a panel-uploaded image URL (/api/uploads/<name>) to a local file the
- * bot can upload to Telegram. Checks a few candidate project roots because the
- * service may run with different working directories.
- */
-function localImageFromUrl(url?: string | null): string | null {
-  if (!url || !url.startsWith('/api/uploads/')) return null
-  const name = path.basename(url)
-  const candidates = [
-    path.resolve(process.cwd(), '..', '..', 'upload', name),
-    path.resolve(process.cwd(), '..', 'upload', name),
-    path.resolve(process.cwd(), 'upload', name),
-  ]
-  for (const p of candidates) {
-    try {
-      if (fsSync.existsSync(p)) return p
-    } catch {
-      // ignore
-    }
-  }
-  return null
+function truncate(s: string, max: number): string {
+  return s.length > max ? `${s.slice(0, max - 1)}…` : s
+}
+
+function formatWeight(grams: number): string {
+  return `${grams.toLocaleString('fa-IR', { maximumFractionDigits: 2 })} گرم`
 }
 
 // ─── Views ───────────────────────────────────────────────────────────────────
@@ -237,6 +272,78 @@ async function categoryPageReply(catId: string, page: number): Promise<Reply> {
   }
 }
 
+// ─── Product cards ───────────────────────────────────────────────────────────
+
+type ProductFull = NonNullable<Awaited<ReturnType<typeof getProduct>>>
+
+/** Silver spec lines — only shown when the admin actually filled them in. */
+function specLines(p: ProductFull): string[] {
+  const lines: string[] = []
+  if (p.productCode) lines.push(`🔖 کد محصول: ${escapeHtml(p.productCode)}`)
+  if (p.fineness) lines.push(`✨ عیار: ${formatNumber(p.fineness)}`)
+  if (p.weightGrams) lines.push(`⚖️ وزن: ${formatWeight(p.weightGrams)}`)
+  if (p.size) lines.push(`📏 سایز: ${escapeHtml(p.size)}`)
+  if (p.silverType) lines.push(`🪙 نوع نقره: ${escapeHtml(p.silverType)}`)
+  return lines
+}
+
+/** Persian photo caption (≤1000 chars) — price is ALWAYS the stored `price`. */
+function productCaption(p: ProductFull): string {
+  const head = `🛍️ <b>${escapeHtml(p.name)}</b>`
+  const priceLines = [
+    `💰 قیمت: <b>${formatMoney(p.price)}</b>`,
+    ...(p.compareAtPrice && p.compareAtPrice > p.price
+      ? [`🏷️ قبلاً: <s>${formatMoney(p.compareAtPrice)}</s>`]
+      : []),
+    '',
+    stockLine(p),
+  ]
+  const specs = specLines(p)
+  let caption = [
+    head,
+    '',
+    p.shortDescription ? escapeHtml(truncate(p.shortDescription, 300)) : '',
+    '',
+    ...priceLines,
+    ...(specs.length > 0 ? ['', ...specs] : []),
+  ]
+    .filter((l) => l !== '')
+    .join('\n')
+  if (caption.length > PHOTO_CAPTION_MAX) {
+    caption = [head, '', ...priceLines, ...(specs.length > 0 ? ['', ...specs] : [])].join('\n')
+  }
+  if (caption.length > PHOTO_CAPTION_MAX) {
+    caption = `${caption.slice(0, PHOTO_CAPTION_MAX - 1)}…`
+  }
+  return caption
+}
+
+function productCardKeyboard(p: ProductFull, includeMore: boolean): InlineButton[][] {
+  const kb: InlineButton[][] = []
+  if (p.stock > 0) kb.push([{ text: '🛒 ثبت سفارش', callback_data: `order:${p.id}` }])
+  if (includeMore && p.images.length > 1) {
+    kb.push([{ text: '📸 تصاویر بیشتر', callback_data: `moreimgs:${p.id}` }])
+  }
+  kb.push([{ text: '⬅️ بازگشت', callback_data: 'back:products' }])
+  return kb
+}
+
+/** Full text card (fallback when no photo is available). */
+function textProductCard(p: ProductFull): string {
+  const lines: string[] = [`🛍️ <b>${escapeHtml(p.name)}</b>`]
+  if (p.shortDescription) lines.push('', escapeHtml(p.shortDescription))
+  lines.push('', `💰 قیمت: <b>${formatMoney(p.price)}</b>`)
+  if (p.compareAtPrice && p.compareAtPrice > p.price) {
+    lines.push(`🏷️ قبلاً: <s>${formatMoney(p.compareAtPrice)}</s>`)
+  }
+  lines.push('', stockLine(p))
+  const specs = specLines(p)
+  if (specs.length > 0) lines.push('', ...specs)
+  if (p.description) lines.push('', escapeHtml(truncate(p.description, 700)))
+  return lines.join('\n')
+}
+
+/** Product card: photo (when resolvable) + Persian caption, else rich text card. */
 async function productCardReply(
   productId: string,
   notFoundKeyboard: InlineButton[][] = MAIN_MENU,
@@ -245,35 +352,61 @@ async function productCardReply(
   if (!p || p.status !== 'active') {
     return [{ text: 'این محصول یافت نشد یا فعال نیست.', keyboard: notFoundKeyboard }]
   }
-  const lines: string[] = [`🛍️ <b>${escapeHtml(p.name)}</b>`]
-  if (p.sku) lines.push(`🔖 کد: <code>${escapeHtml(p.sku)}</code>`)
-  if (p.shortDescription) lines.push('', escapeHtml(p.shortDescription))
-  lines.push('', `💰 قیمت: <b>${formatMoney(p.price)}</b>`)
-  if (p.compareAtPrice && p.compareAtPrice > p.price) {
-    lines.push(`🏷️ قبلاً: <s>${formatMoney(p.compareAtPrice)}</s>`)
+  const primaryUrl = p.images[0]?.url ?? p.imageUrl
+  const photo = await resolvePhotoSource(primaryUrl)
+  if (photo) {
+    return [{ text: productCaption(p), keyboard: productCardKeyboard(p, true), photo }]
   }
+  return [{ text: textProductCard(p), keyboard: productCardKeyboard(p, p.images.length > 1) }]
+}
 
-  // Silver specs — only when the seller filled them
-  const specs: string[] = []
-  if (p.silverType) specs.push(`نوع: ${escapeHtml(p.silverType)}`)
-  if (p.purity) specs.push(`عیار: ${escapeHtml(p.purity)}`)
-  if (p.weightGrams != null && p.weightGrams > 0) specs.push(`وزن: ${formatNumber(p.weightGrams)} گرم`)
-  if (p.size) specs.push(`سایز: ${escapeHtml(p.size)}`)
-  if (specs.length > 0) lines.push('', '✨ ' + specs.join(' | '))
+/** Remaining gallery photos (≤4) — "تصویر N از M — <name>". */
+async function moreImagesReply(productId: string): Promise<Reply[]> {
+  const p = await getProduct(productId)
+  if (!p || p.status !== 'active') {
+    return [{ text: 'این محصول یافت نشد یا فعال نیست.', keyboard: MAIN_MENU }]
+  }
+  if (p.images.length <= 1) {
+    return [
+      { text: 'تصویر بیشتری برای این محصول ثبت نشده است.', keyboard: productCardKeyboard(p, false) },
+    ]
+  }
+  const rest = p.images.slice(1, 1 + EXTRA_PHOTOS_MAX)
+  const total = p.images.length
+  const out: Reply[] = []
+  for (let i = 0; i < rest.length; i++) {
+    const idx = i + 2 // image 1 was the card photo
+    const caption = [
+      `📸 تصویر ${formatNumber(idx)} از ${formatNumber(total)} — ${escapeHtml(p.name)}`,
+      '',
+      `💰 قیمت: <b>${formatMoney(p.price)}</b>`,
+      stockLine(p),
+    ].join('\n')
+    const photo = await resolvePhotoSource(rest[i].url)
+    if (photo) out.push({ text: caption, keyboard: productCardKeyboard(p, false), photo })
+  }
+  if (out.length === 0) {
+    return [
+      { text: 'متأسفانه نمایش تصاویر بیشتر ممکن نشد.', keyboard: productCardKeyboard(p, false) },
+    ]
+  }
+  return out
+}
 
-  lines.push('', stockLine(p))
-  if (p.description) lines.push('', escapeHtml(p.description))
-  if (p.authenticity) lines.push('', `🛡️ ${escapeHtml(p.authenticity)}`)
-
+/** Compact card used after AI replies (short caption + order button). */
+async function miniProductCardReply(productId: string): Promise<Reply | null> {
+  const p = await getProduct(productId)
+  if (!p || p.status !== 'active') return null
+  const text = [
+    `🛍️ <b>${escapeHtml(p.name)}</b>`,
+    `💰 قیمت: <b>${formatMoney(p.price)}</b>`,
+    stockLine(p),
+  ].join('\n')
   const kb: InlineButton[][] = []
-  if (p.stock > 0) {
-    kb.push([{ text: '🛒 سفارش', callback_data: `order:${p.id}` }])
-    kb.push([{ text: '➕ افزودن به سبد', callback_data: `cart:add:${p.id}` }])
-  }
-  kb.push([{ text: '⬅️ بازگشت', callback_data: 'back:products' }])
-
-  const imagePath = localImageFromUrl(p.imageUrl)
-  return [{ text: lines.join('\n'), keyboard: kb, ...(imagePath ? { imagePath, imageUrl: p.imageUrl ?? undefined } : {}) }]
+  if (p.stock > 0) kb.push([{ text: '🛒 ثبت سفارش', callback_data: `order:${p.id}` }])
+  kb.push(HOME_ROW)
+  const photo = p.images[0] ? await resolvePhotoSource(p.images[0].url) : null
+  return { text, keyboard: kb, photo: photo ?? undefined }
 }
 
 async function myOrdersReply(telegramUserId: string): Promise<Reply> {
@@ -283,7 +416,6 @@ async function myOrdersReply(telegramUserId: string): Promise<Reply> {
         where: { customerId: customer.id },
         orderBy: { createdAt: 'desc' },
         take: 5,
-        include: { payment: true },
       })
     : []
   if (orders.length === 0) {
@@ -294,18 +426,11 @@ async function myOrdersReply(telegramUserId: string): Promise<Reply> {
   }
   const lines = orders.map((o) => {
     const s = orderStatusFa(o.status)
-    const pay = o.payment ? ` | 💳 ${paymentStatusFa(o.payment.status)}` : ''
-    return `#${o.orderNumber} — ${s.emoji} ${s.label}${pay} — ${formatMoney(o.total)}`
+    return `#${o.orderNumber} — ${s.emoji} ${s.label} — ${formatMoney(o.total)}`
   })
-  const kb: InlineButton[][] = []
-  const payable = orders.find((o) => o.payment && ['awaiting_payment', 'rejected'].includes(o.payment.status))
-  if (payable) {
-    kb.push([{ text: `🧾 ارسال رسید برای #${payable.orderNumber}`, callback_data: `receipt:start:${payable.id}` }])
-  }
-  kb.push([{ text: '🛍 محصولات', callback_data: 'menu:products' }], HOME_ROW)
   return {
     text: `📦 سفارش‌های اخیر شما:\n\n${lines.join('\n')}`,
-    keyboard: kb,
+    keyboard: [[{ text: '🛍 محصولات', callback_data: 'menu:products' }], HOME_ROW],
   }
 }
 
@@ -317,177 +442,6 @@ async function supportReply(): Promise<Reply> {
   }
   kb.push(HOME_ROW)
   return { text: 'برای پشتیبانی با ما در تماس باشید:', keyboard: kb }
-}
-
-// ─── Cart ────────────────────────────────────────────────────────────────────
-
-async function cartReply(state: BotState): Promise<Reply[]> {
-  const cart = state.cart ?? []
-  if (cart.length === 0) {
-    return [
-      {
-        text: '🛒 سبد خرید شما خالی است.',
-        keyboard: [[{ text: '🛍 محصولات', callback_data: 'menu:products' }], HOME_ROW],
-      },
-    ]
-  }
-  const lines: string[] = ['🛒 سبد خرید شما:', '']
-  const kb: InlineButton[][] = []
-  let total = 0
-  for (let i = 0; i < cart.length; i++) {
-    const p = await getProduct(cart[i].productId).catch(() => null)
-    if (!p) continue
-    const lineTotal = p.price * cart[i].qty
-    total += lineTotal
-    lines.push(`• ${escapeHtml(p.name)} × ${formatNumber(cart[i].qty)} — ${formatMoney(lineTotal)}`)
-    kb.push([{ text: `❌ حذف: ${p.name}`, callback_data: `cart:rm:${i}` }])
-  }
-  lines.push('', `💳 مبلغ کل: ${formatMoney(total)}`)
-  kb.push([{ text: '✅ ثبت سفارش سبد', callback_data: 'cart:checkout' }])
-  kb.push(HOME_ROW)
-  return [{ text: lines.join('\n'), keyboard: kb }]
-}
-
-// ─── Payment info + receipt flow (Silver Love) ─────────────────────────────
-
-async function paymentInfoReply(order: { id: string; orderNumber: number; total: number }): Promise<Reply[]> {
-  const bank = await getActiveBankAccount()
-  const lines: string[] = [
-    '💳 اطلاعات پرداخت',
-    '',
-    `🧾 شماره سفارش: #${order.orderNumber}`,
-    `💰 مبلغ قابل پرداخت: <b>${formatMoney(order.total)}</b>`,
-  ]
-  if (bank) {
-    lines.push(
-      '',
-      `🏦 بانک: ${escapeHtml(bank.bankName)}`,
-      `👤 به نام: ${escapeHtml(bank.holderName)}`,
-      `💳 شماره کارت: <code>${escapeHtml(bank.cardNumber)}</code>`,
-    )
-    if (bank.sheba) lines.push(`🏦 شبا: <code>${escapeHtml(bank.sheba)}</code>`)
-    if (bank.note) lines.push('', `📝 ${escapeHtml(bank.note)}`)
-  } else {
-    lines.push('', '⚠️ اطلاعات کارت فروشگاه هنوز ثبت نشده است — به‌زودی اطلاع‌رسانی می‌شود.')
-  }
-  lines.push(
-    '',
-    'پس از واریز، تصویر رسید را در همین چت بفرستید یا از دکمه زیر استفاده کنید.',
-    '⚠️ ارسال رسید به معنی تأیید پرداخت نیست؛ تأیید نهایی توسط ادمین انجام می‌شود.',
-  )
-  return [
-    {
-      text: lines.join('\n'),
-      keyboard: [[{ text: '🧾 ارسال رسید پرداخت', callback_data: `receipt:start:${order.id}` }], HOME_ROW],
-    },
-  ]
-}
-
-async function receiptStartReply(telegramUserId: string, orderId: string): Promise<Reply[]> {
-  const order = await db.order.findUnique({ where: { id: orderId }, include: { payment: true, customer: true } })
-  if (!order || !order.payment || order.customer.telegramUserId !== telegramUserId) {
-    return [{ text: 'سفارشی برای ارسال رسید یافت نشد.', keyboard: MAIN_MENU }]
-  }
-  if (order.payment.status === 'paid') {
-    return [{ text: `پرداخت سفارش #${order.orderNumber} قبلاً تأیید شده است ✅`, keyboard: MAIN_MENU }]
-  }
-  if (order.payment.status === 'payment_review') {
-    return [
-      {
-        text: `رسید سفارش #${order.orderNumber} قبلاً ثبت شده و در انتظار بررسی ادمین است. 🕐`,
-        keyboard: MAIN_MENU,
-      },
-    ]
-  }
-  await saveSession(telegramUserId, {
-    flow: 'await_receipt',
-    awaitingReceiptOrderId: orderId,
-  })
-  const rejectedNote =
-    order.payment.status === 'rejected' && order.payment.rejectReason
-      ? `دلیل رد رسید قبلی: ${escapeHtml(order.payment.rejectReason)}\n\nلطفاً رسید اصلاح‌شده را بفرستید.\n\n`
-      : ''
-  return [
-    {
-      text: `${rejectedNote}لطفاً تصویر رسید پرداخت سفارش #${order.orderNumber} (مبلغ ${formatMoney(order.payment.amountSnapshot)}) را به‌صورت عکس بفرستید 📎`,
-      keyboard: [HOME_ROW],
-    },
-  ]
-}
-
-async function handlePhoto(
-  telegramUserId: string,
-  input: UpdateInput,
-  state: BotState,
-): Promise<Reply[]> {
-  // In an active receipt flow → attach to that order
-  let orderId = state.awaitingReceiptOrderId
-  if (!orderId || state.flow !== 'await_receipt') {
-    // No active flow: attach to the latest payable order, if any
-    const payable = await findPayableOrderForCustomer(telegramUserId)
-    if (!payable) {
-      return [
-        {
-          text: 'عکس دریافت شد. اگر قصد ارسال رسید پرداخت دارید، ابتدا سفارش ثبت کنید یا از بخش «سفارش‌های من» سفارش در انتظار پرداخت را انتخاب کنید.',
-          keyboard: MAIN_MENU,
-        },
-      ]
-    }
-    orderId = payable.id
-  }
-
-  const order = await db.order.findUnique({ where: { id: orderId }, include: { payment: true, customer: true } })
-  if (!order || !order.payment || order.customer.telegramUserId !== telegramUserId) {
-    await clearFlow(telegramUserId)
-    return [{ text: 'سفارش یافت نشد.', keyboard: MAIN_MENU }]
-  }
-  if (order.payment.status === 'paid') {
-    await clearFlow(telegramUserId)
-    return [{ text: `پرداخت سفارش #${order.orderNumber} قبلاً تأیید شده است ✅`, keyboard: MAIN_MENU }]
-  }
-
-  // Resolve + persist the receipt image (real: download from Telegram; simulator: placeholder)
-  const savedName = await saveIncomingReceipt(input.photo)
-  if (!savedName) {
-    return [
-      {
-        text: 'دریافت تصویر رسید ناموفق بود — لطفاً دوباره به‌صورت عکس بفرستید 📎',
-      },
-    ]
-  }
-
-  const res = await attachReceiptToOrder(orderId, {
-    receiptImage: savedName,
-    payerName: order.customerName,
-  })
-  await clearFlow(telegramUserId)
-  if (!res.ok) {
-    return [{ text: 'ثبت رسید ناموفق بود. لطفاً دوباره تلاش کنید.', keyboard: MAIN_MENU }]
-  }
-
-  // Notify the seller (best-effort) — human review happens in the panel
-  const { adminChatId: adminChat } = await loadConfig()
-  if (adminChat) {
-    await send(
-      adminChat,
-      [
-        '🧾 رسید پرداخت جدید',
-        '',
-        `#${res.orderNumber}`,
-        `👤 ${escapeHtml(order.customerName)}`,
-        `💰 مبلغ: ${formatMoney(order.payment.amountSnapshot)}`,
-        '',
-        '⏳ در انتظار بررسی و تأیید دستی در پنل',
-      ].join('\n'),
-    ).catch(() => undefined)
-  }
-
-  return [
-    {
-      text: `✅ رسید سفارش #${res.orderNumber} دریافت شد و در انتظار بررسی ادمین است.\n\nنتیجه بررسی به شما اطلاع داده می‌شود. 🙏`,
-      keyboard: MAIN_MENU,
-    },
-  ]
 }
 
 async function searchResultsReply(query: string): Promise<Reply[]> {
@@ -513,53 +467,24 @@ async function searchResultsReply(query: string): Promise<Reply[]> {
 }
 
 async function orderSummaryReply(state: BotState): Promise<Reply[]> {
+  const p = state.productId ? await getProduct(state.productId) : null
+  if (!p) return [{ text: 'سفارشی برای نمایش یافت نشد.', keyboard: MAIN_MENU }]
   const qty = state.quantity ?? 1
-  let lines: string[]
-  let itemsTotal = 0
-
-  if (state.checkout === 'cart' && (state.cart ?? []).length > 0) {
-    lines = ['🧾 خلاصه سفارش', '']
-    for (const line of state.cart ?? []) {
-      const p = await getProduct(line.productId).catch(() => null)
-      if (!p) continue
-      const total = p.price * line.qty
-      itemsTotal += total
-      lines.push(`• ${escapeHtml(p.name)} × ${formatNumber(line.qty)} — ${formatMoney(total)}`)
-    }
-    lines.push('', `💳 مبلغ کل: ${formatMoney(itemsTotal)}`)
-  } else if (state.checkout === 'ai' && (state.aiItems ?? []).length > 0) {
-    lines = ['🧾 خلاصه سفارش', '']
-    for (const line of state.aiItems ?? []) {
-      const p = await getProduct(line.productId).catch(() => null)
-      if (!p) continue
-      const total = p.price * line.qty
-      itemsTotal += total
-      lines.push(`• ${escapeHtml(p.name)} × ${formatNumber(line.qty)} — ${formatMoney(total)}`)
-    }
-    lines.push('', `💳 مبلغ کل: ${formatMoney(itemsTotal)}`)
-  } else {
-    const p = state.productId ? await getProduct(state.productId) : null
-    if (!p) return [{ text: 'سفارشی برای نمایش یافت نشد.', keyboard: MAIN_MENU }]
-    itemsTotal = p.price * qty
-    lines = [
-      '🧾 خلاصه سفارش',
-      '',
-      `🛍 محصول: ${escapeHtml(p.name)}`,
-      `🔢 تعداد: ${formatNumber(qty)}`,
-      `💰 قیمت واحد: ${formatMoney(p.price)}`,
-      `💳 مبلغ کل: ${formatMoney(itemsTotal)}`,
-    ]
-  }
-
-  lines.push(
+  const text = [
+    '🧾 خلاصه سفارش',
+    '',
+    `🛍 محصول: ${escapeHtml(p.name)}`,
+    `🔢 تعداد: ${formatNumber(qty)}`,
+    `💰 قیمت واحد: ${formatMoney(p.price)}`,
+    `💳 مبلغ کل: ${formatMoney(p.price * qty)}`,
     '',
     `👤 نام: ${escapeHtml(state.name ?? '')}`,
     `📱 موبایل: ${state.phone ?? ''}`,
     `📍 آدرس: ${escapeHtml(state.address ?? '')}`,
-  )
+  ].join('\n')
   return [
     {
-      text: lines.join('\n'),
+      text,
       keyboard: [
         [{ text: '✅ تأیید سفارش', callback_data: 'order:confirm' }],
         [{ text: '❌ لغو سفارش', callback_data: 'order:cancel' }],
@@ -568,30 +493,294 @@ async function orderSummaryReply(state: BotState): Promise<Reply[]> {
   ]
 }
 
+// ─── Manual payment (card-to-card) flow ──────────────────────────────────────
+
+const RECEIPT_ACCEPTED_STATUSES = ['awaiting_payment', 'rejected', 'payment_review']
+
+/** Payment info message shown right after the order is created. */
+async function paymentInfoReply(order: {
+  id: string
+  orderNumber: number
+  total: number
+}): Promise<Reply[]> {
+  const dests = await getActivePaymentDestinations()
+  const lines: string[] = [
+    `✅ سفارش شما با شماره #${formatNumber(order.orderNumber)} ثبت شد!`,
+    '',
+    `💳 مبلغ قابل پرداخت: <b>${formatMoney(order.total)}</b>`,
+  ]
+  if (dests.length > 0) {
+    lines.push('', '🏦 اطلاعات پرداخت (کارت به کارت):', '')
+    dests.forEach((d, i) => {
+      if (i > 0) lines.push('〰️〰️〰️〰️〰️')
+      lines.push(`🏦 بانک ${escapeHtml(d.bankName)}`)
+      lines.push(`💳 شماره کارت: <code>${escapeHtml(d.cardNumber)}</code>`)
+      lines.push(`👤 به نام: ${escapeHtml(d.accountHolder)}`)
+      if (d.sheba) lines.push(`🏷️ شبا: <code>${escapeHtml(d.sheba)}</code>`)
+      if (d.note) lines.push(`📝 ${escapeHtml(d.note)}`)
+    })
+    lines.push('', 'پس از واریز، تصویر رسید را در همین چت ارسال کنید ⬇️')
+  } else {
+    lines.push(
+      '',
+      'در حال حاضر اطلاعات کارت پرداخت ثبت نشده است؛ همکاران ما به‌زودی برای هماهنگی پرداخت با شما تماس می‌گیرند. 🙏',
+    )
+  }
+  return [
+    {
+      text: lines.join('\n'),
+      keyboard: [
+        [{ text: '📨 ارسال رسید', callback_data: `receipt:${order.id}` }],
+        HOME_ROW,
+      ],
+    },
+  ]
+}
+
+/** `receipt:<orderId>` — validate ownership & payment status, then arm the flow. */
+async function startReceiptFlow(telegramUserId: string, orderId: string): Promise<Reply[]> {
+  const order = await db.order.findUnique({
+    where: { id: orderId },
+    include: { customer: { select: { telegramUserId: true } } },
+  })
+  if (!order || order.customer.telegramUserId !== telegramUserId) {
+    return [{ text: 'سفارشی برای این رسید یافت نشد.', keyboard: MAIN_MENU }]
+  }
+  if (order.paymentStatus === 'paid') {
+    return [
+      { text: '✅ پرداخت این سفارش قبلاً تأیید شده است؛ نیازی به ارسال رسید نیست.', keyboard: MAIN_MENU },
+    ]
+  }
+  if (!RECEIPT_ACCEPTED_STATUSES.includes(order.paymentStatus) || order.status === 'cancelled') {
+    return [
+      { text: 'در حال حاضر امکان ارسال رسید برای این سفارش وجود ندارد.', keyboard: MAIN_MENU },
+    ]
+  }
+  await saveSession(telegramUserId, { flow: 'await_receipt', orderId: order.id })
+  const note =
+    order.paymentStatus === 'rejected'
+      ? '\n\n(رسید قبلی این سفارش تأیید نشده بود — لطفاً تصویر رسید جدید را ارسال کنید.)'
+      : ''
+  return [{ text: `لطفاً تصویر رسید واریز را ارسال کنید 📎${note}`, keyboard: [HOME_ROW] }]
+}
+
+/** Latest order that can still receive a receipt photo (for photo-outside-flow guidance). */
+async function latestReceiptableOrder(customerId: string) {
+  const rows = await db.order.findMany({
+    where: {
+      customerId,
+      status: { not: 'cancelled' },
+      paymentStatus: { in: RECEIPT_ACCEPTED_STATUSES },
+    },
+    orderBy: { createdAt: 'desc' },
+    take: 1,
+    select: { id: true, orderNumber: true },
+  })
+  return rows[0] ?? null
+}
+
+async function handlePhotoMessage(
+  telegramUserId: string,
+  input: UpdateInput,
+  state: BotState,
+): Promise<Reply[]> {
+  const photo = input.photo
+  if (!photo?.fileId) return []
+
+  if (state.flow === 'await_receipt' && state.orderId) {
+    return receiptUploadFlow(telegramUserId, state, photo)
+  }
+
+  // Photo outside the receipt flow → guide the customer to the right place
+  const customer = await db.customer.findUnique({
+    where: { telegramUserId },
+    select: { id: true },
+  })
+  const pending = customer ? await latestReceiptableOrder(customer.id) : null
+  const kb: InlineButton[][] = []
+  if (pending) {
+    kb.push([
+      {
+        text: `📨 ارسال رسید برای سفارش #${formatNumber(pending.orderNumber)}`,
+        callback_data: `receipt:${pending.id}`,
+      },
+    ])
+  }
+  kb.push(HOME_ROW)
+  return [
+    {
+      text: '📸 تصویر شما دریافت شد!\n\nبرای ثبت پرداخت، ابتدا سفارش خود را ثبت کنید یا دکمه زیر را بزنید و سپس تصویر رسید واریز را بفرستید.',
+      keyboard: kb,
+    },
+  ]
+}
+
+async function receiptUploadFlow(
+  telegramUserId: string,
+  state: BotState,
+  photo: { fileId: string; caption?: string },
+): Promise<Reply[]> {
+  const order = await db.order.findUnique({
+    where: { id: state.orderId },
+    include: { customer: { select: { telegramUserId: true, firstName: true } } },
+  })
+  if (!order || order.customer.telegramUserId !== telegramUserId) {
+    await clearFlow(telegramUserId)
+    return [{ text: 'سفارش موردنظر یافت نشد. از منوی اصلی شروع کنید:', keyboard: MAIN_MENU }]
+  }
+  if (order.status === 'cancelled') {
+    await clearFlow(telegramUserId)
+    return [
+      { text: 'این سفارش لغو شده است؛ امکان ارسال رسید برای آن وجود ندارد.', keyboard: MAIN_MENU },
+    ]
+  }
+  if (order.paymentStatus === 'paid') {
+    await clearFlow(telegramUserId)
+    return [
+      { text: '✅ پرداخت این سفارش قبلاً تأیید شده است؛ نیازی به ارسال رسید نیست.', keyboard: MAIN_MENU },
+    ]
+  }
+  if (!RECEIPT_ACCEPTED_STATUSES.includes(order.paymentStatus)) {
+    await clearFlow(telegramUserId)
+    return [
+      { text: 'در حال حاضر امکان دریافت رسید برای این سفارش وجود ندارد.', keyboard: MAIN_MENU },
+    ]
+  }
+
+  // 1. download the photo from Telegram
+  const info = await getFileInfo(photo.fileId)
+  const filePath =
+    info.ok && info.result && typeof (info.result as { file_path?: unknown }).file_path === 'string'
+      ? (info.result as { file_path: string }).file_path
+      : null
+  if (!filePath) {
+    return [
+      { text: 'متأسفانه دریافت فایل تصویر ممکن نشد. لطفاً یک بار دیگر تصویر رسید را ارسال کنید. 🙏' },
+    ]
+  }
+  const dl = await downloadFile(filePath)
+  if (!dl.ok || !dl.buffer) {
+    return [
+      { text: 'متأسفانه دریافت تصویر ممکن نشد. لطفاً یک بار دیگر تصویر رسید را ارسال کنید. 🙏' },
+    ]
+  }
+
+  // 2. store the file + Payment row + order paymentStatus (never downgrade 'paid')
+  const receiptUrl = await saveReceiptFile(dl.buffer)
+  if (!receiptUrl) {
+    return [{ text: 'متأسفانه در ذخیره تصویر خطایی رخ داد. لطفاً کمی بعد دوباره تلاش کنید. 🙏' }]
+  }
+  try {
+    await db.payment.create({
+      data: {
+        orderId: order.id,
+        amount: order.total,
+        receiptUrl,
+        payerName: order.customer.firstName,
+        customerNote: photo.caption?.trim() || null,
+        status: 'awaiting_review',
+      },
+    })
+    if (['awaiting_payment', 'rejected'].includes(order.paymentStatus)) {
+      await db.order.update({
+        where: { id: order.id },
+        data: { paymentStatus: 'payment_review' },
+      })
+    }
+    await db.activityLog.create({
+      data: {
+        level: 'info',
+        type: 'payment.received',
+        message: `رسید پرداخت سفارش #${order.orderNumber} از طریق ربات دریافت شد`,
+        data: JSON.stringify({
+          orderId: order.id,
+          orderNumber: order.orderNumber,
+          amount: order.total,
+          receiptUrl,
+          telegramUserId,
+        }),
+      },
+    })
+  } catch (e) {
+    console.error('[bot-service] receipt persistence failed:', e)
+    return [
+      { text: 'متأسفانه در ثبت رسید خطایی رخ داد. لطفاً یک بار دیگر تصویر رسید را ارسال کنید. 🙏' },
+    ]
+  }
+
+  // 3. notify the admin chat (best-effort)
+  try {
+    const { adminChatId } = await loadConfig()
+    if (adminChatId) {
+      await send(
+        adminChatId,
+        `📩 رسید سفارش #${formatNumber(order.orderNumber)} دریافت شد؛ در پنل مدیریت بررسی کنید.`,
+      )
+    }
+  } catch {
+    // best-effort
+  }
+
+  await clearFlow(telegramUserId)
+  return [
+    {
+      text: '✅ رسید شما دریافت شد و در انتظار بررسی مدیر است.\n\nارسال رسید به معنی تأیید پرداخت نیست؛ نتیجه بررسی از همین‌جا به شما اطلاع داده می‌شود. 🙏',
+      keyboard: MAIN_MENU,
+    },
+  ]
+}
+
 // ─── AI assistant (internal API) + deterministic fallback ────────────────────
 
-type AiAssistantOutput = {
-  reply: string
-  images: string[]
-  action?: {
-    type: 'create_order'
-    items: Array<{ productId: string; quantity: number }>
-    name: string
-    phone: string
-    address: string
+type AiAnswer = { reply: string; productIds: string[]; toolsUsed: string[] }
+
+/**
+ * INTERNAL_API_KEY — the bot process is usually started from its own folder
+ * (mini-services/bot-service), so Bun's auto-.env loading never sees the root
+ * .env. Fall back to parsing the root .env once when the env var is missing.
+ */
+let cachedInternalKey: string | null | undefined
+async function resolveInternalApiKey(): Promise<string | null> {
+  if (cachedInternalKey !== undefined) return cachedInternalKey
+  const envKey = (process.env.INTERNAL_API_KEY ?? '').trim()
+  if (envKey) {
+    cachedInternalKey = envKey
+    return cachedInternalKey
   }
-  handoff?: { summary: string }
-  disabled?: boolean
+  try {
+    const raw = await readFile(path.join(PROJECT_ROOT, '.env'), 'utf8')
+    const m = raw.match(/^INTERNAL_API_KEY=(.*)$/m)
+    cachedInternalKey = m ? m[1].trim().replace(/^["']|["']$/g, '') || null : null
+  } catch {
+    cachedInternalKey = null
+  }
+  return cachedInternalKey
+}
+
+/** max AI messages per telegram user per minute (sliding window, in-memory) */
+const AI_RATE_LIMIT_PER_MIN = 10
+const aiCalls = new Map<string, number[]>()
+
+function aiRateLimited(telegramUserId: string): boolean {
+  const now = Date.now()
+  const window = (aiCalls.get(telegramUserId) ?? []).filter((t) => now - t < 60_000)
+  if (window.length >= AI_RATE_LIMIT_PER_MIN) {
+    aiCalls.set(telegramUserId, window)
+    return true
+  }
+  window.push(now)
+  aiCalls.set(telegramUserId, window)
+  return false
 }
 
 async function askAiAssistant(
   telegramUserId: string,
   message: string,
   firstName?: string,
-): Promise<AiAssistantOutput | null> {
-  const key = process.env.INTERNAL_API_KEY
+): Promise<AiAnswer | null> {
+  const key = await resolveInternalApiKey()
   const controller = new AbortController()
-  const timer = setTimeout(() => controller.abort(), 75_000)
+  const timer = setTimeout(() => controller.abort(), 60_000)
   try {
     const res = await fetch('http://127.0.0.1:3000/api/internal/ai-assistant', {
       method: 'POST',
@@ -603,25 +792,18 @@ async function askAiAssistant(
       signal: controller.signal,
     })
     if (!res.ok) return null
-    const data = (await res.json().catch(() => null)) as AiAssistantOutput | null
-    if (!data) return null
-    if (data.disabled) return { reply: '', images: [], disabled: true }
-    if (typeof data.reply !== 'string' || !data.reply.trim()) return null
-    return {
-      reply: data.reply.trim(),
-      images: Array.isArray(data.images) ? data.images.filter((v) => typeof v === 'string').slice(0, 3) : [],
-      action:
-        data.action &&
-        data.action.type === 'create_order' &&
-        Array.isArray(data.action.items) &&
-        data.action.items.length > 0 &&
-        typeof data.action.name === 'string' &&
-        typeof data.action.phone === 'string' &&
-        typeof data.action.address === 'string'
-          ? data.action
-          : undefined,
-      handoff: data.handoff && typeof data.handoff.summary === 'string' ? data.handoff : undefined,
-    }
+    const data = (await res.json().catch(() => null)) as
+      | { reply?: unknown; productIds?: unknown; toolsUsed?: unknown }
+      | null
+    const reply = typeof data?.reply === 'string' && data.reply.trim() ? data.reply.trim() : null
+    if (!reply) return null
+    const productIds = Array.isArray(data?.productIds)
+      ? data.productIds.filter((v): v is string => typeof v === 'string').slice(0, 3)
+      : []
+    const toolsUsed = Array.isArray(data?.toolsUsed)
+      ? data.toolsUsed.filter((v): v is string => typeof v === 'string')
+      : []
+    return { reply, productIds, toolsUsed }
   } catch {
     return null
   } finally {
@@ -629,74 +811,32 @@ async function askAiAssistant(
   }
 }
 
-/** Log an operator handoff request (visible in panel activity logs). */
-async function logHandoff(telegramUserId: string, firstName: string | undefined, summary: string) {
-  try {
-    await db.activityLog.create({
-      data: {
-        level: 'warn',
-        type: 'ai.handoff',
-        message: `درخواست گفتگو با اپراتور از مشتری ${firstName ?? telegramUserId}`,
-        data: JSON.stringify({ telegramUserId, summary }),
-      },
-    })
-  } catch {
-    // best-effort
-  }
-}
+const OPERATOR_REFERRAL =
+  'درخواست شما به همکاران ما ارجاع شد — به‌زودی همکار ما ادامه مکالمه را پیگیری می‌کند 🙏'
 
-/** Free text outside any flow → AI assistant; on failure → product search. */
+/** Free text outside any flow → AI assistant (+photo cards); on failure → search. */
 async function freeTextReply(
   telegramUserId: string,
   text: string,
   firstName?: string,
 ): Promise<Reply[]> {
+  if (aiRateLimited(telegramUserId)) {
+    return [
+      { text: 'کمی آرام‌تر 🙏 لطفاً چند لحظه صبر کنید و دوباره بنویسید.', keyboard: [HOME_ROW] },
+    ]
+  }
+
   const ai = await askAiAssistant(telegramUserId, text, firstName)
-  if (ai && !ai.disabled) {
-    const replies: Reply[] = [{ text: escapeHtml(ai.reply) }]
-
-    // product photos requested by the assistant
-    for (const url of ai.images) {
-      const imagePath = localImageFromUrl(url)
-      if (imagePath) {
-        replies.push({ text: '🖼️', imagePath, imageUrl: url })
-      }
+  if (ai) {
+    const out: Reply[] = [{ text: escapeHtml(ai.reply) }]
+    if (ai.toolsUsed.includes('request_operator') && !ai.reply.includes('همکار')) {
+      out.push({ text: OPERATOR_REFERRAL })
     }
-
-    // operator handoff — notify the seller with the conversation summary
-    if (ai.handoff) {
-      await logHandoff(telegramUserId, firstName, ai.handoff.summary)
-      const { adminChatId } = await loadConfig()
-      if (adminChatId) {
-        await send(
-          adminChatId,
-          [
-            '🆘 درخواست گفتگو با اپراتور',
-            '',
-            `👤 مشتری: ${escapeHtml(firstName ?? '')} (شناسه: ${telegramUserId})`,
-            '',
-            escapeHtml(ai.handoff.summary),
-          ].join('\n'),
-        ).catch(() => undefined)
-      }
+    for (const pid of ai.productIds) {
+      const card = await miniProductCardReply(pid).catch(() => null)
+      if (card) out.push(card)
     }
-
-    // AI order proposal → explicit customer confirmation (mandatory tap)
-    if (ai.action) {
-      const state = await loadSession(telegramUserId)
-      const next: BotState = {
-        flow: 'await_confirm',
-        checkout: 'ai',
-        aiItems: ai.action.items.map((i) => ({ productId: i.productId, qty: i.quantity })),
-        name: ai.action.name,
-        phone: ai.action.phone,
-        address: ai.action.address,
-      }
-      await saveSession(telegramUserId, next)
-      replies.push(...(await orderSummaryReply(next)))
-    }
-
-    return replies
+    return out
   }
 
   // deterministic fallback keeps the bot useful before/without the AI service
@@ -765,15 +905,24 @@ async function handleText(
       await clearFlow(telegramUserId)
       return searchResultsReply(text)
     case 'await_receipt':
-      return [
-        {
-          text: 'لطفاً تصویر رسید پرداخت را به‌صورت عکس بفرستید 📎',
-          keyboard: [HOME_ROW],
-        },
-      ]
+      return receiptFlowText(telegramUserId, text)
     default:
       return freeTextReply(telegramUserId, text, input.firstName)
   }
+}
+
+/** Text while awaiting a receipt photo — accept cancel, otherwise re-prompt. */
+async function receiptFlowText(telegramUserId: string, text: string): Promise<Reply[]> {
+  if (text === 'انصراف' || text === 'لغو') {
+    await clearFlow(telegramUserId)
+    return [mainMenuReply('انصراف داده شد. از منوی زیر انتخاب کنید:')]
+  }
+  return [
+    {
+      text: 'لطفاً تصویر رسید واریز را ارسال کنید 📎\n\nاگر هنوز واریز نکرده‌اید، ابتدا مبلغ سفارش را به کارت اعلام‌شده واریز کنید.',
+      keyboard: [HOME_ROW],
+    },
+  ]
 }
 
 function orderSummaryReminder(): Reply[] {
@@ -881,61 +1030,6 @@ async function handleCallback(
     await clearFlow(telegramUserId)
     return [await supportReply()]
   }
-  if (cb === 'menu:cart') {
-    // keep the cart, clear only any active flow
-    const state = await loadSession(telegramUserId)
-    const next: BotState = { cart: state.cart }
-    await saveSession(telegramUserId, next)
-    return cartReply(next)
-  }
-  if (cb.startsWith('cart:add:')) {
-    const productId = cb.slice('cart:add:'.length)
-    const p = await getProduct(productId).catch(() => null)
-    if (!p || p.status !== 'active' || p.stock <= 0) {
-      return [{ text: 'این محصول برای افزودن به سبد موجود نیست.', keyboard: MAIN_MENU }]
-    }
-    const state = await loadSession(telegramUserId)
-    const cart = [...(state.cart ?? [])]
-    const existing = cart.find((l) => l.productId === productId)
-    if (existing) {
-      if (existing.qty + 1 > p.stock) {
-        return [{ text: `بیشتر از موجودی (${formatNumber(p.stock)}) نمی‌توانید اضافه کنید.` }]
-      }
-      existing.qty += 1
-    } else {
-      cart.push({ productId, qty: 1 })
-    }
-    await saveSession(telegramUserId, { ...state, cart })
-    return [
-      {
-        text: `➕ «${escapeHtml(p.name)}» به سبد اضافه شد.`,
-        keyboard: [
-          [{ text: '🛒 مشاهده سبد', callback_data: 'menu:cart' }],
-          [{ text: '🛍 ادامه خرید', callback_data: 'back:products' }],
-        ],
-      },
-    ]
-  }
-  if (cb.startsWith('cart:rm:')) {
-    const idx = parseInt(cb.slice('cart:rm:'.length), 10)
-    const state = await loadSession(telegramUserId)
-    const cart = [...(state.cart ?? [])]
-    if (idx >= 0 && idx < cart.length) cart.splice(idx, 1)
-    const next: BotState = { ...state, cart }
-    await saveSession(telegramUserId, next)
-    return cartReply(next)
-  }
-  if (cb === 'cart:checkout') {
-    const state = await loadSession(telegramUserId)
-    if (!(state.cart ?? []).length) {
-      return [{ text: 'سبد خرید شما خالی است.', keyboard: MAIN_MENU }]
-    }
-    await saveSession(telegramUserId, { ...state, flow: 'await_name', checkout: 'cart' })
-    return [{ text: 'نام و نام خانوادگی؟', keyboard: [CANCEL_ORDER_ROW] }]
-  }
-  if (cb.startsWith('receipt:start:')) {
-    return receiptStartReply(telegramUserId, cb.slice('receipt:start:'.length))
-  }
   if (cb.startsWith('cat:')) {
     await clearFlow(telegramUserId)
     return [await categoryPageReply(cb.slice('cat:'.length), 1)]
@@ -953,6 +1047,10 @@ async function handleCallback(
       HOME_ROW,
     ])
   }
+  if (cb.startsWith('moreimgs:')) {
+    await clearFlow(telegramUserId)
+    return moreImagesReply(cb.slice('moreimgs:'.length))
+  }
   if (cb === 'order:confirm') {
     return confirmOrderCallback(telegramUserId, input, state)
   }
@@ -963,8 +1061,11 @@ async function handleCallback(
   if (cb.startsWith('order:')) {
     return startOrderFlow(telegramUserId, cb.slice('order:'.length))
   }
+  if (cb.startsWith('receipt:')) {
+    return startReceiptFlow(telegramUserId, cb.slice('receipt:'.length))
+  }
   if (cb.startsWith('seller:confirm:') || cb.startsWith('seller:cancel:')) {
-    return sellerStatusCallback(cb)
+    return sellerStatusCallback(cb, telegramUserId)
   }
   // unknown callback → main menu
   await clearFlow(telegramUserId)
@@ -994,59 +1095,65 @@ async function confirmOrderCallback(
   input: UpdateInput,
   state: BotState,
 ): Promise<Reply[]> {
-  const isCart = state.checkout === 'cart'
-  const isAi = state.checkout === 'ai'
-  let items: Array<{ productId: string; quantity: number }> = []
-  if (isCart) items = (state.cart ?? []).map((l) => ({ productId: l.productId, quantity: l.qty }))
-  else if (isAi) items = (state.aiItems ?? []).map((l) => ({ productId: l.productId, quantity: l.qty }))
-  else if (state.productId && state.quantity) items = [{ productId: state.productId, quantity: state.quantity }]
-
-  if (!state.name || !state.phone || !state.address || items.length === 0) {
+  if (
+    !state.productId ||
+    !state.quantity ||
+    !state.name ||
+    !state.phone ||
+    !state.address
+  ) {
     await clearFlow(telegramUserId)
     return [{ text: 'سفارشی برای تأیید یافت نشد. از منوی محصولات شروع کنید:', keyboard: MAIN_MENU }]
   }
 
   try {
-    const order = await createOrderMulti({
+    const order = await createOrder({
       customer: {
         telegramUserId,
-        firstName: state.name, // snapshot name the customer typed; telegram first name may differ
+        // real Telegram profile name stays on Customer; typed name is only a snapshot
+        telegramFirstName: input.firstName ?? null,
         username: inputUsernameCache.get(telegramUserId) ?? null,
       },
-      items,
+      productId: state.productId,
+      quantity: state.quantity,
       name: state.name,
       phone: state.phone,
       address: state.address,
     })
-    await clearFlow(telegramUserId)
-    const success: Reply[] = [
-      {
-        text: `✅ سفارش شما با شماره #${order.orderNumber} ثبت شد!\n\nمبلغ: ${formatMoney(order.total)}\n\nاطلاعات پرداخت:`,
-        keyboard: MAIN_MENU,
-      },
-    ]
-    // Payment instructions immediately follow the order (manual card payment)
-    const payInfo = await paymentInfoReply(order)
-    return [...success, ...payInfo]
+    // straight into the manual payment flow
+    await saveSession(telegramUserId, { flow: 'await_receipt', orderId: order.id })
+    return paymentInfoReply({ id: order.id, orderNumber: order.orderNumber, total: order.total })
   } catch (e) {
     await clearFlow(telegramUserId)
     if (e instanceof InsufficientStockError) {
+      let available = e.available
+      if (available <= 0) {
+        const p = await getProduct(state.productId).catch(() => null)
+        available = p?.stock ?? 0
+      }
       return [
         {
-          text: 'متأسفانه موجودی یکی از محصولات کافی نیست — سبد را بررسی و دوباره تلاش کنید.',
+          text: `متأسفانه موجودی کافی نیست. موجودی فعلی: ${formatNumber(available)} عدد.`,
           keyboard: MAIN_MENU,
         },
       ]
     }
     if (e instanceof ProductUnavailableError) {
-      return [{ text: 'یکی از محصولات یافت نشد یا فعال نیست.', keyboard: MAIN_MENU }]
+      return [{ text: 'این محصول یافت نشد یا فعال نیست.', keyboard: MAIN_MENU }]
     }
     throw e // caught by handleUpdate → generic error reply
   }
 }
 
-async function sellerStatusCallback(cb: string): Promise<Reply[]> {
+async function sellerStatusCallback(cb: string, telegramUserId: string): Promise<Reply[]> {
   // cb = seller:confirm:<id> | seller:cancel:<id>
+  // Admin-only: the callback must come from the configured admin chat id.
+  const cfg = await loadConfig()
+  const callerId = Number.parseInt(telegramUserId, 10)
+  const adminId = Number.parseInt(cfg.adminChatId, 10)
+  if (!Number.isFinite(callerId) || !Number.isFinite(adminId) || callerId !== adminId) {
+    return [] // silently ignore unauthorized presses
+  }
   const parts = cb.split(':')
   const action = parts[1] // 'confirm' | 'cancel'
   const orderId = parts.slice(2).join(':')
@@ -1089,10 +1196,10 @@ export async function handleUpdate(input: UpdateInput): Promise<Reply[]> {
 
     const state = await loadSession(input.telegramUserId)
     let replies: Reply[]
-    if (input.photo) {
-      replies = await handlePhoto(input.telegramUserId, input, state)
-    } else if (typeof input.callbackData === 'string' && input.callbackData) {
+    if (typeof input.callbackData === 'string' && input.callbackData) {
       replies = await handleCallback(input.telegramUserId, input, state)
+    } else if (input.photo?.fileId) {
+      replies = await handlePhotoMessage(input.telegramUserId, input, state)
     } else if (typeof input.text === 'string') {
       replies = await handleText(input.telegramUserId, input, state)
     } else {

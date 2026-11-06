@@ -54,11 +54,22 @@ export async function listActiveProductsByCategory(categoryId: string, page: num
   return { items, total }
 }
 
+/**
+ * Product with gallery images (primary first, then sortOrder) + silver specs.
+ * NOTE: `price` is the seller-approved final price — NEVER recomputed from
+ * silver rate × weight anywhere in the bot (pricing law).
+ */
 export async function getProduct(id: string) {
-  return db.product.findUnique({ where: { id }, include: { category: true } })
+  return db.product.findUnique({
+    where: { id },
+    include: {
+      category: true,
+      images: { orderBy: [{ isPrimary: 'desc' }, { sortOrder: 'asc' }] },
+    },
+  })
 }
 
-/** Search active products for the bot search flow / AI fallback. */
+/** Search active products for the bot search flow / AI fallback (text lists only). */
 export async function searchActiveProducts(query: string, limit = 8) {
   const q = query.trim()
   if (!q) return []
@@ -74,4 +85,17 @@ export async function searchActiveProducts(query: string, limit = 8) {
     orderBy: { createdAt: 'desc' },
     take: limit,
   })
+}
+
+/** Active card-to-card destinations shown to the customer after checkout. */
+export async function getActivePaymentDestinations() {
+  return db.paymentDestination.findMany({
+    where: { active: true },
+    orderBy: { sortOrder: 'asc' },
+  })
+}
+
+/** Latest active manual silver rate (admin-entered reference info only). */
+export async function getLatestSilverRate() {
+  return db.silverRate.findFirst({ where: { active: true }, orderBy: { createdAt: 'desc' } })
 }

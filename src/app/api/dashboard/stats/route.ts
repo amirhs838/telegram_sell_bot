@@ -1,5 +1,6 @@
 import { ok, requireAuth, route } from '@/lib/api'
 import { db } from '@/lib/db'
+import { PAYMENT_STATUSES } from '@/app/api/orders/shared'
 
 const ORDER_STATUSES = ['pending', 'confirmed', 'processing', 'shipped', 'completed', 'cancelled'] as const
 
@@ -21,11 +22,10 @@ export const GET = route(async () => {
     todayOrders,
     salesAgg,
     statusGroups,
+    paymentStatusGroups,
+    paymentsAwaitingReview,
     last7DaysOrders,
     recentOrders,
-    paymentsReview,
-    paymentsPaid,
-    currentSilverRate,
   ] = await Promise.all([
     db.product.count(),
     db.product.count({ where: { status: 'active' } }),
@@ -36,6 +36,8 @@ export const GET = route(async () => {
     db.order.count({ where: { createdAt: { gte: startOfToday } } }),
     db.order.aggregate({ _sum: { total: true }, where: { status: { not: 'cancelled' } } }),
     db.order.groupBy({ by: ['status'], _count: { _all: true } }),
+    db.order.groupBy({ by: ['paymentStatus'], _count: { _all: true } }),
+    db.payment.count({ where: { status: 'awaiting_review' } }),
     db.order.findMany({
       where: { createdAt: { gte: weekStart } },
       select: { createdAt: true, total: true, status: true },
@@ -45,9 +47,6 @@ export const GET = route(async () => {
       take: 6,
       select: { id: true, orderNumber: true, customerName: true, total: true, status: true, createdAt: true },
     }),
-    db.payment.count({ where: { status: 'payment_review' } }),
-    db.payment.count({ where: { status: 'paid' } }),
-    db.silverRate.findFirst({ where: { active: true }, orderBy: { createdAt: 'desc' } }),
   ])
 
   const statusCounts: Record<(typeof ORDER_STATUSES)[number], number> = {
@@ -61,6 +60,21 @@ export const GET = route(async () => {
   for (const g of statusGroups) {
     if ((ORDER_STATUSES as readonly string[]).includes(g.status)) {
       statusCounts[g.status as (typeof ORDER_STATUSES)[number]] = g._count._all
+    }
+  }
+
+  // Manual payment dimension (separate from fulfilment status).
+  const paymentStatusCounts: Record<(typeof PAYMENT_STATUSES)[number], number> = {
+    awaiting_payment: 0,
+    payment_review: 0,
+    paid: 0,
+    rejected: 0,
+    refund_pending: 0,
+    refunded: 0,
+  }
+  for (const g of paymentStatusGroups) {
+    if ((PAYMENT_STATUSES as readonly string[]).includes(g.paymentStatus)) {
+      paymentStatusCounts[g.paymentStatus as (typeof PAYMENT_STATUSES)[number]] = g._count._all
     }
   }
 
@@ -93,14 +107,11 @@ export const GET = route(async () => {
       todayOrders,
       totalSales: salesAgg._sum.total ?? 0,
       customers,
-      paymentsReview,
-      paymentsPaid,
+      paymentsAwaitingReview,
     },
-    silverRate: currentSilverRate
-      ? { pricePerGram: currentSilverRate.pricePerGram, unit: currentSilverRate.unit }
-      : null,
     weekly,
     recentOrders,
     statusCounts,
+    paymentStatusCounts,
   })
 })

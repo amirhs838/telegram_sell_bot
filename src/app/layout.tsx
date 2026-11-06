@@ -4,9 +4,9 @@ import { Toaster } from "@/components/ui/toaster";
 import { Toaster as Sonner } from "@/components/ui/sonner";
 
 export const metadata: Metadata = {
-  title: "پنل مدیریت فروشگاه تلگرامی",
+  title: "پنل مدیریت Silver Love — فروشگاه نقره",
   description:
-    "پلتفرم تجارت تلگرام — مدیریت محصولات، سفارش‌ها و ربات تلگرام با هوش مصنوعی",
+    "سیستم فروش و مدیریت اختصاصی فروشگاه نقره Silver Love — پنل مدیریت، ربات تلگرام و دستیار هوش مصنوعی فروشنده",
   icons: {
     icon: "/logo.svg",
   },

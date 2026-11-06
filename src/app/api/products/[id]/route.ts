@@ -8,9 +8,9 @@ import { syncProductPost, unpublishProduct } from '@/lib/telegram'
 import { uniqueSlug } from '@/lib/slug'
 import {
   PRODUCT_INCLUDE,
-  normalizeImages,
-  pickPrimaryImageUrl,
+  isProductCodeViolation,
   productPatchSchema,
+  replaceProductGallery,
   serializeProduct,
 } from '../shared'
 
@@ -67,7 +67,9 @@ export const PATCH = route<{ params: Promise<{ id: string }> }>(
       data.categoryId = categoryId
       changedFields.push('categoryId')
     }
-    if (body.imageUrl !== undefined) {
+    // When a new gallery is provided, Product.imageUrl is synced to its primary
+    // image by replaceProductGallery — the legacy field loses priority.
+    if (body.imageUrl !== undefined && body.images === undefined) {
       data.imageUrl = body.imageUrl
       changedFields.push('imageUrl')
     }
@@ -88,32 +90,46 @@ export const PATCH = route<{ params: Promise<{ id: string }> }>(
       changedFields.push('tags')
     }
 
-    // ── Silver specs (optional; undefined = untouched, null = cleared) ────────
-    const specFields = [
-      'sku', 'silverType', 'purity', 'size', 'dimensions',
-      'brand', 'appearance', 'careInstructions', 'authenticity',
-    ] as const
-    for (const f of specFields) {
-      const v = body[f]
-      if (v !== undefined) {
-        data[f] = v
-        changedFields.push(f)
-      }
+    // ─── Silver Love specs (optional, null clears) ───
+    if (body.productCode !== undefined) {
+      data.productCode = body.productCode
+      changedFields.push('productCode')
+    }
+    if (body.silverType !== undefined) {
+      data.silverType = body.silverType
+      changedFields.push('silverType')
+    }
+    if (body.fineness !== undefined) {
+      data.fineness = body.fineness
+      changedFields.push('fineness')
     }
     if (body.weightGrams !== undefined) {
       data.weightGrams = body.weightGrams
       changedFields.push('weightGrams')
     }
-
-    // ── Gallery replacement (explicit payload = full sync) ───────────────────
-    if (body.images !== undefined) {
-      const gallery = normalizeImages(body.images)
-      const primary = pickPrimaryImageUrl(gallery)
-      if (primary) {
-        data.imageUrl = primary
-        changedFields.push('imageUrl(gallery-primary)')
-      }
-      changedFields.push('images')
+    if (body.size !== undefined) {
+      data.size = body.size
+      changedFields.push('size')
+    }
+    if (body.dimensions !== undefined) {
+      data.dimensions = body.dimensions
+      changedFields.push('dimensions')
+    }
+    if (body.brand !== undefined) {
+      data.brand = body.brand
+      changedFields.push('brand')
+    }
+    if (body.appearance !== undefined) {
+      data.appearance = body.appearance
+      changedFields.push('appearance')
+    }
+    if (body.careInstructions !== undefined) {
+      data.careInstructions = body.careInstructions
+      changedFields.push('careInstructions')
+    }
+    if (body.authenticityNote !== undefined) {
+      data.authenticityNote = body.authenticityNote
+      changedFields.push('authenticityNote')
     }
 
     // Inventory ↔ status sync. Inventory integrity always wins:
@@ -134,19 +150,30 @@ export const PATCH = route<{ params: Promise<{ id: string }> }>(
       }
     }
 
-    const updated = await db.$transaction(async (tx) => {
-      if (body.images !== undefined) {
-        // full replacement — keeps ids/state consistent with the form
-        await tx.productImage.deleteMany({ where: { productId: id } })
-        const gallery = normalizeImages(body.images)
-        if (gallery.length) {
-          await tx.productImage.createMany({
-            data: gallery.map((g) => ({ productId: id, url: g.url, isPrimary: g.isPrimary, sortOrder: g.sortOrder })),
-          })
-        }
+    let updated
+    try {
+      updated = await db.product.update({
+        where: { id },
+        data,
+        include: PRODUCT_INCLUDE,
+      })
+    } catch (e) {
+      if (isProductCodeViolation(e)) {
+        throw new ApiError(422, 'کد محصول تکراری است')
       }
-      return tx.product.update({ where: { id }, data, include: PRODUCT_INCLUDE })
-    })
+      throw e
+    }
+
+    // Gallery replacement (upsert by url, delete removed, sync primary → imageUrl).
+    if (body.images !== undefined) {
+      await replaceProductGallery(id, body.images ?? [])
+      changedFields.push('images')
+      const refetched = await db.product.findUnique({
+        where: { id },
+        include: PRODUCT_INCLUDE,
+      })
+      if (refetched) updated = refetched
+    }
 
     // Keep an existing channel post in sync (price/stock/name/…). Best-effort:
     // guarded by mapping existence so a post is never created from here.
