@@ -23,6 +23,8 @@ import {
   formatNumber,
   orderStatusFa,
   isBroadDiscoveryQuery,
+  classifySmallTalk,
+  smallTalkReplyFa,
 } from '../../src/lib/telegram-render'
 import { db } from './db'
 import {
@@ -900,6 +902,11 @@ async function freeTextReply(
   // deterministic fallback keeps the bot useful before/without the AI service
   if (broadDiscovery) {
     return [await consultCategoriesReply()]
+  }
+  // small talk must never degrade into a product search blast
+  const small = classifySmallTalk(text)
+  if (small) {
+    return [{ text: smallTalkReplyFa(small, firstName), keyboard: [HOME_ROW] }]
   }
   const results = await searchActiveProducts(text, 8)
   const note = 'دستیار هوشمند موقتاً در دسترس نیست — نتایج جستجو:'

@@ -8,9 +8,14 @@
 // get_silver_rate tool (never from model knowledge or the internet).
 import { z } from 'zod'
 import { db } from '@/lib/db'
-import { chatJSONMessages, AiError } from '@/lib/ai/client'
+import { chatRawMessages, tryExtractJson, AiError } from '@/lib/ai/client'
 import { semanticSearch } from '@/lib/ai/embedding'
-import { orderStatusFa, isBroadDiscoveryQuery } from '@/lib/telegram-render'
+import {
+  orderStatusFa,
+  isBroadDiscoveryQuery,
+  classifySmallTalk,
+  smallTalkReplyFa,
+} from '@/lib/telegram-render'
 
 const MAX_TOOL_ITERATIONS = 6
 
@@ -319,6 +324,12 @@ async function searchFallback(
   message: string,
   headline: string,
 ): Promise<{ reply: string; productIds: string[] }> {
+  // small talk must NEVER turn into product cards (e.g. a «سلام» that reaches
+  // the fallback path when the AI service is down)
+  const small = classifySmallTalk(message)
+  if (small) {
+    return { reply: smallTalkReplyFa(small), productIds: [] }
+  }
   const hits = await semanticSearch(message, { limit: 3 }).catch(() => [])
   const productIds = hits.map((h) => h.product.id)
   const lines: string[] = []
@@ -370,6 +381,10 @@ async function categoriesFallback(): Promise<{ reply: string; productIds: string
 export async function fallbackWithoutAi(
   message: string,
 ): Promise<{ reply: string; productIds: string[] }> {
+  const small = classifySmallTalk(message)
+  if (small) {
+    return { reply: smallTalkReplyFa(small), productIds: [] }
+  }
   if (isBroadDiscoveryQuery(message)) {
     return categoriesFallback()
   }
@@ -422,6 +437,65 @@ async function buildCustomerContext(
 }
 
 /**
+ * One assistant protocol turn with self-healing:
+ *  1. ask the model, parse the protocol JSON;
+ *  2. if the model answered in PLAIN TEXT (no JSON at all — models do this
+ *     occasionally), salvage the text as the final reply instead of throwing
+ *     it away and degrading to a search fallback;
+ *  3. if it produced an invalid JSON object, retry with a corrective note.
+ * Returns null when no usable turn could be produced (caller → fallback).
+ * Throws AiError only for infra/rate failures (caller may rethrow).
+ */
+const PROTOCOL_ATTEMPTS = 2
+
+async function assistantTurn(
+  messages: { role: 'assistant' | 'user'; content: string }[],
+): Promise<AssistantAction | { reply: string } | null> {
+  for (let attempt = 1; attempt <= PROTOCOL_ATTEMPTS; attempt++) {
+    const corrective =
+      attempt > 1
+        ? '\n\n(پاسخ قبلی نامعتبر بود — فقط یکی از این دو را برگردان، بدون هیچ متن اضافه: {"reply":"متن پاسخ فارسی"} یا {"tool":"نام ابزار","args":{...}})'
+        : ''
+    const call = corrective
+      ? messages.map((m, i) =>
+          i === messages.length - 1 && m.role === 'user'
+            ? { ...m, content: `${m.content}${corrective}` }
+            : m,
+        )
+      : messages
+
+    let raw = ''
+    try {
+      raw = (await chatRawMessages(call)).trim()
+    } catch (e) {
+      if (e instanceof AiError) throw e // infra/rate failure → caller decides
+      throw e
+    }
+
+    const parsedRaw = tryExtractJson(raw)
+    if (parsedRaw !== undefined) {
+      const parsed = actionSchema.safeParse(parsedRaw)
+      if (parsed.success) return parsed.data
+    }
+
+    // SALVAGE: the model skipped the JSON protocol entirely and answered in
+    // plain Persian text — that IS the answer the customer should receive.
+    if (
+      parsedRaw === undefined &&
+      raw.length > 0 &&
+      raw.length <= 2500 &&
+      !raw.startsWith('{') &&
+      !raw.startsWith('```') &&
+      /[\u0600-\u06FF]/.test(raw)
+    ) {
+      console.warn('[ai:assistant] model skipped JSON protocol → salvaged plain-text reply')
+      return { reply: raw }
+    }
+  }
+  return null
+}
+
+/**
  * Run the tool-loop assistant for one user message.
  * `history` carries the persistent ChatMessage memory (user+assistant turns);
  * only the system prompt + last 12 turns are sent to the model.
@@ -436,6 +510,16 @@ export async function runAssistant(input: {
   aiTone?: string
 }): Promise<AssistantResult> {
   const { telegramUserId, message, firstName } = input
+  // Pure small talk (سلام / ممنون / خداحافظ) → warm deterministic reply.
+  // No AI call at all: zero cost, zero failure modes, always consistent.
+  const smallTalk = classifySmallTalk(message)
+  if (smallTalk) {
+    return {
+      reply: smallTalkReplyFa(smallTalk, firstName),
+      toolsUsed: [],
+      productIds: [],
+    }
+  }
   // Broad «چیا دارید؟» style questions → consult-first: the reply stays AI-
   // generated and personal, but product cards are withheld until the customer
   // names a category/taste/budget (enforced again on the bot side too).
@@ -468,39 +552,41 @@ export async function runAssistant(input: {
 
   try {
     for (let i = 0; i < MAX_TOOL_ITERATIONS; i++) {
-      let action: AssistantAction
+      let turn: AssistantAction | { reply: string } | null
       try {
-        action = await chatJSONMessages(messages, actionSchema, 2)
-      } catch {
-        break // model never produced valid protocol JSON → deterministic fallback
+        turn = await assistantTurn(messages)
+      } catch (e) {
+        if (e instanceof AiError) throw e // propagate → outer catch → AiError rethrown
+        break // model never produced anything usable → deterministic fallback
       }
+      if (!turn) break // no valid protocol turn → deterministic fallback
 
-      if ('reply' in action) {
+      if ('reply' in turn) {
         return {
-          reply: action.reply,
+          reply: turn.reply,
           toolsUsed,
           productIds: broadDiscovery ? [] : surfacedProductIds.slice(0, 3),
         }
       }
 
-      const toolName = action.tool
+      const toolName = turn.tool
       toolsUsed.push(toolName)
 
       let result: unknown
       try {
-        result = await executeTool(toolName, action.args ?? {}, { telegramUserId, trackProduct })
+        result = await executeTool(toolName, turn.args ?? {}, { telegramUserId, trackProduct })
       } catch (e) {
         console.error(`[ai:assistant] tool ${toolName} failed`, e)
         result = TOOL_ERROR
       }
       // ops visibility: which tool ran, with which args and what it returned
       console.log(
-        `[ai:assistant] tool=${toolName} args=${JSON.stringify(action.args ?? {}).slice(0, 200)} result=${JSON.stringify(result).slice(0, 400)}`,
+        `[ai:assistant] tool=${toolName} args=${JSON.stringify(turn.args ?? {}).slice(0, 200)} result=${JSON.stringify(result).slice(0, 400)}`,
       )
 
       messages.push({
         role: 'assistant',
-        content: JSON.stringify({ tool: toolName, args: action.args ?? {} }),
+        content: JSON.stringify({ tool: toolName, args: turn.args ?? {} }),
       })
       messages.push({
         role: 'user',

@@ -268,3 +268,76 @@ export function isBroadDiscoveryQuery(text: string): boolean {
   if (NARROW_INTENT_RE.test(t)) return false
   return BROAD_DISCOVERY_RE.test(t)
 }
+
+// ─── Small talk classification (pure — shared by panel + bot) ────────────────
+
+export type SmallTalkKind = 'greeting' | 'thanks' | 'bye'
+
+/** Minimal Persian normalizer (local copy — this module stays dependency-free). */
+function normalizeFaText(text: string): string {
+  return (text ?? '')
+    .replace(/ي/g, 'ی')
+    .replace(/ك/g, 'ک')
+    .replace(/ة/g, 'ه')
+    .replace(/\u200c/g, '')
+    .toLowerCase()
+    .replace(/[^\p{L}\p{N}\s]/gu, ' ')
+    .replace(/\s+/g, ' ')
+    .trim()
+}
+
+/** Words that are ONLY greetings — every token must belong to this set. */
+const GREETING_TOKENS = new Set([
+  'سلام', 'سلامعلیکم', 'السلام', 'علیکم', 'درود', 'هی', 'های',
+  'خوبید', 'چطورید', 'خستگی', 'نباشید', 'خسته', 'بخیر',
+  'صبح', 'عصر', 'شب', 'وقت', 'امروز', 'خوب', 'علیکمسلام',
+  'hi', 'hello', 'hey', 'salam',
+])
+
+const THANKS_RE =
+  /^(ممنون( از شما| از لطفتون| از لطف شما| از راهنمایی)?|مرسی|مچکرم|تشکر(ها|هاى)?|تشکرات|دمت گرم|دستت درد نکنه|دستت درد نکند|لطف کردید|لطف بزرگی کردید|خواهش میکنم خدمتتون)[\s!؟.,]*$/i
+
+const BYE_RE =
+  /^(خداحافظ|خدافظ|بدرود|فعلا|فعلا خداحافظ|بای|بای بای|خدانگهدار|خسته نباشید خداحافظ)[\s!؟.,]*$/i
+
+/**
+ * Classify a message as pure small talk (greeting/thanks/bye) — a message that
+ * carries no product intent at all. Returns null when ANY product/conversation
+ * content is present (even «سلام، گردنبند میخوام» → null → full assistant).
+ */
+export function classifySmallTalk(text: string): SmallTalkKind | null {
+  const norm = normalizeFaText(text ?? '')
+  if (!norm || norm.length > 60) return null
+  const tokens = norm.split(' ').filter(Boolean)
+  if (
+    tokens.length > 0 &&
+    tokens.length <= 6 &&
+    tokens.every((w) => GREETING_TOKENS.has(w))
+  ) {
+    return 'greeting'
+  }
+  if (THANKS_RE.test(norm)) return 'thanks'
+  if (BYE_RE.test(norm)) return 'bye'
+  return null
+}
+
+/** Deterministic warm reply for small talk — zero AI cost, zero failure modes. */
+export function smallTalkReplyFa(kind: SmallTalkKind, firstName?: string): string {
+  const name = firstName ? ` ${firstName.trim().slice(0, 30)}` : ''
+  switch (kind) {
+    case 'greeting':
+      return [
+        `سلام${name} عزیز! 👋`,
+        'به فروشگاه نقره «Silver Love» خوش آمدید.',
+        '',
+        'چطور می‌توانم کمکتان کنم؟',
+        '• دنبال محصول خاصی هستید؟ فقط بنویسید — مثلاً «گردنبند برای هدیه تا ۱ میلیون»',
+        '• نمی‌دانید چه انتخاب کنید؟ بگویید برای چه مناسبتی می‌خواهید تا راهنمایی‌تان کنم',
+        '• یا از منوی زیر استفاده کنید 👇',
+      ].join('\n')
+    case 'thanks':
+      return 'خواهش می‌کنم 🙏 من در خدمت شما هستم. هر سؤالی دربارهٔ محصولات نقره داشتید بفرمایید 💎'
+    case 'bye':
+      return 'به امید دیدار 🌹 هر وقت نیاز به مشاوره یا خرید داشتید، همین‌جا در خدمت شما هستیم.'
+  }
+}

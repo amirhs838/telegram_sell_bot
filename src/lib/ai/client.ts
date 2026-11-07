@@ -31,17 +31,20 @@ function errMessage(e: unknown): string {
 /**
  * Extract a JSON object from a model response:
  * strips markdown fences, then takes the substring from the first `{` to the last `}`.
+ * Returns undefined when the response contains no parseable JSON object.
  */
-function extractJson(raw: string): unknown {
+export function tryExtractJson(raw: string): unknown | undefined {
   let text = raw.trim()
   const fence = text.match(/```(?:json)?\s*([\s\S]*?)\s*```/i)
   if (fence && fence[1].includes('{')) text = fence[1].trim()
   const start = text.indexOf('{')
   const end = text.lastIndexOf('}')
-  if (start === -1 || end === -1 || end <= start) {
-    throw new Error('پاسخ مدل شامل شیء JSON نبود')
+  if (start === -1 || end === -1 || end <= start) return undefined
+  try {
+    return JSON.parse(text.slice(start, end + 1))
+  } catch {
+    return undefined
   }
-  return JSON.parse(text.slice(start, end + 1))
 }
 
 const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms))
@@ -59,7 +62,9 @@ export async function chatJSONMessages<T>(
   for (let attempt = 1; attempt <= attempts; attempt++) {
     try {
       const content = await complete(messages)
-      const parsed = schema.parse(extractJson(content))
+      const parsedRaw = tryExtractJson(content)
+      if (parsedRaw === undefined) throw new Error('پاسخ مدل شامل شیء JSON نبود')
+      const parsed = schema.parse(parsedRaw)
       return parsed
     } catch (e) {
       lastErr = e
@@ -88,7 +93,9 @@ export async function chatJSON<T>(
         { role: 'assistant', content: system },
         { role: 'user', content: currentUser },
       ])
-      const parsed = schema.parse(extractJson(content))
+      const parsedRaw = tryExtractJson(content)
+      if (parsedRaw === undefined) throw new Error('پاسخ مدل شامل شیء JSON نبود')
+      const parsed = schema.parse(parsedRaw)
       return parsed
     } catch (e) {
       lastErr = e
@@ -114,4 +121,13 @@ export async function chatText(system: string, user: string): Promise<string> {
     console.error('[ai:chatText] failed', e)
     throw new AiError('سرویس هوش مصنوعی پاسخ معتبر برنگرداند')
   }
+}
+
+/**
+ * Raw multi-turn completion — NO JSON parsing. Used by the assistant tool
+ * loop, which parses the protocol itself and can salvage a plain-text answer
+ * when the model skips the JSON protocol (models do this occasionally).
+ */
+export async function chatRawMessages(messages: ChatMessage[]): Promise<string> {
+  return complete(messages)
 }
