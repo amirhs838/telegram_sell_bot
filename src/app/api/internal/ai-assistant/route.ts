@@ -7,6 +7,7 @@
 // Next dev server process, so it survives this sandbox's shell-session
 // cleanup (plain `nohup … &` from a tool shell does not).
 import { spawn } from 'node:child_process'
+import { openSync } from 'node:fs'
 import path from 'node:path'
 import type { NextRequest } from 'next/server'
 import { z } from 'zod'
@@ -50,10 +51,13 @@ async function ensureBotServiceRunning(): Promise<boolean> {
     clearTimeout(timer)
   }
   try {
+    // Keep the service observable: append its stdout/stderr to the same log
+    // file the sandbox start script uses (stdio:'ignore' made respawns mute).
+    const logFd = openSync('/tmp/mini-service-bot-service.log', 'a')
     const child = spawn('bun', ['run', 'dev'], {
       cwd: BOT_SERVICE_DIR,
       detached: true,
-      stdio: 'ignore',
+      stdio: ['ignore', logFd, logFd],
       env: process.env,
     })
     child.unref()

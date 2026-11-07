@@ -347,17 +347,24 @@ export type TelegramUpdate = {
   }
 }
 
+/** Result of one getUpdates long-poll — carries the failure reason explicitly. */
+export type PollResult =
+  | { updates: TelegramUpdate[] }
+  | { error: string }
+
 /**
  * Long-poll getUpdates. `timeoutSeconds` is the server-side wait — the HTTP
  * timeout (35s) always exceeds it so the request is never aborted mid-poll.
  * `signal` lets the polling supervisor cancel an in-flight poll during a
  * hot-reload handover (quiet — no ActivityLog row).
+ * Failures return `{ error }` instead of a silent null so the polling loop
+ * can log WHY the bot stopped receiving (webhook conflict, network, 409…).
  */
 export async function getUpdatesPolling(
   offset: number,
   timeoutSeconds = 25,
   signal?: AbortSignal,
-): Promise<TelegramUpdate[] | null> {
+): Promise<PollResult> {
   await loadConfig()
   const result = await callTelegramApi(
     'getUpdates',
@@ -369,6 +376,6 @@ export async function getUpdatesPolling(
     LONG_POLL_TIMEOUT_MS,
     { signal, quietAbort: true },
   )
-  if (!result.ok) return null
-  return (result.result as TelegramUpdate[]) ?? []
+  if (!result.ok) return { error: result.error || 'unknown telegram error' }
+  return { updates: (result.result as TelegramUpdate[]) ?? [] }
 }

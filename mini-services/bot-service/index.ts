@@ -316,11 +316,28 @@ function persistOffset(botId: string, offset: number): void {
 async function pollingLoop(gen: number, abort: AbortController): Promise<void> {
   let offset = 0
   let currentBotId = ''
+  let lastMode: 'mock' | 'real' | null = null
+  let pollFailures = 0
+  let iters = 0
   console.log(`[bot-service] polling loop gen ${gen} active`)
   for (;;) {
     if (registry.gen !== gen) return // superseded by a hot reload → die quietly
+    iters++
+    // Heartbeat: proves the loop is alive and shows WHERE it is (was silent
+    // hangs before — unobservable wedged states after hot reloads).
+    if (iters % 60 === 0) {
+      console.log(
+        `[bot-service] heartbeat gen=${gen} iters=${iters} mode=${lastMode ?? '?'} bot=${currentBotId || '-'} offset=${offset} pollFailures=${pollFailures}`,
+      )
+    }
     try {
       const mode = await resolveMode()
+      if (mode !== lastMode) {
+        console.log(
+          `[bot-service] mode → ${mode}${mode === 'real' ? ' (polling activated)' : ' (waiting for a bot to be connected in the panel)'}`,
+        )
+        lastMode = mode
+      }
       if (mode === 'mock') {
         // No real bot connected yet — wait until the seller connects one
         // from the admin panel (config is re-read on each resolveMode()).
@@ -339,12 +356,23 @@ async function pollingLoop(gen: number, abort: AbortController): Promise<void> {
         console.log(`[bot-service] polling bot ${botId} from persisted offset ${offset}`)
       }
       // 25s server-side long-poll; the HTTP timeout (35s) always exceeds it
-      const updates = await getUpdatesPolling(offset, 25, abort.signal)
+      const res = await getUpdatesPolling(offset, 25, abort.signal)
       if (registry.gen !== gen) return // superseded mid-poll
-      if (updates === null) {
-        await sleep(3000) // backoff on API failure (incl. 409 with old loop)
+      if ('error' in res) {
+        pollFailures++
+        if (pollFailures === 1 || pollFailures % 20 === 0) {
+          console.error(
+            `[bot-service] getUpdates failed ×${pollFailures}: ${res.error} (bot=${currentBotId})`,
+          )
+        }
+        await sleep(3000)
         continue
       }
+      if (pollFailures > 0) {
+        console.log(`[bot-service] getUpdates recovered after ${pollFailures} failures`)
+        pollFailures = 0
+      }
+      const updates = res.updates
       if (updates.length > 0) {
         // Confirm the batch BEFORE handling: the offset lives on disk, so
         // neither a hot-reload handover nor a process restart can re-deliver
