@@ -243,10 +243,82 @@ function isDuplicateUpdate(updateId: number): boolean {
   return false
 }
 
-async function pollingLoop(): Promise<void> {
+// ─── Hot-reload-safe polling supervisor ───────────────────────────────────────
+// `bun --hot` re-evaluates this module on every file change while the process
+// (and the PREVIOUS module's infinite polling loop) stays alive. Without this
+// registry, every reload stacked ANOTHER polling loop on the same bot token —
+// each with its own offset starting at 0 and its own update-id LRU — so the
+// customer received 2..N copies of every reply. globalThis survives --hot
+// reloads: the newest generation supersedes (aborts) all older ones.
+
+type PollRegistry = {
+  /** bumped at every module evaluation — only the current generation polls */
+  gen: number
+  /** aborts the in-flight long poll of the previous generation */
+  abort: AbortController | null
+}
+
+const POLL_REG_KEY = '__silverlove_bot_poll_registry__'
+const g = globalThis as unknown as { __silverlove_bot_poll_registry__?: PollRegistry }
+const registry: PollRegistry = g[POLL_REG_KEY] ?? { gen: 0, abort: null }
+g[POLL_REG_KEY] = registry
+
+registry.gen += 1
+const MY_GEN = registry.gen
+if (registry.abort) {
+  try {
+    registry.abort.abort() // previous generation: cancel its in-flight poll
+  } catch {
+    // already dead
+  }
+}
+const myAbort = new AbortController()
+registry.abort = myAbort
+
+// ─── Persisted getUpdates offset (per bot) ────────────────────────────────────
+// Telegram confirms updates only via the offset of the NEXT getUpdates call,
+// so an in-memory offset re-delivers every recent message after a restart or
+// hot-reload handover → duplicates. Persisting it makes handover at-most-once.
+const OFFSET_FILE = path.join(import.meta.dir, '.bot-offset.json')
+
+function botIdOf(token: string): string {
+  return token.split(':')[0] || 'unknown'
+}
+
+function readPersistedOffset(botId: string): number {
+  try {
+    const raw = JSON.parse(readFileSync(OFFSET_FILE, 'utf8')) as {
+      botId?: string
+      offset?: number
+    }
+    if (
+      raw.botId === botId &&
+      typeof raw.offset === 'number' &&
+      Number.isFinite(raw.offset) &&
+      raw.offset > 0
+    ) {
+      return Math.trunc(raw.offset)
+    }
+  } catch {
+    // first run / unreadable → start from scratch
+  }
+  return 0
+}
+
+function persistOffset(botId: string, offset: number): void {
+  try {
+    writeFileSync(OFFSET_FILE, JSON.stringify({ botId, offset, at: Date.now() }))
+  } catch {
+    // best effort — worst case after a crash: a redelivered update
+  }
+}
+
+async function pollingLoop(gen: number, abort: AbortController): Promise<void> {
   let offset = 0
-  let currentToken = ''
+  let currentBotId = ''
+  console.log(`[bot-service] polling loop gen ${gen} active`)
   for (;;) {
+    if (registry.gen !== gen) return // superseded by a hot reload → die quietly
     try {
       const mode = await resolveMode()
       if (mode === 'mock') {
@@ -256,22 +328,31 @@ async function pollingLoop(): Promise<void> {
         continue
       }
       const token = await currentBotToken()
-      if (token !== currentToken) {
-        if (currentToken) {
-          console.log('[bot-service] bot token changed → restarting polling with the new bot')
+      const botId = botIdOf(token)
+      if (botId !== currentBotId) {
+        if (currentBotId) {
+          console.log(`[bot-service] bot changed → restarting polling (${botId})`)
         }
-        currentToken = token
-        offset = 0 // offsets are per-bot; start fresh
+        currentBotId = botId
+        offset = readPersistedOffset(botId) // offsets are per-bot, persisted
         seenUpdateIds.clear()
+        console.log(`[bot-service] polling bot ${botId} from persisted offset ${offset}`)
       }
       // 25s server-side long-poll; the HTTP timeout (35s) always exceeds it
-      const updates = await getUpdatesPolling(offset, 25)
+      const updates = await getUpdatesPolling(offset, 25, abort.signal)
+      if (registry.gen !== gen) return // superseded mid-poll
       if (updates === null) {
-        await sleep(3000) // backoff on API failure
+        await sleep(3000) // backoff on API failure (incl. 409 with old loop)
         continue
       }
+      if (updates.length > 0) {
+        // Confirm the batch BEFORE handling: the offset lives on disk, so
+        // neither a hot-reload handover nor a process restart can re-deliver
+        // these updates (at-most-once beats duplicates for a sales bot).
+        offset = Math.max(offset, ...updates.map((u) => u.update_id + 1))
+        persistOffset(botId, offset)
+      }
       for (const u of updates) {
-        offset = Math.max(offset, u.update_id + 1)
         if (isDuplicateUpdate(u.update_id)) continue
         try {
           const input = mapTelegramUpdate(u)
@@ -285,6 +366,7 @@ async function pollingLoop(): Promise<void> {
         }
       }
     } catch (e) {
+      if (registry.gen !== gen || abort.signal.aborted) return
       console.error('[bot-service] polling loop error:', e)
       await sleep(3000)
     }
@@ -293,7 +375,11 @@ async function pollingLoop(): Promise<void> {
 
 // Polling runs unconditionally: it self-waits in mock mode and activates
 // automatically (~10s) once a bot is connected from the admin panel.
-pollingLoop().catch((e) => console.error('[bot-service] polling crashed:', e))
-console.log('[bot-service] polling supervisor started (waits for a real bot connection)')
+// A module re-evaluation (--hot) aborts THIS loop and starts the next gen.
+void pollingLoop(MY_GEN, myAbort).catch((e) =>
+  console.error('[bot-service] polling crashed:', e),
+)
+console.log(`[bot-service] polling supervisor started (gen ${MY_GEN})`)
 
 console.log(`[bot-service] listening on http://127.0.0.1:${PORT}`)
+// handover test marker 2

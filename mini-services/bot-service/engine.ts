@@ -247,16 +247,21 @@ async function categoriesReply(): Promise<Reply> {
 }
 
 /**
- * Consultative answer for BROAD discovery questions (AI unreachable fallback):
- * short needs-assessment text + category quick-pick buttons, so the customer
- * is guided by questions AND keeps full freedom to browse.
+ * Consultative answer used whenever the AI layer is unreachable or unusable:
+ * short needs-assessment questions + category quick-pick buttons, so the
+ * customer is guided by questions AND keeps full freedom to browse.
+ * Never mentions any technical failure and never blasts product cards.
+ * Gift-related messages skip the redundant "for whom?" question.
  */
-async function consultCategoriesReply(): Promise<Reply> {
+const GIFT_INTENT_RE = /هدیه|کادو|برای\s?(مادر|پدر|همسر|خواهر|برادر|دوست|استاد|معلم|همکار)/i
+
+async function consultCategoriesReply(userText?: string): Promise<Reply> {
   const cats = await listCategories().catch(() => [])
+  const gift = userText ? GIFT_INTENT_RE.test(userText) : false
   const text = [
-    'برای اینکه بهترین پیشنهاد را بدهم، کوتاه راهنمایی‌ام کنید 😊',
+    'برای اینکه بهترین پیشنهاد را به شما بدهم، لطفاً کوتاه راهنمایی‌ام کنید 😊',
     '',
-    '۱️⃣ برای خودتان می‌خواهید یا هدیه است؟',
+    gift ? '۱️⃣ دقیقاً برای چه کسی می‌خواهید؟ (مادر، همسر، …)' : '۱️⃣ برای خودتان می‌خواهید یا برای هدیه؟',
     '۲️⃣ حدود بودجه‌تان چقدر است؟',
     '',
     'یا مستقیم یکی از دسته‌ها را انتخاب کنید تا گزینه‌هایش را ببینید 👇',
@@ -899,30 +904,15 @@ async function freeTextReply(
     return out
   }
 
-  // deterministic fallback keeps the bot useful before/without the AI service
-  if (broadDiscovery) {
-    return [await consultCategoriesReply()]
-  }
-  // small talk must never degrade into a product search blast
+  // Deterministic fallback keeps the bot useful before/without the AI service:
+  // ALWAYS consultative (needs-assessment questions + category quick-pick) —
+  // never an apologetic "the assistant could not answer" message, and never a
+  // product blast. The customer narrows down; cards appear from that point on.
   const small = classifySmallTalk(text)
   if (small) {
     return [{ text: smallTalkReplyFa(small, firstName), keyboard: [HOME_ROW] }]
   }
-  const results = await searchActiveProducts(text, 8)
-  const note = 'دستیار هوشمند موقتاً در دسترس نیست — نتایج جستجو:'
-  if (results.length === 0) {
-    return [
-      {
-        text: `${note}\n\nمحصولی یافت نشد. عبارت دیگری را امتحان کنید.`,
-        keyboard: [[{ text: '🔎 جستجوی مجدد', callback_data: 'menu:search' }], HOME_ROW],
-      },
-    ]
-  }
-  const kb: InlineButton[][] = results.map((p) => [
-    { text: productButtonLabel(p), callback_data: `prod:${p.id}` },
-  ])
-  kb.push([{ text: '🔎 جستجوی مجدد', callback_data: 'menu:search' }], HOME_ROW)
-  return [{ text: `${note}\n\n🔎 «${escapeHtml(text.trim())}»:`, keyboard: kb }]
+  return [await consultCategoriesReply(text)]
 }
 
 // ─── Text handling (flows + commands) ────────────────────────────────────────

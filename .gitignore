@@ -69,3 +69,14 @@ upload/receipts/*
 
 # bot-service runtime lock (single-instance guard)
 mini-services/bot-service/.bot-lock
+
+# bot-service runtime files (polling lock + persisted offset)
+.bot-lock
+.bot-offset.json
+
+# sandbox runtime artifacts (stay local-only)
+.zscripts/dev.pid
+.zscripts/start.sh
+.zscripts/mini-services-install.sh
+.zscripts/mini-services-start.sh
+.zscripts/python-runtime-build.sh

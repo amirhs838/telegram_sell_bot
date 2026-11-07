@@ -118,12 +118,20 @@ async function callTelegramApi(
   method: string,
   payload: Record<string, unknown>,
   timeoutMs = HTTP_TIMEOUT_MS,
+  opts?: { signal?: AbortSignal; quietAbort?: boolean },
 ): Promise<TgResult> {
   const cfg = await loadConfig()
   const token = cfg.botToken
   if (!token) return { ok: false, error: 'no token' }
   const controller = new AbortController()
   const timer = setTimeout(() => controller.abort(), timeoutMs)
+  // external signal (polling-loop handover) → abort the in-flight request too
+  const external = opts?.signal
+  const onExternalAbort = (): void => controller.abort()
+  if (external) {
+    if (external.aborted) controller.abort()
+    else external.addEventListener('abort', onExternalAbort, { once: true })
+  }
   try {
     const res = await fetch(`${TG_API}/bot${token}/${method}`, {
       method: 'POST',
@@ -138,11 +146,16 @@ async function callTelegramApi(
     if (!json.ok) return { ok: false, error: json.description || `telegram ${res.status}` }
     return { ok: true, result: json.result }
   } catch (e) {
+    // A deliberate abort (polling handover) is normal — stay quiet, no log row.
+    if (controller.signal.aborted && opts?.quietAbort) {
+      return { ok: false, error: 'aborted' }
+    }
     const msg = e instanceof Error ? e.message : String(e)
     await logEvent('error', 'telegram_error', `${method} failed: ${msg}`)
     return { ok: false, error: msg }
   } finally {
     clearTimeout(timer)
+    external?.removeEventListener('abort', onExternalAbort)
   }
 }
 
@@ -337,10 +350,13 @@ export type TelegramUpdate = {
 /**
  * Long-poll getUpdates. `timeoutSeconds` is the server-side wait — the HTTP
  * timeout (35s) always exceeds it so the request is never aborted mid-poll.
+ * `signal` lets the polling supervisor cancel an in-flight poll during a
+ * hot-reload handover (quiet — no ActivityLog row).
  */
 export async function getUpdatesPolling(
   offset: number,
   timeoutSeconds = 25,
+  signal?: AbortSignal,
 ): Promise<TelegramUpdate[] | null> {
   await loadConfig()
   const result = await callTelegramApi(
@@ -351,6 +367,7 @@ export async function getUpdatesPolling(
       allowed_updates: ['message', 'callback_query'],
     },
     LONG_POLL_TIMEOUT_MS,
+    { signal, quietAbort: true },
   )
   if (!result.ok) return null
   return (result.result as TelegramUpdate[]) ?? []

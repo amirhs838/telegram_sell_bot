@@ -18,18 +18,26 @@ import {
 } from '@/lib/telegram-render'
 
 const MAX_TOOL_ITERATIONS = 6
+/** protocol retries per turn — models occasionally emit non-JSON garbage */
+const PROTOCOL_ATTEMPTS = 3
 
 const SYSTEM_PROMPT = `تو نماینده فروش و مشاور فروشگاه نقره «Silver Love» در تلگرام هستی؛ حرفه‌ای، گرم و مشاوره‌محور — نه یک منوی رباتیک.
 
+زبان و لحن (الزامی و شکست‌ناپذیر):
+- همیشه فارسیِ رسمی، ادبی و محترمانه بنویس و به مشتری خطاب «شما» بده؛ از محاوره‌نویسی مطلقاً پرهیز کن. هرگز واژه‌هایی مثل «مادرمون، میخوای، چقدری، چیا، میاد، بفرما» را در پاسخ نیاور؛ معادل درست: «مادرتان، می‌خواهید، چقدر است، چه محصولاتی، بفرمایید».
+- دربارهٔ اعضای خانوادهٔ مشتری با احترام سخن بگو («مادرتان»، «همسرتان»، «خواهرتان»)؛ هرگز مالکیت جمعی محاوره‌ای نساز — «مادرمون» ممنوع است.
+- در سلام و احوالپرسی کوتاه و گرم جواب بده و هرگز اطلاعات سفارش‌ها را در سلام نیاور؛ سفارش‌ها فقط وقتی به موضوع پیام مربوط است یا مشتری دربارهٔ آن پرسید.
+- هر پاسخ نهایی معمولاً بین ۲ تا ۵ خط باشد (فقط هنگام مقایسهٔ چند محصول طولانی‌تر شود)؛ پیام طولانی و پراکنده ممنوع. حداکثر یک تا دو ایموجی.
+
 سبک فروش و گفتگو:
 - نیازسنجی را در دل مکالمه طبیعی انجام بده: نوع محصول (انگشتر، گردنبند، دستبند، …)، برای خود مشتری است یا هدیه، سبک موردعلاقه، بودجه و در صورت لزوم سایز. هر بار فقط یک یا دو سؤال بپرس، نه یک فرم کامل.
-- **سؤال کلی «چیا دارید؟ / چه محصولاتی دارید؟» را هرگز با لیست یا عکس محصول جواب نده.** برای این سؤال‌های کلی: اول با get_categories دسته‌ها را ببین، بعد یک پاسخ مشاوره‌ای کوتاه بنویس که (۱) دسته‌های فروشگاه را با شمارندهٔ واقعی معرفی می‌کند، (۲) یک تا دو سؤال نیازسنجی می‌پرسد (مناسبت؟ برای خودشان یا هدیه؟ سبک یا بودجه؟) و (۳) دست مشتری را باز می‌گذارد («هر دسته‌ای که مدنظرتان بود بگویید تا بهترین گزینه‌ها را نشان بدهم»). در این حالت search_products را صدا نزن تا عکس محصول ارسال نشود — معرفی محصول بعد از این‌که مشتری دسته/سلیقه/بودجه‌اش را گفت.
+- اگر مشتری گفت برای هدیه یا برای یک نفر (مادر، همسر، دوست، …) می‌خواهد: اول یک جملهٔ کوتاه و گرم، بعد یک یا دو سؤال نیازسنجی (سلیقه، بودجه، مناسبتی که هدیه باید حس آن را بدهد) بپرس و هنوز محصول نفرست؛ فقط وقتی مشتری سلیقه/بودجه/دسته‌اش را گفت با search_products پیشنهاد بده.
+- **سؤال کلی «چیا دارید؟ / چه محصولاتی دارید؟» را هرگز با لیست یا عکس محصول جواب نده.** برای این سؤال‌های کلی: اول با get_categories دسته‌ها را ببین، بعد یک پاسخ مشاوره‌ای کوتاه بنویس که (۱) دسته‌های فروشگاه را با شمارندهٔ واقعی معرفی می‌کند، (۲) یک تا دو سؤال نیازسنجی می‌پرسد و (۳) دست مشتری را باز می‌گذارد («هر دسته‌ای که مدنظرتان بود بگویید تا بهترین گزینه‌ها را نشان بدهم»). در این حالت search_products را صدا نزن تا عکس محصول ارسال نشود — معرفی محصول بعد از این‌که مشتری دسته/سلیقه/بودجه‌اش را گفت.
 - پیشنهادها را «فقط» از موجودی واقعی فروشگاه با ابزارها انتخاب کن و تفاوت‌های گزینه‌ها (قیمت، عیار، وزن، سایز، مدل) را شفاف مقایسه کن.
 - به تردیدها و اعتراض‌ها (قیمت، عیار، وزن، ارسال، تعویض، اصالت) فقط با داده واقعی ابزارها یا تنظیمات فروشگاه پاسخ بده؛ اگر داده‌ای نداری، صادقانه بگو و پیشنهاد پیگیری انسانی بده.
 - گاهی (نه در هر پیام) یک پیشنهاد مکمل کوتاه و مرتبط بده (مثلاً زنجیر هماهنگ با گردنبند).
 - به‌طور طبیعی به خرید دعوت کن: یادآوری کن که با دکمه/منوی محصولات می‌تواند همان‌جا سفارش ثبت کند.
 - پاسخ سؤال‌های ساده، کوتاه و مستقیم است؛ به هر پیام منو نچسبان و کلام رباتیک تکرار نکن.
-- همیشه فارسی، گرم و محترمانه پاسخ بده.
 
 قوانین الزامی (شکست‌ناپذیر):
 - هرگز قیمت، موجودی، وزن، عیار، ضمانت، شرایط ارسال یا تخفیف از خودت نساز — همه فقط از نتایج ابزارها.
@@ -352,10 +360,13 @@ async function searchFallback(
 }
 
 /**
- * Consultative fallback for BROAD discovery questions (AI unreachable):
- * a category overview + needs-assessment questions, never a product blast.
+ * Consultative fallback (AI unreachable or unusable): a needs-assessment
+ * message + the REAL store categories with counts. Deliberately NEVER says
+ * "the assistant failed / is unavailable" — it just guides, and it never
+ * blasts products. Used for both broad discovery and any other message that
+ * reached the fallback path.
  */
-async function categoriesFallback(): Promise<{ reply: string; productIds: string[] }> {
+async function consultativeFallback(): Promise<{ reply: string; productIds: string[] }> {
   const cats = await db.category
     .findMany({
       select: { name: true, _count: { select: { products: { where: { status: 'active' } } } } },
@@ -364,17 +375,18 @@ async function categoriesFallback(): Promise<{ reply: string; productIds: string
     .catch(() => [])
   const catLines = cats.length > 0
     ? cats.map((c) => `🔹 ${c.name} (${faMoney(c._count.products)} مدل)`)
-    : ['🔹 فعلاً محصولات فروشگاه در حال به‌روزرسانی است']
-  const reply = [
-    'دستیار هوشمند موقتاً در دسترس نیست، اما می‌توانم راهنمایی‌تان کنم 😊',
+    : []
+  const lines = [
+    'برای اینکه دقیق‌ترین پیشنهاد را به شما بدهم، لطفاً کوتاه راهنمایی‌ام کنید:',
     '',
-    'دسته‌های فروشگاه Silver Love:',
-    ...catLines,
-    '',
-    'برای پیشنهاد دقیق‌تر بگویید: برای چه مناسبتی و حدوداً با چه بودجه‌ای؟ (برای خودتان یا هدیه؟)',
-    'هر دسته‌ای که مدنظرتان بود بنویسید تا بهترین گزینه‌هایش را معرفی کنم 💎',
-  ].join('\n')
-  return { reply, productIds: [] }
+    '۱️⃣ برای خودتان می‌خواهید یا برای هدیه؟ (برای چه کسی؟)',
+    '۲️⃣ حدود بودجه‌تان چقدر است؟',
+  ]
+  if (catLines.length > 0) {
+    lines.push('', 'دسته‌های فروشگاه Silver Love:', ...catLines)
+  }
+  lines.push('', 'هر دسته یا مدلی که مدنظرتان بود را بنویسید تا بهترین گزینه‌هایش را معرفی کنم 💎')
+  return { reply: lines.join('\n'), productIds: [] }
 }
 
 /** Fallback used when the panel has disabled the AI (Setting aiEnabled=false). */
@@ -386,7 +398,7 @@ export async function fallbackWithoutAi(
     return { reply: smallTalkReplyFa(small), productIds: [] }
   }
   if (isBroadDiscoveryQuery(message)) {
-    return categoriesFallback()
+    return consultativeFallback()
   }
   return searchFallback(
     message,
@@ -446,8 +458,6 @@ async function buildCustomerContext(
  * Returns null when no usable turn could be produced (caller → fallback).
  * Throws AiError only for infra/rate failures (caller may rethrow).
  */
-const PROTOCOL_ATTEMPTS = 2
-
 async function assistantTurn(
   messages: { role: 'assistant' | 'user'; content: string }[],
 ): Promise<AssistantAction | { reply: string } | null> {
@@ -598,14 +608,10 @@ export async function runAssistant(input: {
     console.error('[ai:assistant] unexpected error', e)
   }
 
-  if (broadDiscovery) {
-    const fb = await categoriesFallback()
-    return { reply: fb.reply, toolsUsed, productIds: [] }
-  }
-
-  const fb = await searchFallback(
-    message,
-    'دستیار هوشمند موقتاً نتوانست پاسخ کامل بدهد، اما این نتایج را برایتان پیدا کردم:',
-  )
-  return { reply: fb.reply, toolsUsed, productIds: fb.productIds }
+  // AI degraded → consultative guidance (questions + real category names).
+  // Deliberately NO apologetic "the assistant could not answer" message and
+  // NO product list — those confused customers (user report). Applies to
+  // every message that reaches the fallback path, broad discovery included.
+  const fb = await consultativeFallback()
+  return { reply: fb.reply, toolsUsed, productIds: [] }
 }
