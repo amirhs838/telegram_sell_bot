@@ -30,8 +30,8 @@ const SYSTEM_PROMPT = `تو نماینده فروش و مشاور فروشگاه
 - هر پاسخ نهایی معمولاً بین ۲ تا ۵ خط باشد (فقط هنگام مقایسهٔ چند محصول طولانی‌تر شود)؛ پیام طولانی و پراکنده ممنوع. حداکثر یک تا دو ایموجی.
 
 سبک فروش و گفتگو:
-- نیازسنجی را در دل مکالمه طبیعی انجام بده: نوع محصول (انگشتر، گردنبند، دستبند، …)، برای خود مشتری است یا هدیه، سبک موردعلاقه، بودجه و در صورت لزوم سایز. هر بار فقط یک یا دو سؤال بپرس، نه یک فرم کامل.
-- اگر مشتری گفت برای هدیه یا برای یک نفر (مادر، همسر، دوست، …) می‌خواهد: اول یک جملهٔ کوتاه و گرم، بعد یک یا دو سؤال نیازسنجی (سلیقه، بودجه، مناسبتی که هدیه باید حس آن را بدهد) بپرس و هنوز محصول نفرست؛ فقط وقتی مشتری سلیقه/بودجه/دسته‌اش را گفت با search_products پیشنهاد بده.
+- نیازسنجی را در دل مکالمه طبیعی انجام بده: نوع محصول (انگشتر، گردنبند، دستبند، …)، برای خود مشتری است یا هدیه، برای چه کسی (جنسیت و سلیقهٔ او)، سبک موردعلاقه، بودجه و در صورت لزوم سایز. هر بار فقط یک یا دو سؤال بپرس، نه یک فرم کامل.
+- اگر مشتری گفت برای هدیه یا برای یک نفر (مادر، پدر، همسر، دوست، …) می‌خواهد: اول یک جملهٔ کوتاه و گرم، بعد یک یا دو سؤال نیازسنجی (سلیقه، بودجه، مناسبتی که هدیه باید حس آن را بدهد) بپرس و هنوز محصول نفرست؛ فقط وقتی مشتری سلیقه/بودجه/دسته‌اش را گفت با search_products پیشنهاد بده.
 - **سؤال کلی «چیا دارید؟ / چه محصولاتی دارید؟» را هرگز با لیست یا عکس محصول جواب نده.** برای این سؤال‌های کلی: اول با get_categories دسته‌ها را ببین، بعد یک پاسخ مشاوره‌ای کوتاه بنویس که (۱) دسته‌های فروشگاه را با شمارندهٔ واقعی معرفی می‌کند، (۲) یک تا دو سؤال نیازسنجی می‌پرسد و (۳) دست مشتری را باز می‌گذارد («هر دسته‌ای که مدنظرتان بود بگویید تا بهترین گزینه‌ها را نشان بدهم»). در این حالت search_products را صدا نزن تا عکس محصول ارسال نشود — معرفی محصول بعد از این‌که مشتری دسته/سلیقه/بودجه‌اش را گفت.
 - پیشنهادها را «فقط» از موجودی واقعی فروشگاه با ابزارها انتخاب کن و تفاوت‌های گزینه‌ها (قیمت، عیار، وزن، سایز، مدل) را شفاف مقایسه کن.
 - به تردیدها و اعتراض‌ها (قیمت، عیار، وزن، ارسال، تعویض، اصالت) فقط با داده واقعی ابزارها یا تنظیمات فروشگاه پاسخ بده؛ اگر داده‌ای نداری، صادقانه بگو و پیشنهاد پیگیری انسانی بده.
@@ -40,6 +40,12 @@ const SYSTEM_PROMPT = `تو نماینده فروش و مشاور فروشگاه
 - پاسخ سؤال‌های ساده، کوتاه و مستقیم است؛ به هر پیام منو نچسبان و کلام رباتیک تکرار نکن.
 
 قوانین الزامی (شکست‌ناپذیر):
+- **مطابقت جنسیتی محصول — هرگز نقض نکن:** هر نتیجهٔ ابزار فیلد «audience» دارد: مردانه، زنانه، هر دو، نامشخص.
+  • خرید/هدیه برای آقا یا مرد (پدر، همسر، برادر، دوست، خود مشتری): فقط محصول با audience «مردانه» یا «هر دو» پیشنهاد بده؛ محصول «زنانه» را حتی اگر بالاترین نتیجهٔ جستجو بود هرگز برای آقایان پیشنهاد نده.
+  • خرید/هدیه برای خانم (مادر، خواهر، همسر، دوست): «زنانه» یا «هر دو» مناسب است؛ محصول صریحاً «مردانه» را فقط اگر خود مشتری خواست.
+  • اگر audience محصولی «نامشخص» بود و جنسیت برای انتخاب مهم است، پیش از پیشنهاد get_product را صدا بزن و توضیح کامل را بخوان؛ اگر باز روشن نشد، از مشتری بپرس یا گزینه‌های با سیگنال واضح‌تر را پیشنهاد بده.
+  • در search_products برای شخصِ مشخص، واژهٔ جنسیت را در query هم بیاور (مثلاً «انگشتر مردانه»، «دستبند مردانه») و از نتیجه‌ها فقط موارد هم‌جنس را انتخاب کن.
+  • راهنمای رایج: برای آقایان → انگشتر مردانه، زنجیر/دستبند مردانه، شمش؛ برای بانوان → گردنبند ظریف، گوشواره، ست هدیه، انگشتر ظریف.
 - هرگز قیمت، موجودی، وزن، عیار، ضمانت، شرایط ارسال یا تخفیف از خودت نساز — همه فقط از نتایج ابزارها.
 - هرگز قیمت لحظه‌ای نقره را از اینترنت یا دانش خودت نیاور؛ نرخ نقره فقط از ابزار get_silver_rate. اگر نرخ ثبت نشده بود، صادقانه بگو «نرخ نقره فعلاً در سیستم ثبت نشده است».
 - قیمت هر محصول همان قیمتِ برگشتی از ابزار است؛ هرگز آن را با نرخ نقره یا وزن بازمحاسبه نکن.
@@ -94,10 +100,36 @@ function stringArray(v: unknown): string[] {
 
 const TOOL_ERROR = { error: 'اجرای ابزار ناموفق بود' }
 
+/**
+ * Derive the product's target audience from its own text fields.
+ * Used to enforce gender-appropriate suggestions (a men's-gift request must
+ * never surface a women's ring). Persian \b doesn't work in JS regex — plain
+ * substrings only; «زن» is deliberately NOT matched (it appears inside
+ * «زنجیر» which would misclassify men's chains as women's).
+ */
+const MEN_RE = /مردانه|مرد|آقا|پسرانه/
+const WOMEN_RE = /زنانه|دخترانه|بانو|خانم|بانوان|گوشواره|رزگلد|قلب/
+function deriveAudience(p: {
+  name: string
+  shortDescription?: string | null
+  description?: string | null
+  categoryName?: string | null
+}): string {
+  const hay = `${p.name} ${p.shortDescription ?? ''} ${p.description ?? ''}`
+  const men = MEN_RE.test(hay)
+  const women = WOMEN_RE.test(hay) || p.categoryName === 'گوشواره'
+  if (men && women) return 'هر دو'
+  if (men) return 'مردانه'
+  if (women) return 'زنانه'
+  return 'نامشخص'
+}
+
 type ToolContext = {
   telegramUserId: string
-  /** record a concrete product id that surfaced in tool results (≤3 shown to the user) */
-  trackProduct: (id: string) => void
+  /** record a concrete product id that surfaced in tool results (≤3 shown to
+   *  the user) — with its audience so the deterministic gender filter can
+   *  drop mismatched products even when the model searched broadly */
+  trackProduct: (id: string, meta?: { audience?: string }) => void
 }
 
 /** Execute one tool call against the DB. Always returns a JSON-serializable value. */
@@ -122,14 +154,24 @@ async function executeTool(
         minPrice: toFiniteNumber(args.min_price),
         maxPrice: toFiniteNumber(args.max_price),
       })
-      for (const h of hits) ctx.trackProduct(h.product.id)
-      return hits.map((h) => ({
-        id: h.product.id,
-        name: h.product.name,
-        price: h.product.price,
-        stock: h.product.stock,
-        short_description: h.product.shortDescription,
-      }))
+      const rows = hits.map((h) => {
+        const audience = deriveAudience({
+          name: h.product.name,
+          shortDescription: h.product.shortDescription,
+          categoryName: h.product.category?.name,
+        })
+        ctx.trackProduct(h.product.id, { audience })
+        return {
+          id: h.product.id,
+          name: h.product.name,
+          price: h.product.price,
+          stock: h.product.stock,
+          short_description: h.product.shortDescription,
+          category: h.product.category?.name ?? null,
+          audience,
+        }
+      })
+      return rows
     }
 
     case 'get_product': {
@@ -140,7 +182,13 @@ async function executeTool(
         include: { category: { select: { name: true } } },
       })
       if (!p) return { error: 'محصولی با این شناسه یافت نشد' }
-      ctx.trackProduct(p.id)
+      const audience = deriveAudience({
+        name: p.name,
+        shortDescription: p.shortDescription,
+        description: p.description,
+        categoryName: p.category?.name,
+      })
+      ctx.trackProduct(p.id, { audience })
       return {
         id: p.id,
         name: p.name,
@@ -151,6 +199,7 @@ async function executeTool(
         short_description: p.shortDescription,
         description: p.description,
         category: p.category?.name ?? null,
+        audience,
         image_url: p.imageUrl,
         product_code: p.productCode,
         silver_type: p.silverType,
@@ -201,9 +250,14 @@ async function executeTool(
       if (products.length === 0) {
         return { products: [], message: 'محصول فعالی برای مقایسه یافت نشد' }
       }
-      for (const p of products) ctx.trackProduct(p.id)
-      return {
-        products: products.map((p) => ({
+      const items = products.map((p) => {
+        const audience = deriveAudience({
+          name: p.name,
+          shortDescription: p.shortDescription,
+          categoryName: p.category?.name,
+        })
+        ctx.trackProduct(p.id, { audience })
+        return {
           id: p.id,
           name: p.name,
           price: p.price,
@@ -214,8 +268,10 @@ async function executeTool(
           silver_type: p.silverType,
           product_code: p.productCode,
           category: p.category?.name ?? null,
-        })),
-      }
+          audience,
+        }
+      })
+      return { products: items }
     }
 
     case 'get_categories': {
@@ -321,6 +377,13 @@ async function executeTool(
     default:
       return { error: `ابزار ناشناخته: ${name}` }
   }
+}
+
+/** Deterministic gift-gender intent from the user's own words (null = unknown/ambiguous). */
+function giftGenderIntent(text: string): 'men' | 'women' | null {
+  if (/پدر|برادر|پسر|شوهر|مرد|آقا|آقای|آقایان/.test(text)) return 'men'
+  if (/مادر|خواهر|دختر|خانم|بانو|زنانه/.test(text)) return 'women'
+  return null
 }
 
 export type HistoryMessage = { role: 'user' | 'assistant'; content: string }
@@ -535,11 +598,26 @@ export async function runAssistant(input: {
   // names a category/taste/budget (enforced again on the bot side too).
   const broadDiscovery = isBroadDiscoveryQuery(message)
   const toolsUsed: string[] = []
-  const surfacedProductIds: string[] = []
-  const trackProduct = (id: string): void => {
-    if (id && !surfacedProductIds.includes(id) && surfacedProductIds.length < 6) {
-      surfacedProductIds.push(id)
+  const surfaced: { id: string; audience: string }[] = []
+  const trackProduct = (id: string, meta?: { audience?: string }): void => {
+    if (!id) return
+    const existing = surfaced.find((s) => s.id === id)
+    if (existing) {
+      if (meta?.audience && existing.audience === 'نامشخص') existing.audience = meta.audience
+      return
     }
+    if (surfaced.length < 8) surfaced.push({ id, audience: meta?.audience ?? 'نامشخص' })
+  }
+  /**
+   * Deterministic gender filter BEHIND the prompt: even when the model searched
+   * broadly (e.g. «انگشتر» for a father-gift message), a product whose audience
+   * clashes with the user's stated gift target must never reach the card blast.
+   */
+  const filterSurfaced = (): string[] => {
+    const intent = giftGenderIntent(message)
+    const ok = (audience: string): boolean =>
+      intent === 'men' ? audience !== 'زنانه' : intent === 'women' ? audience !== 'مردانه' : true
+    return surfaced.filter((s) => ok(s.audience)).slice(0, 3).map((s) => s.id)
   }
 
   let system = SYSTEM_PROMPT
@@ -575,7 +653,7 @@ export async function runAssistant(input: {
         return {
           reply: turn.reply,
           toolsUsed,
-          productIds: broadDiscovery ? [] : surfacedProductIds.slice(0, 3),
+          productIds: broadDiscovery ? [] : filterSurfaced(),
         }
       }
 
