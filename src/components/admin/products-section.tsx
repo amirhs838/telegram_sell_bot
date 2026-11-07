@@ -38,6 +38,7 @@ import {
   useDebounced,
 } from '@/components/admin/bits'
 import { ProductFormDialog } from '@/components/admin/product-form-dialog'
+import { ImageStudioDialog } from '@/components/admin/image-studio'
 import {
   Plus,
   Search,
@@ -95,6 +96,7 @@ export function ProductsSection() {
   const [deleting, setDeleting] = useState<Product | null>(null)
   const [deleteLoading, setDeleteLoading] = useState(false)
   const [busyId, setBusyId] = useState<string | null>(null)
+  const [studioProduct, setStudioProduct] = useState<Product | null>(null)
 
   const load = useCallback(async () => {
     setLoading(true)
@@ -413,6 +415,19 @@ export function ProductsSection() {
                             <Power className="size-4" aria-hidden />
                             {p.status === 'active' ? 'غیرفعال کردن' : 'فعال کردن'}
                           </DropdownMenuItem>
+                          <DropdownMenuItem
+                            onSelect={() => {
+                              setStudioProduct(p)
+                            }}
+                          >
+                            <span
+                              aria-hidden
+                              className="flex size-4 items-center justify-center text-sm leading-none"
+                            >
+                              🎨
+                            </span>
+                            استودیوی تصویر
+                          </DropdownMenuItem>
                           <DropdownMenuSeparator />
                           <DropdownMenuItem
                             variant="destructive"
@@ -476,6 +491,17 @@ export function ProductsSection() {
         loading={deleteLoading}
         onOpenChange={(o) => !o && setDeleting(null)}
         onConfirm={confirmDelete}
+      />
+
+      {/* AI Image Studio (row action) */}
+      <ImageStudioDialog
+        open={Boolean(studioProduct)}
+        onOpenChange={(o) => {
+          if (!o) setStudioProduct(null)
+        }}
+        productId={studioProduct?.id ?? ''}
+        productName={studioProduct?.name ?? ''}
+        onProductUpdated={() => load()}
       />
     </div>
   )

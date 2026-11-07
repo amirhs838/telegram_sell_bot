@@ -11,5 +11,11 @@ export function serializeRate(r: SilverRate) {
     createdBy: r.createdBy,
     createdByName: r.createdByName,
     createdAt: r.createdAt,
+    // channel publishing state (daily rate post)
+    publishStatus: r.publishStatus,
+    telegramMessageId: r.telegramMessageId,
+    telegramChannelId: r.telegramChannelId,
+    publishError: r.publishError,
+    publishedAt: r.publishedAt,
   }
 }

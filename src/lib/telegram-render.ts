@@ -1,6 +1,6 @@
 /**
- * PURE module — no external imports (imported cross-project by mini-services/bot-service).
- * Renders Telegram channel posts for products + shared formatting helpers.
+ * PURE module — no external imports (imported cross-project by mini-services/bot-service
+ * and by client components for previews). Renders Telegram channel posts.
  */
 
 export type RenderProduct = {
@@ -14,6 +14,13 @@ export type RenderProduct = {
   lowStockThreshold?: number
   status: string // draft | active | inactive | out_of_stock
   imageUrl?: string | null
+  // Silver Love optional specs (only rendered when filled — never invented)
+  productCode?: string | null
+  fineness?: number | null
+  weightGrams?: number | null
+  silverType?: string | null
+  size?: string | null
+  brand?: string | null
 }
 
 export type InlineButton = { text: string; callback_data?: string; url?: string }
@@ -27,15 +34,25 @@ export function formatNumber(value: number): string {
   return Math.round(value).toLocaleString('fa-IR')
 }
 
+export function formatWeightFa(grams: number): string {
+  return `${grams.toLocaleString('fa-IR', { maximumFractionDigits: 2 })} گرم`
+}
+
 /** Deep link that connects the channel post to the bot order flow. */
 export function productDeepLink(botUsername: string, productId: string): string {
   return `https://t.me/${botUsername}?start=product_${productId}`
 }
 
-const PRODUCT_EMOJI = '🛍️'
+/** Deep link that opens the AI shopping-consultant entry point in the bot. */
+export function aiConsultDeepLink(botUsername: string): string {
+  return `https://t.me/${botUsername}?start=ai_consult`
+}
+
+const DIVIDER = '━━━━━━━━━━━━━━'
 
 /**
- * Builds the channel post (HTML parse mode) + inline keyboard.
+ * Builds the Silver Love channel post (HTML parse mode) + inline keyboard.
+ * Visual identity: ✨ brand header, thin dividers, ◽ spec lines, price focus.
  * Rules:
  *  - out of stock  → "🔴 ناموجود", order button removed
  *  - low stock     → "⚠️ فقط X عدد باقی مانده"
@@ -47,9 +64,27 @@ export function renderProductPost(
   currency = 'تومان',
 ): PostContent {
   const lines: string[] = []
-  lines.push(`${PRODUCT_EMOJI} <b>${escapeHtml(product.name)}</b>`)
-  if (product.shortDescription) lines.push('', escapeHtml(product.shortDescription))
-  lines.push('', `💰 قیمت: <b>${formatMoney(product.price, currency)}</b>`)
+  lines.push(`✨ <b>SILVER LOVE</b> | انتخابی خاص`)
+  lines.push('')
+  lines.push(`💍 <b>${escapeHtml(product.name)}</b>`)
+  if (product.shortDescription) {
+    lines.push(escapeHtml(product.shortDescription))
+  }
+
+  // spec block — only real, admin-entered data (never invented)
+  const specs: string[] = []
+  if (product.fineness) specs.push(`◽ عیار: ${formatNumber(product.fineness)}`)
+  if (product.weightGrams) specs.push(`◽ وزن: ${formatWeightFa(product.weightGrams)}`)
+  if (product.silverType) specs.push(`◽ جنس: ${escapeHtml(product.silverType)}`)
+  if (product.size) specs.push(`◽ سایز: ${escapeHtml(product.size)}`)
+  if (product.productCode) specs.push(`◽ کد محصول: ${escapeHtml(product.productCode)}`)
+  if (specs.length > 0) {
+    lines.push(DIVIDER)
+    lines.push(...specs)
+  }
+
+  lines.push(DIVIDER)
+  lines.push(`💰 قیمت: <b>${formatMoney(product.price, currency)}</b>`)
   if (product.compareAtPrice && product.compareAtPrice > product.price) {
     lines.push(`🏷️ قبلاً: <s>${formatMoney(product.compareAtPrice, currency)}</s>`)
   }
@@ -57,7 +92,6 @@ export function renderProductPost(
   const isPurchasable = product.status === 'active' && product.stock > 0
   const threshold = product.lowStockThreshold ?? 5
 
-  lines.push('')
   if (product.status !== 'active') {
     lines.push('⛔️ این محصول فعلاً غیرفعال است')
   } else if (product.stock <= 0) {
@@ -65,21 +99,100 @@ export function renderProductPost(
   } else if (product.stock <= threshold) {
     lines.push(`⚠️ فقط ${formatNumber(product.stock)} عدد باقی مانده`)
   } else {
-    lines.push(`📦 موجودی: ${formatNumber(product.stock)} عدد`)
+    lines.push(`📦 موجود: ${formatNumber(product.stock)} عدد`)
   }
 
   if (product.description) {
-    lines.push('', escapeHtml(product.description))
+    lines.push(DIVIDER, '', escapeHtml(product.description))
   }
+
+  lines.push('', 'برای مشاهده جزئیات و ثبت سفارش از دکمه‌های زیر استفاده کنید 👇')
 
   const keyboard: InlineButton[][] = []
   if (isPurchasable && botUsername) {
     keyboard.push([
       {
-        text: '🛒 سفارش در ربات',
+        text: '🛒 مشاهده و خرید',
         url: productDeepLink(botUsername, product.id),
       },
     ])
+  }
+  if (botUsername) {
+    keyboard.push([
+      {
+        text: '💬 مشاوره هوشمند',
+        url: aiConsultDeepLink(botUsername),
+      },
+    ])
+  }
+  return { text: lines.join('\n'), keyboard }
+}
+
+// ─── Silver rate daily post ──────────────────────────────────────────────────
+
+export type RenderSilverRate = {
+  ratePerGram: number
+  unit?: string | null
+  note?: string | null
+  createdAt: string | Date
+}
+
+/** Persian date/time for the store timezone (configurable via STORE_TIMEZONE). */
+function rateDateTimeFa(d: string | Date, timeZone: string): { date: string; time: string } {
+  const date = new Date(d)
+  const dateFmt = new Intl.DateTimeFormat('fa-IR', {
+    timeZone,
+    year: 'numeric',
+    month: 'long',
+    day: 'numeric',
+  })
+  const timeFmt = new Intl.DateTimeFormat('fa-IR', {
+    timeZone,
+    hour: '2-digit',
+    minute: '2-digit',
+  })
+  return { date: dateFmt.format(date), time: timeFmt.format(date) }
+}
+
+/**
+ * Builds the daily silver-rate channel post. All numbers/dates come straight
+ * from the DB record — AI never produces or rewrites the figures.
+ */
+export function renderSilverRatePost(
+  rate: RenderSilverRate,
+  botUsername: string,
+  storeName = 'SILVER LOVE',
+  timeZone = 'Asia/Tehran',
+): PostContent {
+  const { date, time } = rateDateTimeFa(rate.createdAt, timeZone)
+  const unit = rate.unit || 'تومان / گرم'
+  const lines: string[] = [
+    `✨ <b>${escapeHtml(storeName)}</b>`,
+    `📊 نرخ روز نقره`,
+    '',
+    DIVIDER,
+    '',
+    `💎 قیمت هر گرم نقره`,
+    `<b>${formatMoney(rate.ratePerGram)}</b>`,
+    `واحد: ${escapeHtml(unit)}`,
+    '',
+    `📅 تاریخ: ${date}`,
+    `🕒 ساعت: ${time}`,
+    '',
+    DIVIDER,
+    '',
+    `این نرخ براساس اطلاعات ثبت‌شده`,
+    `توسط فروشگاه <b>${escapeHtml(storeName)}</b> منتشر شده است.`,
+    `برای مشاهده محصولات و دریافت مشاوره`,
+    `از ربات فروشگاه استفاده کنید.`,
+  ]
+  if (rate.note) {
+    lines.push('', `📝 <i>${escapeHtml(rate.note)}</i>`)
+  }
+
+  const keyboard: InlineButton[][] = []
+  if (botUsername) {
+    keyboard.push([{ text: '🤖 ورود به ربات فروشگاه', url: `https://t.me/${botUsername}` }])
   }
   return { text: lines.join('\n'), keyboard }
 }

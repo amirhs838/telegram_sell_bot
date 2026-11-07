@@ -3,11 +3,14 @@ import { z } from 'zod'
 import { ok, readJson, requireAuth, route } from '@/lib/api'
 import { db } from '@/lib/db'
 import { logEvent } from '@/lib/logger'
+import { publishSilverRate } from '@/lib/rate-publisher'
 import { serializeRate } from './shared'
 
 // ─── Manual silver rate (admin-entered; reference info ONLY) ─────────────────
 // The silver rate never prices products automatically — the seller always sets
-// the final price by hand. This endpoint only keeps a reference history.
+// the final price by hand. This endpoint keeps the reference history AND
+// auto-publishes the daily rate post to the Telegram channel after saving.
+// Rate persistence NEVER depends on Telegram success (Master prompt §14).
 
 export const GET = route(async () => {
   await requireAuth()
@@ -52,5 +55,10 @@ export const POST = route(async (req: NextRequest) => {
     { rateId: rate.id, ratePerGram: body.ratePerGram },
   )
 
-  return ok({ rate: serializeRate(rate) }, 201)
+  // Auto-publish the daily rate post (best-effort — never blocks the save,
+  // failures stay visible in the panel and can be retried).
+  await publishSilverRate(rate.id).catch(() => undefined)
+
+  const refreshed = await db.silverRate.findUnique({ where: { id: rate.id } })
+  return ok({ rate: refreshed ? serializeRate(refreshed) : serializeRate(rate) }, 201)
 })

@@ -95,6 +95,8 @@ async function tgRequest<T>(method: string, payload: unknown): Promise<T> {
   return json.result
 }
 
+export { tgRequest }
+
 /**
  * Multipart/form-data Bot API call (for file uploads like sendPhoto).
  * Uses the same token resolution as tgRequest. Mock mode is handled by the

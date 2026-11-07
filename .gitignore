@@ -63,3 +63,6 @@ prompt
 server.log
 # Skills directory
 /skills/
+# customer payment receipts are PRIVATE — never commit real ones
+upload/receipts/*
+!upload/receipts/receipt-demo-1005.png

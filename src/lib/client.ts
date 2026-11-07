@@ -214,11 +214,47 @@ export type SilverRateRecord = {
   active: boolean
   createdByName: string | null
   createdAt: string
+  // channel publishing state (new silver-rate-post feature)
+  publishStatus: 'pending' | 'published' | 'failed' | string
+  telegramMessageId: number | null
+  telegramChannelId: string | null
+  publishError: string | null
+  publishedAt: string | null
 }
 
 export type SilverRateInfo = {
   current: SilverRateRecord | null
   history: SilverRateRecord[]
+}
+
+// ─── AI Image Studio ─────────────────────────────────────────────────────────
+
+/** One preset background template of the studio library. */
+export type StudioBackground = {
+  key: string
+  name: string // Persian display name
+  description: string // Persian one-liner shown on the card
+  /** tailwind classes rendering the card preview (visual identity) */
+  previewClass: string
+}
+
+/** One image-studio processing job (raw → subject → composite → approved). */
+export type StudioJob = {
+  id: string
+  productId: string
+  rawUrl: string
+  subjectUrl: string | null
+  finalUrl: string | null
+  backgroundKey: string | null
+  status: 'raw' | 'subject_ready' | 'generated' | 'approved' | 'rejected' | 'failed' | string
+  error: string | null
+  approvedAt: string | null
+  createdAt: string
+}
+
+export type StudioState = {
+  backgrounds: StudioBackground[]
+  jobs: StudioJob[]
 }
 
 export type Customer = {

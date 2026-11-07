@@ -146,10 +146,9 @@ async function resolvePhotoSource(url: string | null | undefined): Promise<Photo
 // ─── Menus ───────────────────────────────────────────────────────────────────
 
 const MAIN_MENU: InlineButton[][] = [
-  [{ text: '🛍 محصولات', callback_data: 'menu:products' }],
-  [{ text: '📦 سفارش‌های من', callback_data: 'menu:orders' }],
-  [{ text: '🔎 جستجوی محصول', callback_data: 'menu:search' }],
-  [{ text: '☎️ پشتیبانی', callback_data: 'menu:support' }],
+  [{ text: '🛍 مشاهده محصولات', callback_data: 'menu:products' }, { text: '🔎 جستجوی محصول', callback_data: 'menu:search' }],
+  [{ text: '✨ مشاوره خرید', callback_data: 'menu:ai' }, { text: '💳 سفارش‌های من', callback_data: 'menu:orders' }],
+  [{ text: '📞 ارتباط با فروشگاه', callback_data: 'menu:support' }, { text: 'ℹ️ درباره Silver Love', callback_data: 'menu:about' }],
 ]
 
 const CANCEL_ORDER_ROW: InlineButton[] = [{ text: '❌ انصراف', callback_data: 'order:cancel' }]
@@ -441,7 +440,33 @@ async function supportReply(): Promise<Reply> {
     kb.push([{ text: '💬 گفتگو با پشتیبانی', url: `https://t.me/${settings.supportUsername}` }])
   }
   kb.push(HOME_ROW)
-  return { text: 'برای پشتیبانی با ما در تماس باشید:', keyboard: kb }
+  return {
+    text: '📞 ارتباط با فروشگاه\n\nسؤال، درخواست یا مشکلی دارید؟ همکاران ما در سریع‌ترین زمان پاسخگوی شما هستند.',
+    keyboard: kb,
+  }
+}
+
+/** About the store — includes the latest registered daily silver rate (real DB data). */
+async function aboutReply(): Promise<Reply> {
+  const settings = await getStoreSettings()
+  const rate = await db.silverRate.findFirst({ where: { active: true }, orderBy: { createdAt: 'desc' } })
+  const lines = [
+    `ℹ️ درباره ${escapeHtml(settings.storeName)}`,
+    '',
+    settings.storeDescription
+      ? escapeHtml(settings.storeDescription)
+      : 'فروشگاه تخصصی نقره — نقره اصل با ضمانت اصالت',
+  ]
+  if (rate) {
+    lines.push(
+      '',
+      '━━━━━━━━━━━━━━',
+      '📊 نرخ روز نقره',
+      `💎 هر گرم نقره: ${formatMoney(rate.ratePerGram)}`,
+    )
+  }
+  lines.push('', 'برای مشاوره خرید، سؤال خود را مستقیم بنویسید ✨')
+  return { text: lines.join('\n'), keyboard: MAIN_MENU }
 }
 
 async function searchResultsReply(query: string): Promise<Reply[]> {
@@ -877,12 +902,34 @@ async function handleText(
         // deep link from a channel post
         return productCardReply(param.slice('product_'.length), MAIN_MENU)
       }
+      if (param === 'ai_consult') {
+        // deep link from the «مشاوره هوشمند» channel-post button
+        return [
+          {
+            text: '✨ مشاوره خرید با دستیار هوشمند\n\nهر چه در ذهن دارید بنویسید — مثلاً بودجه‌تان، مدل موردعلاقه یا مناسب بودن برای هدیه. دستیار ما بهترین گزینه‌های موجود را پیشنهاد می‌دهد 💎',
+            keyboard: [HOME_ROW],
+          },
+        ]
+      }
       const settings = await getStoreSettings()
       const name = input.firstName ? input.firstName : ''
       const hello = name
-        ? `سلام ${escapeHtml(name)}! 👋 به فروشگاه ${escapeHtml(settings.storeName)} خوش آمدید.`
-        : `سلام! 👋 به فروشگاه ${escapeHtml(settings.storeName)} خوش آمدید.`
-      return [{ text: `${hello}\n\nاز منوی زیر انتخاب کنید یا سؤال خود را مستقیم بنویسید:`, keyboard: MAIN_MENU }]
+        ? `سلام ${escapeHtml(name)}! 👋`
+        : 'سلام! 👋'
+      const welcome = [
+        `${hello}\n✨ به ${escapeHtml(settings.storeName)} خوش آمدید`,
+        '',
+        settings.storeDescription
+          ? escapeHtml(settings.storeDescription)
+          : 'فروشگاه تخصصی نقره — نقره اصل با ضمانت اصالت، خرید آسان از طریق همین ربات',
+        '',
+        '🛍 مرور و خرید محصولات',
+        '✨ مشاوره خرید با دستیار هوشمند',
+        '💳 پیگیری سفارش‌ها و ارسال رسید',
+        '',
+        'از منوی زیر انتخاب کنید یا سؤال خود را مستقیم بنویسید 👇',
+      ].join('\n')
+      return [{ text: welcome, keyboard: MAIN_MENU }]
     }
     return [mainMenuReply('دستور شناخته‌شده نیست. از منوی زیر استفاده کنید:')]
   }
@@ -1029,6 +1076,19 @@ async function handleCallback(
   if (cb === 'menu:support') {
     await clearFlow(telegramUserId)
     return [await supportReply()]
+  }
+  if (cb === 'menu:about') {
+    await clearFlow(telegramUserId)
+    return [await aboutReply()]
+  }
+  if (cb === 'menu:ai') {
+    await clearFlow(telegramUserId)
+    return [
+      {
+        text: '✨ مشاوره خرید با دستیار هوشمند\n\nکافی است سؤال‌تان را بنویسید؛ مثلاً:\n«یه دستبند نقره برای هدیه تا دو میلیون میخوام»\n\nدستیار ما نیازتان را می‌فهمد، محصولات موجود را با قیمت واقعی پیشنهاد می‌دهد و تا ثبت سفارش همراهتان است 💎',
+        keyboard: [HOME_ROW],
+      },
+    ]
   }
   if (cb.startsWith('cat:')) {
     await clearFlow(telegramUserId)

@@ -83,6 +83,7 @@ model Product {
   telegramProducts TelegramProduct[]
   orderItems       OrderItem[]
   embedding        ProductEmbedding?
+  studioJobs  ImageStudioJob[]
 }
 
 // ─── Product gallery (multiple images, one primary) ─────────────────────────
@@ -199,14 +200,22 @@ model PaymentDestination {
 // ─── Manual silver rate (admin-entered; reference info ONLY — never prices products) ───
 
 model SilverRate {
-  id           String   @id @default(cuid())
-  ratePerGram  Float // تومان per gram of silver
-  unit         String   @default("تومان / گرم")
-  note         String? // توضیحات یا منبع نرخ
-  active       Boolean  @default(true)
-  createdBy    String? // admin user id
+  id            String   @id @default(cuid())
+  ratePerGram   Float // تومان per gram of silver
+  unit          String   @default("تومان / گرم")
+  note          String? // توضیحات یا منبع نرخ
+  active        Boolean  @default(true)
+  createdBy     String? // admin user id
   createdByName String?
-  createdAt    DateTime @default(now())
+  createdAt     DateTime @default(now())
+
+  // Channel publishing state (each NEW rate gets its own post; re-publishing
+  // the SAME record edits the existing message — never a duplicate post).
+  telegramMessageId Int      ?
+  telegramChannelId String?
+  publishStatus     String    @default("pending") // pending | published | failed
+  publishError      String?
+  publishedAt       DateTime?
 
   @@index([createdAt])
 }
@@ -221,6 +230,27 @@ model ChatMessage {
   createdAt      DateTime @default(now())
 
   @@index([telegramUserId, createdAt])
+}
+
+// ─── AI Image Studio (raw photo → subject isolation → studio composite) ────
+// The raw upload and the subject cutout are preserved forever — the approved
+// studio composite is only ADDED to the product gallery, never overwriting the
+// original. Seller approval is always explicit.
+model ImageStudioJob {
+  id            String    @id @default(cuid())
+  productId     String
+  product       Product   @relation(fields: [productId], references: [id], onDelete: Cascade)
+  rawUrl        String // original upload (/api/uploads/<name>)
+  subjectUrl    String? // background removed (/api/uploads/<name>)
+  finalUrl      String? // studio composite (/api/uploads/<name>)
+  backgroundKey String? // BACKGROUND_LIBRARY key used for the composite
+  status        String    @default("raw") // raw | subject_ready | generated | approved | rejected | failed
+  error         String? // last Persian error message (if any)
+  approvedAt    DateTime?
+  createdAt     DateTime  @default(now())
+  updatedAt     DateTime  @updatedAt
+
+  @@index([productId, createdAt])
 }
 
 // ─── Telegram integration ────────────────────────────────────────────────────
