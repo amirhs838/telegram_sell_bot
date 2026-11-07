@@ -164,6 +164,7 @@ export type SemanticSearchProduct = {
   imageUrl: string | null
   shortDescription: string | null
   categoryId: string | null
+  createdAt: Date
   category: { id: string; name: string } | null
 }
 
@@ -178,6 +179,7 @@ const PRODUCT_SELECT = {
   imageUrl: true,
   shortDescription: true,
   categoryId: true,
+  createdAt: true,
   category: { select: { id: true, name: true } },
 } as const
 
@@ -203,6 +205,19 @@ export async function semanticSearch(
     if (opts.minPrice !== undefined && p.price < opts.minPrice) return false
     if (opts.maxPrice !== undefined && p.price > opts.maxPrice) return false
     return true
+  }
+
+  // Filter-only search (empty query — e.g. category + max_price from the AI
+  // tool): cosine against a zero vector is always 0 and would wrongly filter
+  // everything out, so skip scoring and return the newest matching products.
+  const hasQuery = normalizeFa(query).length > 0
+  if (!hasQuery) {
+    return rows
+      .map((r) => r.product)
+      .filter(matchesFilters)
+      .sort((a, b) => b.createdAt.getTime() - a.createdAt.getTime())
+      .slice(0, limit)
+      .map((product) => ({ product, score: 0 }))
   }
 
   if (rows.length === 0) {

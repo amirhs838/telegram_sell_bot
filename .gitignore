@@ -66,3 +66,6 @@ server.log
 # customer payment receipts are PRIVATE — never commit real ones
 upload/receipts/*
 !upload/receipts/receipt-demo-1005.png
+
+# bot-service runtime lock (single-instance guard)
+mini-services/bot-service/.bot-lock

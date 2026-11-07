@@ -10,7 +10,7 @@ import { z } from 'zod'
 import { db } from '@/lib/db'
 import { chatJSONMessages, AiError } from '@/lib/ai/client'
 import { semanticSearch } from '@/lib/ai/embedding'
-import { orderStatusFa } from '@/lib/telegram-render'
+import { orderStatusFa, isBroadDiscoveryQuery } from '@/lib/telegram-render'
 
 const MAX_TOOL_ITERATIONS = 6
 
@@ -18,6 +18,7 @@ const SYSTEM_PROMPT = `تو نماینده فروش و مشاور فروشگاه
 
 سبک فروش و گفتگو:
 - نیازسنجی را در دل مکالمه طبیعی انجام بده: نوع محصول (انگشتر، گردنبند، دستبند، …)، برای خود مشتری است یا هدیه، سبک موردعلاقه، بودجه و در صورت لزوم سایز. هر بار فقط یک یا دو سؤال بپرس، نه یک فرم کامل.
+- **سؤال کلی «چیا دارید؟ / چه محصولاتی دارید؟» را هرگز با لیست یا عکس محصول جواب نده.** برای این سؤال‌های کلی: اول با get_categories دسته‌ها را ببین، بعد یک پاسخ مشاوره‌ای کوتاه بنویس که (۱) دسته‌های فروشگاه را با شمارندهٔ واقعی معرفی می‌کند، (۲) یک تا دو سؤال نیازسنجی می‌پرسد (مناسبت؟ برای خودشان یا هدیه؟ سبک یا بودجه؟) و (۳) دست مشتری را باز می‌گذارد («هر دسته‌ای که مدنظرتان بود بگویید تا بهترین گزینه‌ها را نشان بدهم»). در این حالت search_products را صدا نزن تا عکس محصول ارسال نشود — معرفی محصول بعد از این‌که مشتری دسته/سلیقه/بودجه‌اش را گفت.
 - پیشنهادها را «فقط» از موجودی واقعی فروشگاه با ابزارها انتخاب کن و تفاوت‌های گزینه‌ها (قیمت، عیار، وزن، سایز، مدل) را شفاف مقایسه کن.
 - به تردیدها و اعتراض‌ها (قیمت، عیار، وزن، ارسال، تعویض، اصالت) فقط با داده واقعی ابزارها یا تنظیمات فروشگاه پاسخ بده؛ اگر داده‌ای نداری، صادقانه بگو و پیشنهاد پیگیری انسانی بده.
 - گاهی (نه در هر پیام) یک پیشنهاد مکمل کوتاه و مرتبط بده (مثلاً زنجیر هماهنگ با گردنبند).
@@ -51,6 +52,8 @@ const SYSTEM_PROMPT = `تو نماینده فروش و مشاور فروشگاه
 نکته‌ها:
 - اعداد قیمت‌ها در نتایج ابزار به تومان هستند.
 - قبل از معرفی محصول، ابتدا search_products را صدا بزن؛ قیمت/موجودی را فقط از TOOL_RESULT بردار.
+- اگر search_products نتیجهٔ خالی داد، هرگز نگویید «موجود نیست» — یک بار دیگر با query ساده‌تر و بدون فیلتر دسته/قیمت امتحان کن؛ فقط اگر دوباره خالی بود، صادقانه بگو و دسته‌های موجود را (از get_categories) پیشنهاد بده.
+- نام دسته‌ها هرگز از خودت نساز؛ فقط همان‌هایی که get_categories برگرداند.
 - شناسه تلگرام کاربر جاری در انتهای پیام او آمده؛ برای get_customer_orders همان را بفرست.
 - اگر ابزار خطا داد یا نتیجه‌ای نبود، صادقانه بگو و در صورت نیاز ابزار دیگری را امتحان کن.`
 
@@ -337,10 +340,39 @@ async function searchFallback(
   return { reply, productIds }
 }
 
+/**
+ * Consultative fallback for BROAD discovery questions (AI unreachable):
+ * a category overview + needs-assessment questions, never a product blast.
+ */
+async function categoriesFallback(): Promise<{ reply: string; productIds: string[] }> {
+  const cats = await db.category
+    .findMany({
+      select: { name: true, _count: { select: { products: { where: { status: 'active' } } } } },
+      orderBy: { name: 'asc' },
+    })
+    .catch(() => [])
+  const catLines = cats.length > 0
+    ? cats.map((c) => `🔹 ${c.name} (${faMoney(c._count.products)} مدل)`)
+    : ['🔹 فعلاً محصولات فروشگاه در حال به‌روزرسانی است']
+  const reply = [
+    'دستیار هوشمند موقتاً در دسترس نیست، اما می‌توانم راهنمایی‌تان کنم 😊',
+    '',
+    'دسته‌های فروشگاه Silver Love:',
+    ...catLines,
+    '',
+    'برای پیشنهاد دقیق‌تر بگویید: برای چه مناسبتی و حدوداً با چه بودجه‌ای؟ (برای خودتان یا هدیه؟)',
+    'هر دسته‌ای که مدنظرتان بود بنویسید تا بهترین گزینه‌هایش را معرفی کنم 💎',
+  ].join('\n')
+  return { reply, productIds: [] }
+}
+
 /** Fallback used when the panel has disabled the AI (Setting aiEnabled=false). */
 export async function fallbackWithoutAi(
   message: string,
 ): Promise<{ reply: string; productIds: string[] }> {
+  if (isBroadDiscoveryQuery(message)) {
+    return categoriesFallback()
+  }
   return searchFallback(
     message,
     'پاسخ‌گویی هوشمند فعلاً غیرفعال است، اما این گزینه‌های مرتبط را برایتان پیدا کردم:',
@@ -404,6 +436,10 @@ export async function runAssistant(input: {
   aiTone?: string
 }): Promise<AssistantResult> {
   const { telegramUserId, message, firstName } = input
+  // Broad «چیا دارید؟» style questions → consult-first: the reply stays AI-
+  // generated and personal, but product cards are withheld until the customer
+  // names a category/taste/budget (enforced again on the bot side too).
+  const broadDiscovery = isBroadDiscoveryQuery(message)
   const toolsUsed: string[] = []
   const surfacedProductIds: string[] = []
   const trackProduct = (id: string): void => {
@@ -443,7 +479,7 @@ export async function runAssistant(input: {
         return {
           reply: action.reply,
           toolsUsed,
-          productIds: surfacedProductIds.slice(0, 3),
+          productIds: broadDiscovery ? [] : surfacedProductIds.slice(0, 3),
         }
       }
 
@@ -457,6 +493,10 @@ export async function runAssistant(input: {
         console.error(`[ai:assistant] tool ${toolName} failed`, e)
         result = TOOL_ERROR
       }
+      // ops visibility: which tool ran, with which args and what it returned
+      console.log(
+        `[ai:assistant] tool=${toolName} args=${JSON.stringify(action.args ?? {}).slice(0, 200)} result=${JSON.stringify(result).slice(0, 400)}`,
+      )
 
       messages.push({
         role: 'assistant',
@@ -470,6 +510,11 @@ export async function runAssistant(input: {
   } catch (e) {
     if (e instanceof AiError) throw e
     console.error('[ai:assistant] unexpected error', e)
+  }
+
+  if (broadDiscovery) {
+    const fb = await categoriesFallback()
+    return { reply: fb.reply, toolsUsed, productIds: [] }
   }
 
   const fb = await searchFallback(

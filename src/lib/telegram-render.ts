@@ -246,3 +246,25 @@ export function productStatusFa(status: string): string {
       return status
   }
 }
+
+/**
+ * Detect a BROAD DISCOVERY question — an open "what do you have?" message with
+ * no concrete product/category/budget intent. For these the assistant must NOT
+ * blast product cards; it should consult first (categories + 1-2 needs
+ * questions) and keep the customer's options open. A message that mentions any
+ * concrete category/product type or budget is NOT broad — the assistant may
+ * search and show cards for it.
+ * Pure function (no DB) so both the panel and the bot-service can use it.
+ */
+const BROAD_DISCOVERY_RE =
+  /چیا\s?(داری|دارید|دارین)|چی\s?(دارید|داری|دارین|موجوده|موجود|فروخت|پیشنهاد|مدل)|چه\s?(محصولات|چیز|گزینه|مدل|چیزایی|چیزهایی)|محصولات(ت|تان|تون|اتون)?\s?(چی|چه|چیه)?|فروشگاه(ت|تان|تون)?\s?(چی|چه|چیه)?|لیست\s?محصولات|همه\s?محصولات|نمایش\s?محصولات|چه\s?سبد\s?محصولی|چی\s?برای\s?(فروش|خرید)\s?دارید/i
+
+const NARROW_INTENT_RE =
+  /انگشتر|گردنبند|آویز|دستبند|زنجیر|گوشواره|ست|شمش|حلقه|پابند|نیم‌ست|دستبند\s?پا|هدیه|کادو|سلیقه|بودجه|تومان|قیمت|ارزان|گران|زنانه|مردانه|بچه|جدا?یه|مقایسه|نرخ|عیار|وزن|سایز|مدل\s?\S+|کد\s?\S+/i
+
+export function isBroadDiscoveryQuery(text: string): boolean {
+  const t = (text ?? '').trim()
+  if (t.length === 0 || t.length > 120) return false
+  if (NARROW_INTENT_RE.test(t)) return false
+  return BROAD_DISCOVERY_RE.test(t)
+}

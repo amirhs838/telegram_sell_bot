@@ -22,6 +22,7 @@ import {
   formatMoney,
   formatNumber,
   orderStatusFa,
+  isBroadDiscoveryQuery,
 } from '../../src/lib/telegram-render'
 import { db } from './db'
 import {
@@ -241,6 +242,31 @@ async function categoriesReply(): Promise<Reply> {
   ])
   kb.push(HOME_ROW)
   return { text: '🛍 دسته‌بندی محصولات', keyboard: kb }
+}
+
+/**
+ * Consultative answer for BROAD discovery questions (AI unreachable fallback):
+ * short needs-assessment text + category quick-pick buttons, so the customer
+ * is guided by questions AND keeps full freedom to browse.
+ */
+async function consultCategoriesReply(): Promise<Reply> {
+  const cats = await listCategories().catch(() => [])
+  const text = [
+    'برای اینکه بهترین پیشنهاد را بدهم، کوتاه راهنمایی‌ام کنید 😊',
+    '',
+    '۱️⃣ برای خودتان می‌خواهید یا هدیه است؟',
+    '۲️⃣ حدود بودجه‌تان چقدر است؟',
+    '',
+    'یا مستقیم یکی از دسته‌ها را انتخاب کنید تا گزینه‌هایش را ببینید 👇',
+  ].join('\n')
+  if (cats.length === 0) {
+    return { text, keyboard: MAIN_MENU }
+  }
+  const kb: InlineButton[][] = cats.map((c) => [
+    { text: c.name, callback_data: `cat:${c.id}` },
+  ])
+  kb.push(HOME_ROW)
+  return { text, keyboard: kb }
 }
 
 async function categoryPageReply(catId: string, page: number): Promise<Reply> {
@@ -851,20 +877,30 @@ async function freeTextReply(
     ]
   }
 
+  // Broad discovery («چیا دارید؟») → consult-first: never blast product cards
+  // for an open question; the assistant asks which category/occasion/budget.
+  // Cards appear once the customer narrows down (category/taste/budget).
+  const broadDiscovery = isBroadDiscoveryQuery(text)
+
   const ai = await askAiAssistant(telegramUserId, text, firstName)
   if (ai) {
     const out: Reply[] = [{ text: escapeHtml(ai.reply) }]
     if (ai.toolsUsed.includes('request_operator') && !ai.reply.includes('همکار')) {
       out.push({ text: OPERATOR_REFERRAL })
     }
-    for (const pid of ai.productIds) {
-      const card = await miniProductCardReply(pid).catch(() => null)
-      if (card) out.push(card)
+    if (!broadDiscovery) {
+      for (const pid of ai.productIds) {
+        const card = await miniProductCardReply(pid).catch(() => null)
+        if (card) out.push(card)
+      }
     }
     return out
   }
 
   // deterministic fallback keeps the bot useful before/without the AI service
+  if (broadDiscovery) {
+    return [await consultCategoriesReply()]
+  }
   const results = await searchActiveProducts(text, 8)
   const note = 'دستیار هوشمند موقتاً در دسترس نیست — نتایج جستجو:'
   if (results.length === 0) {

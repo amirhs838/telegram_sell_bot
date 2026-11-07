@@ -9,6 +9,8 @@
  * and sends replies back to the originating chat.
  * The process never crashes: every path is wrapped.
  */
+import { existsSync, readFileSync, rmSync, writeFileSync, mkdirSync } from 'node:fs'
+import path from 'node:path'
 import { handleUpdate, type Reply, type UpdateInput } from './engine'
 import {
   botUsername,
@@ -22,6 +24,63 @@ import {
 } from './telegram'
 
 const PORT = 3002
+
+// ─── Single-instance guard ────────────────────────────────────────────────────
+// Bun.serve uses SO_REUSEPORT on Linux, so two bot-service processes can bind
+// :3002 simultaneously — and BOTH would run the polling loop on the same bot
+// token, delivering every customer message twice. The lockfile makes the
+// polling loop single-owner: a second process exits immediately.
+const LOCK_FILE = path.join(import.meta.dir, '.bot-lock')
+
+function lockPidAlive(pid: number): boolean {
+  try {
+    process.kill(pid, 0) // signal 0 = existence probe
+    return true
+  } catch {
+    return false
+  }
+}
+
+function acquireSingletonLock(): void {
+  try {
+    if (existsSync(LOCK_FILE)) {
+      const raw = readFileSync(LOCK_FILE, 'utf8').trim()
+      const pid = Number.parseInt(raw.split(':')[0] ?? '', 10)
+      if (pid === process.pid) return // our own lock from a previous hot-reload pass
+      if (Number.isFinite(pid) && lockPidAlive(pid)) {
+        console.log(`[bot-service] another instance (pid ${pid}) already polls — exiting`)
+        process.exit(0)
+      }
+      // stale lock (dead pid) → take over
+      rmSync(LOCK_FILE, { force: true })
+    }
+    writeFileSync(LOCK_FILE, `${process.pid}:${Date.now()}`, { flag: 'wx' })
+  } catch (e) {
+    // 'wx' raced with another starter → let that one win
+    console.log('[bot-service] lock held by a concurrent starter — exiting:', (e as Error).message)
+    process.exit(0)
+  }
+}
+
+function releaseSingletonLock(): void {
+  try {
+    if (existsSync(LOCK_FILE)) {
+      const raw = readFileSync(LOCK_FILE, 'utf8').trim()
+      if (raw.startsWith(`${process.pid}:`)) rmSync(LOCK_FILE, { force: true })
+    }
+  } catch {
+    // best effort
+  }
+}
+
+mkdirSync(import.meta.dir, { recursive: true })
+acquireSingletonLock()
+for (const sig of ['SIGINT', 'SIGTERM'] as const) {
+  process.on(sig, () => {
+    releaseSingletonLock()
+    process.exit(0)
+  })
+}
 
 function json(data: unknown, status = 200): Response {
   return new Response(JSON.stringify(data), {
@@ -162,6 +221,28 @@ async function deliver(chatId: string, r: Reply): Promise<void> {
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms))
 
+/**
+ * Defensive redelivery guard: Telegram long-poll guarantees at-least-once in
+ * edge cases (offset reset on token change, 409 races with a stale poller).
+ * The same update must NEVER be handled twice — keep a small LRU of recently
+ * seen update_ids.
+ */
+const seenUpdateIds = new Set<number>()
+const SEEN_UPDATE_LIMIT = 500
+function isDuplicateUpdate(updateId: number): boolean {
+  if (seenUpdateIds.has(updateId)) return true
+  seenUpdateIds.add(updateId)
+  if (seenUpdateIds.size > SEEN_UPDATE_LIMIT) {
+    // drop the oldest half (Set iterates in insertion order)
+    let drop = seenUpdateIds.size - Math.floor(SEEN_UPDATE_LIMIT / 2)
+    for (const id of seenUpdateIds) {
+      seenUpdateIds.delete(id)
+      if (--drop <= 0) break
+    }
+  }
+  return false
+}
+
 async function pollingLoop(): Promise<void> {
   let offset = 0
   let currentToken = ''
@@ -181,6 +262,7 @@ async function pollingLoop(): Promise<void> {
         }
         currentToken = token
         offset = 0 // offsets are per-bot; start fresh
+        seenUpdateIds.clear()
       }
       // 25s server-side long-poll; the HTTP timeout (35s) always exceeds it
       const updates = await getUpdatesPolling(offset, 25)
@@ -190,6 +272,7 @@ async function pollingLoop(): Promise<void> {
       }
       for (const u of updates) {
         offset = Math.max(offset, u.update_id + 1)
+        if (isDuplicateUpdate(u.update_id)) continue
         try {
           const input = mapTelegramUpdate(u)
           if (!input) continue
