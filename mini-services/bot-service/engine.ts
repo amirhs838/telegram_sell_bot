@@ -148,6 +148,30 @@ async function resolvePhotoSource(url: string | null | undefined): Promise<Photo
 
 // ─── Menus ───────────────────────────────────────────────────────────────────
 
+/**
+ * Bottom REPLY keyboard — the persistent shop menu that sits above the input
+ * field (user-requested layout, matches photo exactly):
+ *   row 1: 🛒 سبد خرید | 📦 سفارش‌های من
+ *   row 2: 🛍 محصولات (full width)
+ *   row 3: ❓ سوالات متداول | 💬 گفتگو با فروشنده
+ * Text buttons submit their label as a normal message; handleText() matches
+ * these exact strings BEFORE any active flow so the menu always works.
+ * deliver() attaches it to every outgoing reply that has no inline keyboard.
+ */
+export const MAIN_KEYBOARD = {
+  keyboard: [
+    [{ text: '🛒 سبد خرید' }, { text: '📦 سفارش‌های من' }],
+    [{ text: '🛍 محصولات' }],
+    [{ text: '❓ سوالات متداول' }, { text: '💬 گفتگو با فروشنده' }],
+  ],
+  resize_keyboard: true,
+  is_persistent: true,
+}
+
+const BOTTOM_BUTTONS: ReadonlySet<string> = new Set(
+  MAIN_KEYBOARD.keyboard.flat().map((b) => b.text),
+)
+
 const MAIN_MENU: InlineButton[][] = [
   [{ text: '🛍 مشاهده محصولات', callback_data: 'menu:products' }, { text: '🔎 جستجوی محصول', callback_data: 'menu:search' }],
   [{ text: '✨ مشاوره خرید', callback_data: 'menu:ai' }, { text: '💳 سفارش‌های من', callback_data: 'menu:orders' }],
@@ -230,8 +254,49 @@ function formatWeight(grams: number): string {
 
 // ─── Views ───────────────────────────────────────────────────────────────────
 
-function mainMenuReply(text = '🏠 منوی اصلی. از بخش موردنظر انتخاب کنید:'): Reply {
-  return { text, keyboard: MAIN_MENU }
+/**
+ * Main menu — text-only on purpose: deliver() attaches the persistent bottom
+ * reply keyboard (MAIN_KEYBOARD) automatically, matching the requested layout.
+ */
+function mainMenuReply(text = '🏠 منوی اصلی. از دکمه‌های پایین صفحه استفاده کنید:'): Reply {
+  return { text }
+}
+
+/** Consult intro shared by the bottom-keyboard button, menu:ai and /start deep link. */
+function aiConsultIntro(): Reply {
+  return {
+    text: '✨ گفتگو با فروشنده\n\nکافی است سؤال یا درخواست خود را بنویسید؛ مثلاً:\n«یه دستبند نقره برای هدیه تا دو میلیون می‌خوام»\n\nدستیار فروش ما نیازتان را می‌فهمد، محصولات موجود را با قیمت واقعی پیشنهاد می‌دهد و تا ثبت سفارش همراهتان است 💎',
+  }
+}
+
+/** Cart view — the order flow is per-product, so an empty-cart state is the truth. */
+function cartReply(): Reply {
+  return {
+    text: '🛒 سبد خرید شما خالی است.\n\nبرای انتخاب محصول، بخش محصولات را ببینید؛ پس از انتخاب محصول، مراحل ثبت سفارش را قدم‌به‌قدم همراهتان انجام می‌دهم.',
+  }
+}
+
+/** FAQ — plain HTML-formatted answers to the most common silver-shop questions. */
+function faqReply(): Reply {
+  return {
+    text: [
+      '❓ <b>سوالات متداول</b>',
+      '',
+      '💎 <b>اصالت محصولات</b>\nهمه محصولات نقره ۹۲۵ هستند؛ با مهر عیار و ضمانت اصالت ارسال می‌شوند.',
+      '',
+      '🚚 <b>زمان و هزینه ارسال</b>\nپس از تأیید پرداخت، سفارش با پست پیشتاز ارسال می‌شود (۲ تا ۴ روز کاری). هزینه ارسال هنگام ثبت سفارش اعلام می‌شود.',
+      '',
+      '💳 <b>روش پرداخت</b>\nکارت به کارت به کارت‌های اعلام‌شده؛ سپس تصویر رسید را در همین ربات ارسال کنید تا سریع تأیید شود.',
+      '',
+      '↩️ <b>بازگشت کالا</b>\nتا ۷ روز پس از دریافت، در صورت مغایرت با توضیحات محصول، بازگرداندن کالا بدون سؤال انجام می‌شود.',
+      '',
+      '📏 <b>سایز انگشتر و دستبند</b>\nراهنمای اندازه‌گیری سایز هنگام سفارش برایتان ارسال می‌شود.',
+      '',
+      '🧼 <b>نگهداری نقره</b>\nاز تماس با عطر و مواد شوینده دور نگه دارید و با دستمال جواهر تمیز کنید.',
+      '',
+      'سؤال دیگری دارید؟ همین‌جا بنویسید تا فوری پاسخ بدهم 🌸',
+    ].join('\n'),
+  }
 }
 
 async function categoriesReply(): Promise<Reply> {
@@ -947,24 +1012,61 @@ async function handleText(
       const settings = await getStoreSettings()
       const name = input.firstName ? input.firstName : ''
       const hello = name
-        ? `سلام ${escapeHtml(name)}! 👋`
-        : 'سلام! 👋'
+        ? `سلام ${escapeHtml(name)} عزیز؛ `
+        : 'سلام؛ '
       const welcome = [
-        `${hello}\n✨ به ${escapeHtml(settings.storeName)} خوش آمدید`,
+        `${hello}به ${escapeHtml(settings.storeName)} خوش آمدید 🌸`,
         '',
-        settings.storeDescription
-          ? escapeHtml(settings.storeDescription)
-          : 'فروشگاه تخصصی نقره — نقره اصل با ضمانت اصالت، خرید آسان از طریق همین ربات',
+        'شما می‌توانید برای دیدن محصولات و نمونه‌کارها و ثبت سفارش خرید خود، از منوی پایین صفحه استفاده کنید 👇',
         '',
-        '🛍 مرور و خرید محصولات',
-        '✨ مشاوره خرید با دستیار هوشمند',
-        '💳 پیگیری سفارش‌ها و ارسال رسید',
-        '',
-        'از منوی زیر انتخاب کنید یا سؤال خود را مستقیم بنویسید 👇',
+        '✨ همچنین کافی است سؤال یا درخواست خود را بنویسید تا دستیار فروش ما راهنمایی‌تان کند.',
       ].join('\n')
-      return [{ text: welcome, keyboard: MAIN_MENU }]
+      return [{ text: welcome }]
+    }
+    // / commands — same views as the bottom keyboard (photo 2-3 order)
+    if (cmd === '/menu') {
+      await clearFlow(telegramUserId)
+      return [mainMenuReply()]
+    }
+    if (cmd === '/products') {
+      await clearFlow(telegramUserId)
+      return [await categoriesReply()]
+    }
+    if (cmd === '/cart') {
+      await clearFlow(telegramUserId)
+      return [cartReply()]
+    }
+    if (cmd === '/orders') {
+      await clearFlow(telegramUserId)
+      return [await myOrdersReply(telegramUserId)]
+    }
+    if (cmd === '/faq') {
+      await clearFlow(telegramUserId)
+      return [faqReply()]
+    }
+    if (cmd === '/support') {
+      await clearFlow(telegramUserId)
+      return [await supportReply()]
     }
     return [mainMenuReply('دستور شناخته‌شده نیست. از منوی زیر استفاده کنید:')]
+  }
+
+  // Bottom-keyboard buttons work from ANY state (they cancel active flows) —
+  // they submit their label as a normal message, matched exactly here.
+  if (BOTTOM_BUTTONS.has(text)) {
+    await clearFlow(telegramUserId)
+    switch (text) {
+      case '🛍 محصولات':
+        return [await categoriesReply()]
+      case '🛒 سبد خرید':
+        return [cartReply()]
+      case '📦 سفارش‌های من':
+        return [await myOrdersReply(telegramUserId)]
+      case '💬 گفتگو با فروشنده':
+        return [aiConsultIntro()]
+      case '❓ سوالات متداول':
+        return [faqReply()]
+    }
   }
 
   switch (state.flow) {
@@ -1116,12 +1218,7 @@ async function handleCallback(
   }
   if (cb === 'menu:ai') {
     await clearFlow(telegramUserId)
-    return [
-      {
-        text: '✨ مشاوره خرید با دستیار هوشمند\n\nکافی است سؤال‌تان را بنویسید؛ مثلاً:\n«یه دستبند نقره برای هدیه تا دو میلیون میخوام»\n\nدستیار ما نیازتان را می‌فهمد، محصولات موجود را با قیمت واقعی پیشنهاد می‌دهد و تا ثبت سفارش همراهتان است 💎',
-        keyboard: [HOME_ROW],
-      },
-    ]
+    return [aiConsultIntro()]
   }
   if (cb.startsWith('cat:')) {
     await clearFlow(telegramUserId)

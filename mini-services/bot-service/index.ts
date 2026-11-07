@@ -11,11 +11,12 @@
  */
 import { existsSync, readFileSync, rmSync, writeFileSync, mkdirSync } from 'node:fs'
 import path from 'node:path'
-import { handleUpdate, type Reply, type UpdateInput } from './engine'
+import { handleUpdate, MAIN_KEYBOARD, type Reply, type UpdateInput } from './engine'
 import {
   botUsername,
   currentBotToken,
   getUpdatesPolling,
+  registerBotMenu,
   resolveMode,
   send,
   sendPhoto,
@@ -211,11 +212,14 @@ function mapTelegramUpdate(u: TelegramUpdate): UpdateInput | null {
 
 /** Deliver one reply: photo replies go through multipart sendPhoto. */
 async function deliver(chatId: string, r: Reply): Promise<void> {
+  // No inline buttons on this reply → (re)assert the persistent bottom menu
+  // keyboard, so the shop menu is always visible above the input field.
+  const bottom = r.keyboard ? undefined : MAIN_KEYBOARD
   if (r.photo) {
     const source: PhotoSource = r.photo
-    await sendPhoto(chatId, source, r.text, r.keyboard)
+    await sendPhoto(chatId, source, r.text, r.keyboard, bottom)
   } else {
-    await send(chatId, r.text, r.keyboard)
+    await send(chatId, r.text, r.keyboard, bottom)
   }
 }
 
@@ -336,6 +340,11 @@ async function pollingLoop(gen: number, abort: AbortController): Promise<void> {
         console.log(
           `[bot-service] mode → ${mode}${mode === 'real' ? ' (polling activated)' : ' (waiting for a bot to be connected in the panel)'}`,
         )
+        if (mode === 'real') {
+          // First activation (or reconnect): publish the bot's public menu —
+          // / command list + the ☰ chat menu button in the input's left corner.
+          void registerBotMenu().catch(() => undefined) // never blocks polling
+        }
         lastMode = mode
       }
       if (mode === 'mock') {

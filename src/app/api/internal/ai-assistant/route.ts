@@ -36,6 +36,14 @@ const BOT_HEALTH_URL = 'http://127.0.0.1:3002/health'
 const BOT_SPAWN_COOLDOWN_MS = 20_000
 let lastBotSpawnAt = 0
 
+/**
+ * Log file for spawned bot-service children. Deliberately NOT the boot
+ * script's /tmp/mini-service-bot-service.log — the sandbox boot creates that
+ * file as root, so a user-process append (openSync 'a') would EACCES and the
+ * spawn would die silently. This path is always ours.
+ */
+const BOT_SPAWN_LOG = '/tmp/bot-service-runtime.log'
+
 /** (Re)start the bot mini-service when :3002 is unreachable. Never throws. */
 async function ensureBotServiceRunning(): Promise<boolean> {
   if (Date.now() - lastBotSpawnAt < BOT_SPAWN_COOLDOWN_MS) return false
@@ -51,9 +59,10 @@ async function ensureBotServiceRunning(): Promise<boolean> {
     clearTimeout(timer)
   }
   try {
-    // Keep the service observable: append its stdout/stderr to the same log
-    // file the sandbox start script uses (stdio:'ignore' made respawns mute).
-    const logFd = openSync('/tmp/mini-service-bot-service.log', 'a')
+    // Keep the service observable: append its stdout/stderr to a log file
+    // this process can actually write (stdio:'ignore' made respawns mute;
+    // the boot script's root-owned log made them EACCES).
+    const logFd = openSync(BOT_SPAWN_LOG, 'a')
     const child = spawn('bun', ['run', 'dev'], {
       cwd: BOT_SERVICE_DIR,
       detached: true,
@@ -71,9 +80,39 @@ async function ensureBotServiceRunning(): Promise<boolean> {
 
 // Periodic supervision from within the Next server process (dev only).
 // unref'd so it never keeps the event loop alive on shutdown.
+
+/**
+ * Self-healing login: if the store has NO user rows (e.g. the sandbox boot
+ * recreated an empty DB and never ran the seed), the admin panel becomes
+ * un-loginable — «ایمیل یا رمز عبور اشتباه است» for every input. Run the
+ * idempotent seed once to restore the admin account. Cooldown-guarded so a
+ * slow seed never double-spawns.
+ */
+const SEED_COOLDOWN_MS = 120_000
+let lastSeedSpawnAt = 0
+async function ensureStoreBootstrapped(): Promise<void> {
+  if (Date.now() - lastSeedSpawnAt < SEED_COOLDOWN_MS) return
+  const users = await db.user.count().catch(() => 1) // DB down → don't seed blindly
+  if (users > 0) return
+  lastSeedSpawnAt = Date.now()
+  console.log('[api:internal/ai-assistant] store has no users → running seed to restore admin login')
+  try {
+    const child = spawn('bun', ['scripts/seed.ts'], {
+      cwd: process.cwd(),
+      detached: true,
+      stdio: 'ignore',
+      env: process.env,
+    })
+    child.unref()
+  } catch (e) {
+    console.error('[api:internal/ai-assistant] auto-seed spawn failed', e)
+  }
+}
+
 if (process.env.NEXT_RUNTIME !== 'edge') {
   const supervisor = setInterval(() => {
     void ensureBotServiceRunning()
+    void ensureStoreBootstrapped()
   }, 30_000)
   supervisor.unref?.()
 }

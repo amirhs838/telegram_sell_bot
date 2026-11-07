@@ -11,6 +11,7 @@ import {
   getTelegramConfig,
   updateTelegramConfig,
 } from '@/lib/settings'
+import { mirrorTelegramToEnv } from '@/lib/env-mirror'
 
 // ─── GET: current telegram connection (token masked, never returned in full) ──
 
@@ -76,6 +77,14 @@ export const PUT = route(async (req) => {
   // impossible right now (e.g. no outbound network). Verification results
   // are reported back as warnings, never silently swallowed.
   await updateTelegramConfig({
+    botToken: body.botToken,
+    channelId: body.channelId,
+    adminChatId: body.adminChatId,
+    botUsername: body.botUsername,
+  })
+  // Wipe resilience: mirror the connection into .env (+ snapshot copy) so a
+  // DB/home reset can never permanently log the bot out again.
+  mirrorTelegramToEnv({
     botToken: body.botToken,
     channelId: body.channelId,
     adminChatId: body.adminChatId,

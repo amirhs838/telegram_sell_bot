@@ -48,14 +48,12 @@ function ensureDemoReceipt(): string {
 }
 
 async function main() {
-  const existing = await db.product.count()
-  if (existing > 0 && !process.argv.includes('--reset')) {
-    console.log('⏭️  already seeded — use --reset to reseed')
-    return
-  }
   if (process.argv.includes('--reset')) await reset()
 
   // ── Admin user ──────────────────────────────────────────────────────────
+  // MUST run before the "already seeded" early-return: after a sandbox wipe
+  // the DB can be partially emptied (users gone, products still there) — the
+  // login must ALWAYS come back (admin@shop.local / admin1234).
   const passwordHash = await bcrypt.hash('admin1234', 10)
   const admin = await db.user.upsert({
     where: { email: 'admin@shop.local' },
@@ -63,6 +61,28 @@ async function main() {
     update: { name: 'مدیر Silver Love', role: 'admin' },
   })
   console.log('✓ admin user (admin@shop.local / admin1234)')
+
+  // ── Telegram connection from env (survives panel-less boots) ────────────
+  // Bun auto-loads .env; when a token exists there, mirror it into the
+  // Setting table so the bot reconnects in real mode without manual input.
+  // Also before the early-return: a wiped Setting table must self-reconnect.
+  const tgEnv: Array<[string, string]> = [
+    ['telegramBotToken', (process.env.TELEGRAM_BOT_TOKEN ?? '').trim()],
+    ['telegramBotUsername', (process.env.TELEGRAM_BOT_USERNAME ?? '').trim()],
+    ['telegramChannelId', (process.env.TELEGRAM_CHANNEL_ID ?? '').trim()],
+    ['telegramAdminChatId', (process.env.TELEGRAM_ADMIN_CHAT_ID ?? '').trim()],
+  ]
+  for (const [key, value] of tgEnv) {
+    if (!value) continue
+    await db.setting.upsert({ where: { key }, create: { key, value }, update: { value } })
+    console.log(`✓ setting ${key} restored from env`)
+  }
+
+  const existing = await db.product.count()
+  if (existing > 0 && !process.argv.includes('--reset')) {
+    console.log('⏭️  already seeded — use --reset to reseed')
+    return
+  }
 
   // ── Settings (Silver Love branding + AI toggles) ────────────────────────
   const settings: Array<[string, string]> = [

@@ -24,6 +24,55 @@ const CONFIG_TTL_MS = 15_000
 /** Photo source for sendPhoto: an http(s) URL string, or an in-memory file. */
 export type PhotoSource = string | { buffer: Buffer; filename: string }
 
+/**
+ * ReplyKeyboardMarkup — the PERSISTENT bottom keyboard (the shop menu that
+ * always sits above the input field). Text buttons submit their label as a
+ * normal message, so the engine matches those texts.
+ */
+export type ReplyKeyboardMarkup = {
+  keyboard: { text: string }[][]
+  resize_keyboard?: boolean
+  is_persistent?: boolean
+  selective?: boolean
+}
+
+/** The command list shown in the bot's menu (left corner ☰ button) — photo order. */
+export const BOT_COMMANDS: { command: string; description: string }[] = [
+  { command: 'start', description: 'شروع و ثبت‌نام' },
+  { command: 'menu', description: 'منوی اصلی' },
+  { command: 'products', description: '🛍 محصولات' },
+  { command: 'cart', description: '🛒 سبد خرید' },
+  { command: 'orders', description: '📦 سفارش‌های من' },
+  { command: 'faq', description: '❓ سوالات متداول' },
+  { command: 'support', description: '💬 گفتگو با ادمین' },
+]
+
+/**
+ * Register the bot's public menu with Telegram:
+ *  1. setMyCommands → the / command list (photos 2-3 order)
+ *  2. setChatMenuButton → the ☰ button in the input's left corner opens that list
+ * Safe to call repeatedly; in mock mode it only logs. Never throws.
+ */
+export async function registerBotMenu(): Promise<{ ok: boolean; error?: string }> {
+  await loadConfig()
+  if (isMockMode()) return { ok: false, error: 'mock mode' }
+  const cfg = await loadConfig()
+  if (!cfg.botToken) return { ok: false, error: 'no token' }
+  const commands = await callTelegramApi('setMyCommands', { commands: BOT_COMMANDS })
+  const menuButton = await callTelegramApi('setChatMenuButton', {
+    menu_button: { type: 'commands' },
+  })
+  if (commands.ok && menuButton.ok) {
+    console.log(
+      `[bot-service] bot menu registered: ${BOT_COMMANDS.length} commands + chat menu button (commands)`,
+    )
+    return { ok: true }
+  }
+  const error = `setMyCommands=${commands.ok ? 'ok' : commands.error} setChatMenuButton=${menuButton.ok ? 'ok' : menuButton.error}`
+  console.error(`[bot-service] bot menu registration failed: ${error}`)
+  return { ok: false, error }
+}
+
 type TgRuntimeConfig = {
   botToken: string
   botUsername: string
@@ -164,6 +213,7 @@ export async function send(
   chatId: string | number,
   text: string,
   keyboard?: InlineButton[][],
+  bottom?: ReplyKeyboardMarkup,
 ): Promise<TgResult> {
   await loadConfig()
   if (isMockMode()) {
@@ -182,6 +232,9 @@ export async function send(
   }
   if (keyboard && keyboard.length > 0) {
     payload.reply_markup = { inline_keyboard: keyboard }
+  } else if (bottom) {
+    // no inline buttons → (re)assert the persistent bottom keyboard
+    payload.reply_markup = bottom
   }
   const result = await callTelegramApi('sendMessage', payload)
   if (!result.ok) {
@@ -210,6 +263,7 @@ export async function sendPhoto(
   source: PhotoSource,
   caption: string,
   keyboard?: InlineButton[][],
+  bottom?: ReplyKeyboardMarkup,
 ): Promise<TgResult> {
   await loadConfig()
   const describe = typeof source === 'string' ? source : source.filename
@@ -234,6 +288,9 @@ export async function sendPhoto(
     form.append('parse_mode', 'HTML')
     if (keyboard && keyboard.length > 0) {
       form.append('reply_markup', JSON.stringify({ inline_keyboard: keyboard }))
+    } else if (bottom) {
+      // no inline buttons → (re)assert the persistent bottom keyboard
+      form.append('reply_markup', JSON.stringify(bottom))
     }
     if (typeof source === 'string') {
       form.append('photo', source)
