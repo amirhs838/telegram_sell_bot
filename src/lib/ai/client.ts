@@ -1,41 +1,25 @@
-// AI client layer — z-ai-web-dev-sdk (backend only!) with JSON-mode helpers.
-import ZAI from 'z-ai-web-dev-sdk'
+// AI client layer — dual-provider (seller's Z.ai key + platform gateway),
+// with JSON-mode helpers. Backend only!
+import type ZAI from 'z-ai-web-dev-sdk'
 import type { ZodType } from 'zod'
+import { AiError, chatComplete, getSdk, type ChatMsg } from '@/lib/ai/provider'
+
+export type { ChatMsg }
+export { AiError }
 
 type ChatMessage = { role: 'assistant' | 'user'; content: string }
 
-export class AiError extends Error {
-  constructor(message: string) {
-    super(message)
-    this.name = 'AiError'
-  }
-}
-
-// Cached ZAI.create() singleton (survives HMR via globalThis).
-const globalForAi = globalThis as unknown as { __zaiPromise?: Promise<ZAI> }
-
+/**
+ * Platform-gateway SDK singleton (survives HMR via globalThis).
+ * Kept for SDK-only features (e.g. embeddings); chat/image go through
+ * the dual-provider layer in '@/lib/ai/provider'.
+ */
 export function getZai(): Promise<ZAI> {
-  if (!globalForAi.__zaiPromise) {
-    globalForAi.__zaiPromise = ZAI.create().catch((e) => {
-      // allow a retry on next call instead of caching the rejection forever
-      globalForAi.__zaiPromise = undefined
-      throw e
-    })
-  }
-  return globalForAi.__zaiPromise
+  return getSdk()
 }
 
 async function complete(messages: ChatMessage[]): Promise<string> {
-  const zai = await getZai()
-  const completion = await zai.chat.completions.create({
-    messages,
-    thinking: { type: 'disabled' },
-    max_tokens: 900,
-  })
-  const content = completion.choices[0]?.message?.content
-  if (typeof content !== 'string' || content.trim() === '') {
-    throw new Error('پاسخ خالی از مدل زبانی')
-  }
+  const { content } = await chatComplete(messages, { maxTokens: 900 })
   return content
 }
 

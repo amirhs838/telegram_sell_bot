@@ -829,6 +829,9 @@ export function ProductFormDialog({
           <DialogContent className="sm:max-w-lg">
             <DialogHeader>
               <DialogTitle className="sr-only">پیش‌نمایش تصویر</DialogTitle>
+              <DialogDescription className="sr-only">
+                نمای بزرگ‌شده تصویر انتخاب‌شده محصول
+              </DialogDescription>
             </DialogHeader>
             {previewUrl && (
               <div className="relative">

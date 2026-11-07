@@ -3,7 +3,8 @@ import 'server-only'
 import { mkdir, readFile, writeFile } from 'node:fs/promises'
 import path from 'node:path'
 import { logEvent } from '@/lib/logger'
-import { AiError, getZai } from '@/lib/ai/client'
+import { AiError } from '@/lib/ai/client'
+import { editImage } from '@/lib/ai/provider'
 
 /**
  * AI Image Studio — turns a raw product photo into a professional studio shot.
@@ -116,7 +117,6 @@ const UPLOAD_DIR = path.join(process.cwd(), 'upload')
 const SAFE_NAME_RE = /^[a-zA-Z0-9._-]+$/
 const STUDIO_SIZE = '1024x1024' as const
 const AI_TIMEOUT_MS = 150_000
-const RETRY_ATTEMPTS = 2
 
 async function readUploadBuffer(url: string): Promise<Buffer> {
   const name = url.replace(/^\/api\/uploads\//, '').trim()
@@ -174,62 +174,30 @@ ${PRESERVE_RULES}`
 
 // ─── AI calls ────────────────────────────────────────────────────────────────
 
-type EditResult = { base64?: string; data?: Array<{ base64?: string }> }
-
 async function callImageEdit(prompt: string, dataUrl: string): Promise<Buffer> {
-  const zai = await getZai()
-  let lastError: unknown = null
-
-  for (let attempt = 1; attempt <= RETRY_ATTEMPTS; attempt++) {
-    try {
-      // `image` is the typed field; `images[]` is kept for forward-compat with
-      // the documented array form — cast through Record to satisfy both.
-      const body: Record<string, unknown> = {
-        prompt,
-        image: dataUrl,
-        images: [{ url: dataUrl }],
-        size: STUDIO_SIZE,
-        ...(process.env.AI_IMAGE_MODEL ? { model: process.env.AI_IMAGE_MODEL } : {}),
-      }
-      const res = (await Promise.race([
-        zai.images.generations.edit(
-          body as unknown as Parameters<typeof zai.images.generations.edit>[0],
-        ) as Promise<EditResult>,
-        new Promise<never>((_, reject) =>
-          setTimeout(() => reject(new Error('timeout')), AI_TIMEOUT_MS),
-        ),
-      ])) as EditResult
-
-      const base64 =
-        typeof res?.base64 === 'string' ? res.base64 : typeof res?.data?.[0]?.base64 === 'string' ? res.data[0].base64 : undefined
-      if (typeof base64 !== 'string' || base64.length < 100) {
-        throw new Error('پاسخ خالی از سرویس تصویر')
-      }
-      const raw = Buffer.from(base64, 'base64')
-      return await normalizeOutput(raw)
-    } catch (e) {
-      lastError = e
-      const msg = e instanceof Error ? e.message : String(e)
-      await logEvent(
-        'studio.ai_error',
-        `خطای سرویس تصویر (تلاش ${attempt}): ${msg.slice(0, 200)}`,
-        { attempt, prompt: prompt.slice(0, 80) },
-        'warn',
-      )
-      if (attempt < RETRY_ATTEMPTS) {
-        await new Promise((r) => setTimeout(r, 1200 * attempt))
-      }
+  try {
+    // Dual-provider edit: seller's key (when AI_USER_EDIT_PATH is enabled and
+    // the key works) → platform gateway. Both legs are retried/backed-off
+    // inside the provider layer, including 429 handling.
+    const { base64 } = await editImage(prompt, dataUrl, STUDIO_SIZE, AI_TIMEOUT_MS)
+    const raw = Buffer.from(base64, 'base64')
+    return await normalizeOutput(raw)
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : String(e)
+    await logEvent(
+      'studio.ai_error',
+      `خطای سرویس تصویر: ${msg.slice(0, 200)}`,
+      { prompt: prompt.slice(0, 80) },
+      'warn',
+    )
+    if (msg.includes('timeout')) {
+      throw new AiError('پردازش تصویر بیش از حد طول کشید — لطفاً دوباره تلاش کنید')
     }
+    if (msg.includes('429') || msg.toLowerCase().includes('too many')) {
+      throw new AiError('سرویس تصویر شلوغ است — چند لحظه بعد دوباره تلاش کنید')
+    }
+    throw new AiError('تولید تصویر ناموفق بود — لطفاً کمی بعد دوباره تلاش کنید')
   }
-
-  const detail = lastError instanceof Error ? lastError.message : String(lastError)
-  if (detail.includes('timeout')) {
-    throw new AiError('پردازش تصویر بیش از حد طول کشید — لطفاً دوباره تلاش کنید')
-  }
-  if (detail.includes('429') || detail.toLowerCase().includes('too many')) {
-    throw new AiError('سرویس تصویر شلوغ است — چند لحظه بعد دوباره تلاش کنید')
-  }
-  throw new AiError('تولید تصویر ناموفق بود — لطفاً کمی بعد دوباره تلاش کنید')
 }
 
 // ─── Public API ──────────────────────────────────────────────────────────────
