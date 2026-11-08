@@ -25,6 +25,8 @@ const patchSchema = z.object({
     .max(100)
     .regex(/^@?[a-zA-Z0-9_]*$/, 'یوزرنیم تلگرام معتبر نیست')
     .optional(),
+  // پیام خوش‌آمدگویی /start ربات — قالب آزاد با متغیرهای {name} و {store}
+  welcomeMessage: z.string().max(2000, 'متن خوش‌آمد حداکثر ۲۰۰۰ کاراکتر است').optional(),
   aiEnabled: booleanish.optional(),
   aiTone: z.string().trim().max(1000, 'لحن هوش مصنوعی حداکثر ۱۰۰۰ کاراکتر است').optional(),
 })

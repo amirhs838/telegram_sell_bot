@@ -1,6 +1,6 @@
 'use client'
 
-import { useCallback, useEffect, useState, type FormEvent } from 'react'
+import { useCallback, useEffect, useMemo, useState, type FormEvent } from 'react'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
@@ -24,6 +24,8 @@ import {
   Trash2,
   Bot,
   ShieldCheck,
+  MessageSquareHeart,
+  RotateCcw,
 } from 'lucide-react'
 import { toast } from 'sonner'
 import {
@@ -33,6 +35,10 @@ import {
   type TelegramInfo,
   type PaymentDestination,
 } from '@/lib/client'
+import {
+  DEFAULT_WELCOME_TEMPLATE,
+  renderWelcomeTemplate,
+} from '@/lib/bot-templates'
 
 type SettingsResp = { settings: Settings; telegram: TelegramInfo }
 
@@ -90,6 +96,7 @@ export function SettingsSection() {
       <SectionHeader title="تنظیمات" description="اطلاعات فروشگاه، پرداخت، دستیار هوشمند و امنیت حساب" />
 
       <StoreInfoCard settings={data.settings} onSaved={load} />
+      <WelcomeMessageCard settings={data.settings} onSaved={load} />
       <PaymentDestinationsCard />
 
       <div className="grid gap-4 md:gap-6 lg:grid-cols-2">
@@ -188,6 +195,126 @@ function StoreInfoCard({
             <Button type="submit" disabled={saving}>
               {saving && <Loader2 className="size-4 animate-spin" aria-hidden />}
               ذخیره تغییرات
+            </Button>
+          </div>
+        </form>
+      </CardContent>
+    </Card>
+  )
+}
+
+// ---------------------------------------------------------------------------
+// 1-b) Bot welcome message (/start) — fully dynamic template
+// ---------------------------------------------------------------------------
+
+function WelcomeMessageCard({
+  settings,
+  onSaved,
+}: {
+  settings: Settings
+  onSaved: () => void
+}) {
+  const [text, setText] = useState(settings.welcomeMessage ?? '')
+  const [saving, setSaving] = useState(false)
+  const [previewName, setPreviewName] = useState('علی')
+
+  // keep the editor in sync when settings reload after a save
+  useEffect(() => {
+    setText(settings.welcomeMessage ?? '')
+  }, [settings.welcomeMessage])
+
+  const preview = useMemo(
+    () =>
+      renderWelcomeTemplate(text || DEFAULT_WELCOME_TEMPLATE, {
+        name: previewName,
+        store: settings.storeName,
+      }),
+    [text, previewName, settings.storeName],
+  )
+
+  async function save(e: FormEvent) {
+    e.preventDefault()
+    if (text.length > 2000) {
+      toast.error('متن خوش‌آمد حداکثر ۲۰۰۰ کاراکتر است')
+      return
+    }
+    setSaving(true)
+    try {
+      await api('/api/settings', {
+        method: 'PUT',
+        body: JSON.stringify({ welcomeMessage: text.trim() || DEFAULT_WELCOME_TEMPLATE }),
+      })
+      toast.success('پیام خوش‌آمد ذخیره شد — از این پس ربات همان را می‌فرستد')
+      onSaved()
+    } catch (err) {
+      toast.error((err as Error).message)
+    } finally {
+      setSaving(false)
+    }
+  }
+
+  return (
+    <Card className="rounded-xl shadow-sm">
+      <CardHeader>
+        <CardTitle className="flex items-center gap-2 text-base">
+          <MessageSquareHeart className="size-4 text-emerald-600" aria-hidden />
+          پیام خوش‌آمدگویی ربات
+        </CardTitle>
+      </CardHeader>
+      <CardContent>
+        <form onSubmit={save} className="space-y-4">
+          <div className="space-y-1.5">
+            <Label htmlFor="s-welcome">متن پیام /start</Label>
+            <Textarea
+              id="s-welcome"
+              rows={7}
+              value={text}
+              onChange={(e) => setText(e.target.value)}
+              placeholder={DEFAULT_WELCOME_TEMPLATE}
+              className="font-medium"
+            />
+            <div className="flex flex-wrap items-center gap-2 pt-1 text-xs text-muted-foreground">
+              <span>متغیرهای مجاز:</span>
+              <code dir="ltr" className="rounded bg-muted px-1.5 py-0.5">{'{name}'}</code>
+              <span>نام کوچک مشتری —</span>
+              <code dir="ltr" className="rounded bg-muted px-1.5 py-0.5">{'{store}'}</code>
+              <span>نام فروشگاه</span>
+              <span className="ms-auto tabular-nums">{fmtNumber(text.length)}/۲۰۰۰</span>
+            </div>
+          </div>
+
+          {/* Live preview with a sample customer name */}
+          <div className="space-y-1.5">
+            <div className="flex items-center justify-between gap-2">
+              <Label>پیش‌نمایش زنده</Label>
+              <span className="flex items-center gap-1.5 text-xs text-muted-foreground">
+                نام نمونه:
+                <Input
+                  value={previewName}
+                  onChange={(e) => setPreviewName(e.target.value)}
+                  className="h-7 w-28 text-xs"
+                  aria-label="نام نمونه برای پیش‌نمایش"
+                />
+              </span>
+            </div>
+            <div className="rounded-xl border bg-muted/40 p-4" dir="rtl">
+              <p className="whitespace-pre-wrap text-sm leading-6">{preview}</p>
+            </div>
+          </div>
+
+          <div className="flex flex-wrap items-center gap-2">
+            <Button type="submit" disabled={saving}>
+              {saving && <Loader2 className="size-4 animate-spin" aria-hidden />}
+              ذخیره پیام
+            </Button>
+            <Button
+              type="button"
+              variant="outline"
+              onClick={() => setText(DEFAULT_WELCOME_TEMPLATE)}
+              disabled={saving || text === DEFAULT_WELCOME_TEMPLATE}
+            >
+              <RotateCcw className="size-4" aria-hidden />
+              بازگردانی به متن پیش‌فرض
             </Button>
           </div>
         </form>

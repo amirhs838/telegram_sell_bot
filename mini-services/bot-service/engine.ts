@@ -26,6 +26,7 @@ import {
   classifySmallTalk,
   smallTalkReplyFa,
 } from '../../src/lib/telegram-render'
+import { buildWelcomeMessage } from '../../src/lib/bot-templates'
 import { db } from './db'
 import {
   InsufficientStockError,
@@ -1067,17 +1068,14 @@ async function handleText(
         ]
       }
       const settings = await getStoreSettings()
-      const name = input.firstName ? input.firstName : ''
-      const hello = name
-        ? `سلام ${escapeHtml(name)} عزیز؛ `
-        : 'سلام؛ '
-      const welcome = [
-        `${hello}به ${escapeHtml(settings.storeName)} خوش آمدید 🌸`,
-        '',
-        'شما می‌توانید برای دیدن محصولات و نمونه‌کارها و ثبت سفارش خرید خود، از منوی پایین صفحه استفاده کنید 👇',
-        '',
-        '✨ همچنین کافی است سؤال یا درخواست خود را بنویسید تا دستیار فروش ما راهنمایی‌تان کند.',
-      ].join('\n')
+      // Dynamic welcome — the seller edits this template from the panel
+      // (Setting «welcomeMessage»); {name}/{store} are substituted per customer.
+      const welcome = escapeHtml(
+        buildWelcomeMessage(settings.welcomeMessage, {
+          name: input.firstName,
+          store: settings.storeName,
+        }),
+      )
       return [{ text: welcome }]
     }
     // / commands — same views as the bottom keyboard (photo 2-3 order)

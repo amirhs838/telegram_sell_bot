@@ -9,6 +9,7 @@ import { randomBytes } from 'node:crypto'
 import fs from 'node:fs'
 import path from 'node:path'
 import { upsertProductEmbedding } from '../src/lib/ai/embedding'
+import { DEFAULT_WELCOME_TEMPLATE } from '../src/lib/bot-templates'
 
 const db = new PrismaClient()
 
@@ -111,6 +112,12 @@ async function main() {
   ]
   for (const [key, value] of settings) {
     await db.setting.upsert({ where: { key }, create: { key, value }, update: { value } })
+  }
+  // welcomeMessage is SELLER-EDITABLE from the panel — seed must never
+  // overwrite a customized greeting on reboot; create only when missing.
+  const welcomeRow = await db.setting.findUnique({ where: { key: 'welcomeMessage' } })
+  if (!welcomeRow) {
+    await db.setting.create({ data: { key: 'welcomeMessage', value: DEFAULT_WELCOME_TEMPLATE } })
   }
   console.log('✓ settings (Silver Love)')
 

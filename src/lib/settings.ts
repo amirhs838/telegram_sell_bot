@@ -1,10 +1,13 @@
 import { db } from '@/lib/db'
+import { DEFAULT_WELCOME_TEMPLATE } from '@/lib/bot-templates'
 
 export type StoreSettings = {
   storeName: string
   storeDescription: string
   supportUsername: string
   currency: string
+  /** /start greeting template — {name} = customer, {store} = shop (editable in panel) */
+  welcomeMessage: string
   // AI assistant toggles
   aiEnabled: boolean
   aiTone: string
@@ -15,6 +18,7 @@ const DEFAULTS: StoreSettings = {
   storeDescription: 'به فروشگاه ما خوش آمدید — خرید راحت از طریق تلگرام',
   supportUsername: '',
   currency: 'IRT',
+  welcomeMessage: DEFAULT_WELCOME_TEMPLATE,
   aiEnabled: true,
   aiTone: '',
 }
@@ -24,6 +28,7 @@ export const SETTING_KEYS = [
   'storeDescription',
   'supportUsername',
   'currency',
+  'welcomeMessage',
   'aiEnabled',
   'aiTone',
 ] as const
@@ -38,6 +43,7 @@ export async function getSettings(): Promise<StoreSettings> {
     storeDescription: map['storeDescription'] ?? DEFAULTS.storeDescription,
     supportUsername: map['supportUsername'] ?? DEFAULTS.supportUsername,
     currency: map['currency'] ?? DEFAULTS.currency,
+    welcomeMessage: map['welcomeMessage'] ?? DEFAULTS.welcomeMessage,
     aiEnabled: map['aiEnabled'] === undefined ? DEFAULTS.aiEnabled : map['aiEnabled'] === 'true',
     aiTone: map['aiTone'] ?? DEFAULTS.aiTone,
   }

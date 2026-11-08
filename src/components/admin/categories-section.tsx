@@ -18,9 +18,7 @@ import {
 import {
   Select,
   SelectContent,
-  SelectGroup,
   SelectItem,
-  SelectLabel,
   SelectTrigger,
   SelectValue,
 } from '@/components/ui/select'
@@ -46,10 +44,148 @@ import {
   Package,
   Loader2,
   FolderTree,
+  FolderOpen,
+  ChevronDown,
   CornerDownLeft,
 } from 'lucide-react'
 import { toast } from 'sonner'
 import { api, fmtDay, type Category } from '@/lib/client'
+
+// ─── Tree helpers (work at ANY depth) ────────────────────────────────────────
+
+type CatNode = { cat: Category; children: CatNode[] }
+
+/** Build a nested tree from the flat API list (orphaned subs are promoted). */
+function buildTree(categories: Category[]): CatNode[] {
+  const byParent = new Map<string, Category[]>()
+  for (const c of categories) {
+    const key = c.parentId && categories.some((p) => p.id === c.parentId) ? c.parentId : ''
+    const list = byParent.get(key) ?? []
+    list.push(c)
+    byParent.set(key, list)
+  }
+  const nodeFor = (cat: Category): CatNode => ({
+    cat,
+    children: (byParent.get(cat.id) ?? []).map(nodeFor),
+  })
+  return (byParent.get('') ?? []).map(nodeFor)
+}
+
+/** Full path label like «سرمایه‌گذاری ← شمش نقره ← لیر» (RTL chain). */
+function fullPathOf(categories: Category[], id: string): string {
+  const parts: string[] = []
+  let cursor = categories.find((c) => c.id === id)
+  const guard = new Set<string>()
+  while (cursor && !guard.has(cursor.id)) {
+    guard.add(cursor.id)
+    parts.unshift(cursor.name)
+    cursor = cursor.parentId ? categories.find((c) => c.id === cursor.parentId) : undefined
+  }
+  return parts.join(' ← ')
+}
+
+// ─── Recursive node row (shown inside each root card) ────────────────────────
+
+function SubtreeRow({
+  node,
+  depth,
+  expanded,
+  toggleExpanded,
+  onEdit,
+  onAddSub,
+  onDelete,
+}: {
+  node: CatNode
+  depth: number
+  expanded: Set<string>
+  toggleExpanded: (id: string) => void
+  onEdit: (c: Category) => void
+  onAddSub: (c: Category) => void
+  onDelete: (c: Category) => void
+}) {
+  const c = node.cat
+  const hasChildren = node.children.length > 0
+  const isOpen = expanded.has(c.id)
+  return (
+    <li>
+      <div
+        className="group flex items-center justify-between gap-2 rounded-md px-2 py-1.5 transition-colors hover:bg-background"
+        style={{ paddingInlineStart: `${0.5 + depth * 1.1}rem` }}
+      >
+        <span className="flex min-w-0 items-center gap-1.5">
+          {hasChildren ? (
+            <button
+              type="button"
+              onClick={() => toggleExpanded(c.id)}
+              aria-expanded={isOpen}
+              aria-label={isOpen ? `بستن زیر‌مجموعه‌های ${c.name}` : `نمایش زیر‌مجموعه‌های ${c.name}`}
+              className="shrink-0 rounded p-0.5 text-muted-foreground hover:bg-muted hover:text-foreground"
+            >
+              <ChevronDown
+                className={`size-3.5 transition-transform ${isOpen ? '' : 'rotate-90 rtl:rotate-[-90deg]'}`}
+                aria-hidden
+              />
+            </button>
+          ) : (
+            <CornerDownLeft className="size-3 shrink-0 text-muted-foreground/60" aria-hidden />
+          )}
+          <span className="truncate text-sm">{c.name}</span>
+          <Badge variant="secondary" className="shrink-0 px-1.5 text-[10px]">
+            <Package className="size-2.5" aria-hidden />
+            {fmtNumberSafe(c.productCount)}
+          </Badge>
+        </span>
+        <span className="flex shrink-0 items-center gap-0.5 opacity-0 transition-opacity focus-within:opacity-100 group-hover:opacity-100">
+          <Button
+            variant="ghost"
+            size="icon"
+            className="size-7"
+            aria-label={`افزودن زیر‌مجموعه به ${c.name}`}
+            onClick={() => onAddSub(c)}
+          >
+            <Plus className="size-3.5" aria-hidden />
+          </Button>
+          <Button
+            variant="ghost"
+            size="icon"
+            className="size-7"
+            aria-label={`ویرایش ${c.name}`}
+            onClick={() => onEdit(c)}
+          >
+            <Pencil className="size-3.5" aria-hidden />
+          </Button>
+          <Button
+            variant="ghost"
+            size="icon"
+            className="size-7 text-destructive hover:text-destructive"
+            aria-label={`حذف ${c.name}`}
+            onClick={() => onDelete(c)}
+          >
+            <Trash2 className="size-3.5" aria-hidden />
+          </Button>
+        </span>
+      </div>
+      {hasChildren && isOpen && (
+        <ul className="space-y-0.5">
+          {node.children.map((child) => (
+            <SubtreeRow
+              key={child.cat.id}
+              node={child}
+              depth={depth + 1}
+              expanded={expanded}
+              toggleExpanded={toggleExpanded}
+              onEdit={onEdit}
+              onAddSub={onAddSub}
+              onDelete={onDelete}
+            />
+          ))}
+        </ul>
+      )}
+    </li>
+  )
+}
+
+// ─── Section ─────────────────────────────────────────────────────────────────
 
 export function CategoriesSection() {
   const [categories, setCategories] = useState<Category[]>([])
@@ -65,6 +201,18 @@ export function CategoriesSection() {
 
   const [deleting, setDeleting] = useState<Category | null>(null)
   const [deleteLoading, setDeleteLoading] = useState(false)
+
+  /** Expanded subtree nodes (per node id, shared across root cards). */
+  const [expanded, setExpanded] = useState<Set<string>>(new Set())
+
+  const toggleExpanded = useCallback((id: string) => {
+    setExpanded((prev) => {
+      const next = new Set(prev)
+      if (next.has(id)) next.delete(id)
+      else next.add(id)
+      return next
+    })
+  }, [])
 
   const load = useCallback(async () => {
     setLoading(true)
@@ -83,21 +231,7 @@ export function CategoriesSection() {
     load()
   }, [load])
 
-  // ── Tree helpers ──────────────────────────────────────────────────────────
-  // Orphaned subcategories (parent deleted) are promoted to root level here so
-  // they never disappear from the panel.
-  const roots = useMemo(
-    () =>
-      categories.filter(
-        (c) => !c.parentId || !categories.some((p) => p.id === c.parentId),
-      ),
-    [categories],
-  )
-
-  const childrenOf = useCallback(
-    (id: string) => categories.filter((c) => c.parentId === id),
-    [categories],
-  )
+  const tree = useMemo(() => buildTree(categories), [categories])
 
   /** Self + all descendants — excluded from the parent picker (cycle guard). */
   const selfAndDescendants = useCallback(
@@ -114,6 +248,24 @@ export function CategoriesSection() {
         }
       }
       return blocked
+    },
+    [categories],
+  )
+
+  /** Expand every ancestor chain of `id` so a saved node stays visible. */
+  const expandAncestorsOf = useCallback(
+    (id: string) => {
+      const toExpand = new Set<string>()
+      let cursor = categories.find((c) => c.id === id)
+      const guard = new Set<string>()
+      while (cursor?.parentId && !guard.has(cursor.parentId)) {
+        guard.add(cursor.parentId)
+        toExpand.add(cursor.parentId)
+        cursor = categories.find((c) => c.id === cursor.parentId)
+      }
+      if (toExpand.size > 0) {
+        setExpanded((prev) => new Set([...prev, ...toExpand]))
+      }
     },
     [categories],
   )
@@ -157,7 +309,8 @@ export function CategoriesSection() {
         )
       }
       setDialogOpen(false)
-      load()
+      expandAncestorsOf(parentId === 'root' ? '' : parentId)
+      await load()
     } catch (err) {
       toast.error((err as Error).message)
     } finally {
@@ -181,15 +334,20 @@ export function CategoriesSection() {
   }
 
   // Parent choices exclude the category itself + its descendants (cycle guard).
-  const dialogParentChoices = editing
-    ? categories.filter((c) => !selfAndDescendants(c.id).has(c.id))
-    : categories
+  const dialogParentChoices = useMemo(
+    () =>
+      (editing
+        ? categories.filter((c) => !selfAndDescendants(c.id).has(c.id))
+        : categories
+      ).slice(),
+    [categories, editing, selfAndDescendants],
+  )
 
   return (
     <div className="space-y-4">
       <SectionHeader
         title="دسته‌بندی‌ها"
-        description="سازماندهی محصولات برای نمایش در ربات و کانال — هر دستهٔ اصلی می‌تواند زیر‌مجموعه داشته باشد"
+        description="سازماندهی محصولات برای نمایش در ربات — هر دسته در هر سطحی می‌تواند زیر‌مجموعهٔ خودش را داشته باشد (بدون محدودیت تعداد لایه)"
       >
         <Button onClick={() => openCreate()}>
           <Plus className="size-4" aria-hidden />
@@ -219,7 +377,7 @@ export function CategoriesSection() {
           <EmptyState
             icon={Tags}
             title="هنوز دسته‌بندی‌ای ساخته نشده"
-            hint="دسته‌بندی‌ها به مشتریان ربات کمک می‌کنند محصولات را راحت‌تر پیدا کنند. می‌توانید برای هر دسته، زیر‌مجموعه هم تعریف کنید."
+            hint="دسته‌بندی‌ها به مشتریان ربات کمک می‌کنند محصولات را راحت‌تر پیدا کنند. مثلاً «سرمایه‌گذاری» بسازید و برایش زیر‌مجموعه اضافه کنید؛ مشتری در ربات پله‌پله وارد زیر‌مجموعه‌ها می‌شود تا به محصولات برسد."
             action={
               <Button size="sm" onClick={() => openCreate()}>
                 <Plus className="size-4" aria-hidden />
@@ -230,14 +388,20 @@ export function CategoriesSection() {
         </Card>
       ) : (
         <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-3">
-          {roots.map((c) => {
-            const subs = childrenOf(c.id)
+          {tree.map((root) => {
+            const c = root.cat
+            const countAll = (n: CatNode): number =>
+              n.children.reduce((s, ch) => s + countAll(ch), n.children.length)
+            const subCount = countAll(root)
             return (
               <Card key={c.id} className="flex flex-col rounded-xl shadow-sm">
                 <CardContent className="flex flex-1 flex-col p-5">
                   <div className="flex items-start justify-between gap-2">
                     <div className="min-w-0">
-                      <h3 className="truncate font-semibold">{c.name}</h3>
+                      <h3 className="flex items-center gap-1.5 truncate font-semibold">
+                        <FolderOpen className="size-4 shrink-0 text-amber-600" aria-hidden />
+                        {c.name}
+                      </h3>
                       <p dir="ltr" className="mt-1 text-start text-xs text-muted-foreground">
                         {c.slug}
                       </p>
@@ -273,57 +437,34 @@ export function CategoriesSection() {
                       <Package className="size-3" aria-hidden />
                       {fmtNumberSafe(c.productCount)} محصول
                     </Badge>
-                    {subs.length > 0 && (
+                    {subCount > 0 && (
                       <Badge variant="outline" className="bg-amber-50 text-amber-700 border-amber-200">
                         <FolderTree className="size-3" aria-hidden />
-                        {fmtNumberSafe(subs.length)} زیر‌مجموعه
+                        {fmtNumberSafe(subCount)} زیر‌مجموعه
                       </Badge>
                     )}
                   </div>
 
-                  {subs.length > 0 && (
-                    <div className="mt-3 rounded-lg border bg-muted/40 p-2">
-                      <p className="mb-1.5 px-1 text-xs font-medium text-muted-foreground">
-                        زیر‌مجموعه‌ها
-                      </p>
-                      <ul className="max-h-48 space-y-1 overflow-y-auto">
-                        {subs.map((s) => (
-                          <li
-                            key={s.id}
-                            className="group flex items-center justify-between gap-2 rounded-md px-2 py-1.5 hover:bg-background"
-                          >
-                            <span className="flex min-w-0 items-center gap-1.5">
-                              <CornerDownLeft className="size-3 shrink-0 text-muted-foreground" aria-hidden />
-                              <span className="truncate text-sm">{s.name}</span>
-                              <Badge variant="secondary" className="shrink-0 px-1.5 text-[10px]">
-                                {fmtNumberSafe(s.productCount)}
-                              </Badge>
-                            </span>
-                            <span className="flex shrink-0 items-center gap-0.5 opacity-0 transition-opacity group-hover:opacity-100 focus-within:opacity-100">
-                              <Button
-                                variant="ghost"
-                                size="icon"
-                                className="size-7"
-                                aria-label={`ویرایش زیر‌مجموعه ${s.name}`}
-                                onClick={() => openEdit(s)}
-                              >
-                                <Pencil className="size-3.5" aria-hidden />
-                              </Button>
-                              <Button
-                                variant="ghost"
-                                size="icon"
-                                className="size-7 text-destructive hover:text-destructive"
-                                aria-label={`حذف زیر‌مجموعه ${s.name}`}
-                                onClick={() => setDeleting(s)}
-                              >
-                                <Trash2 className="size-3.5" aria-hidden />
-                              </Button>
-                            </span>
-                          </li>
-                        ))}
-                      </ul>
-                    </div>
-                  )}
+                  {/* FULL recursive subtree — any depth, collapsible */}
+                  <div className="mt-3 rounded-lg border bg-muted/40 p-2">
+                    <p className="mb-1.5 px-1 text-xs font-medium text-muted-foreground">
+                      زیر‌مجموعه‌ها (تمام سطوح)
+                    </p>
+                    <ul className="max-h-72 space-y-0.5 overflow-y-auto">
+                      {root.children.map((child) => (
+                        <SubtreeRow
+                          key={child.cat.id}
+                          node={child}
+                          depth={0}
+                          expanded={expanded}
+                          toggleExpanded={toggleExpanded}
+                          onEdit={openEdit}
+                          onAddSub={openCreate}
+                          onDelete={setDeleting}
+                        />
+                      ))}
+                    </ul>
+                  </div>
 
                   <div className="mt-auto flex items-center justify-between gap-2 pt-3">
                     <p className="text-xs text-muted-foreground">ساخته شده: {fmtDay(c.createdAt)}</p>
@@ -351,8 +492,8 @@ export function CategoriesSection() {
                   : 'زیر‌مجموعهٔ جدید'}
             </DialogTitle>
             <DialogDescription>
-              نام دسته باید کوتاه و گویا باشد؛ مثلاً «گوشواره زنانه». می‌توانید دسته را زیر یکی از
-              دسته‌های اصلی قرار دهید.
+              نام دسته باید کوتاه و گویا باشد؛ مثلاً «شمش نقره». می‌توانید این دسته را زیر هر دستهٔ
+              دیگری (در هر سطحی) قرار دهید.
             </DialogDescription>
           </DialogHeader>
           <form onSubmit={save} className="space-y-4">
@@ -362,7 +503,7 @@ export function CategoriesSection() {
                 id="c-name"
                 value={name}
                 onChange={(e) => setName(e.target.value)}
-                placeholder="مثلاً: گوشواره زنانه"
+                placeholder="مثلاً: شمش نقره"
                 required
               />
             </div>
@@ -372,25 +513,18 @@ export function CategoriesSection() {
                 <SelectTrigger className="w-full">
                   <SelectValue placeholder="انتخاب کنید" />
                 </SelectTrigger>
-                <SelectContent>
+                <SelectContent className="max-h-64">
                   <SelectItem value="root">— دستهٔ اصلی (بدون والد) —</SelectItem>
-                  {dialogParentChoices
-                    .filter((c) => !editing || c.id !== editing.id)
-                    .map((c) => {
-                      const parentName = c.parentId
-                        ? categories.find((p) => p.id === c.parentId)?.name
-                        : null
-                      return (
-                        <SelectItem key={c.id} value={c.id}>
-                          {parentName ? `${parentName} ← ${c.name}` : c.name}
-                        </SelectItem>
-                      )
-                    })}
+                  {dialogParentChoices.map((c) => (
+                    <SelectItem key={c.id} value={c.id}>
+                      {fullPathOf(categories, c.id)}
+                    </SelectItem>
+                  ))}
                 </SelectContent>
               </Select>
               <p className="text-xs text-muted-foreground">
-                اگر دستهٔ والد انتخاب شود، این دسته به‌عنوان زیر‌مجموعه در صفحهٔ دستهٔ والد نمایش داده
-                می‌شود.
+                اگر دستهٔ والد انتخاب شود، این دسته به‌عنوان زیر‌مجموعه در صفحهٔ همان دسته در ربات
+                نمایش داده می‌شود؛ مشتری با لمس آن وارد این بخش می‌شود.
               </p>
             </div>
             <div className="space-y-1.5">

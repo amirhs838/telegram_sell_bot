@@ -169,21 +169,38 @@ export function ProductFormDialog({
   const fileRef = useRef<HTMLInputElement>(null)
   const isEdit = Boolean(product)
 
-  // Categories grouped by main category (root itself + its subcategories) so
-  // the picker mirrors the bot's hierarchy. Orphaned subs are appended at the
-  // end so they never disappear from the list.
+  // Categories grouped by main category with the FULL recursive subtree, so
+  // the picker mirrors the bot's hierarchy at any depth. Each descendant keeps
+  // its depth + path label (e.g. «سرمایه‌گذاری ← شمش نقره»). Orphaned subs are
+  // appended at the end so they never disappear from the list.
   const categoryGroups = useMemo(() => {
-    const roots = categories.filter(
-      (c) => !c.parentId || !categories.some((p) => p.id === c.parentId),
-    )
-    const groups = roots.map((root) => ({
-      root,
-      subs: categories.filter((c) => c.parentId === root.id),
-    }))
+    const byParent = new Map<string, typeof categories>()
+    for (const c of categories) {
+      const key = c.parentId && categories.some((p) => p.id === c.parentId) ? c.parentId : ''
+      const list = byParent.get(key) ?? []
+      list.push(c)
+      byParent.set(key, list)
+    }
+    const walk = (
+      cat: (typeof categories)[number],
+      depth: number,
+      parentPath: string,
+      out: { id: string; depth: number; path: string }[],
+    ) => {
+      const path = parentPath ? `${parentPath} ← ${cat.name}` : cat.name
+      out.push({ id: cat.id, depth, path })
+      for (const child of byParent.get(cat.id) ?? []) walk(child, depth + 1, path, out)
+    }
+    const roots = byParent.get('') ?? []
+    const groups = roots.map((root) => {
+      const descendants: { id: string; depth: number; path: string }[] = []
+      for (const child of byParent.get(root.id) ?? []) walk(child, 1, root.name, descendants)
+      return { root, descendants }
+    })
     const orphans = categories.filter(
       (c) => c.parentId && !categories.some((p) => p.id === c.parentId),
     )
-    for (const o of orphans) groups.push({ root: o, subs: [] })
+    for (const o of orphans) groups.push({ root: o, descendants: [] })
     return groups
   }, [categories])
 
@@ -448,17 +465,19 @@ export function ProductFormDialog({
                 <SelectTrigger className="w-full">
                   <SelectValue placeholder="انتخاب دسته" />
                 </SelectTrigger>
-                <SelectContent>
+                <SelectContent className="max-h-72">
                   <SelectItem value="none">بدون دسته</SelectItem>
-                  {/* Hierarchy: each main category groups itself + its
-                      subcategories (↳) — product can sit on either level. */}
+                  {/* Full recursive hierarchy: every root groups its whole
+                      subtree at ANY depth — label shows the complete path
+                      (e.g. «سرمایه‌گذاری ← شمش نقره ← لیر») so a product can
+                      sit on whichever level the seller wants. */}
                   {categoryGroups.map((g) => (
                     <SelectGroup key={g.root.id}>
                       <SelectLabel>{g.root.name}</SelectLabel>
                       <SelectItem value={g.root.id}>{g.root.name}</SelectItem>
-                      {g.subs.map((s) => (
-                        <SelectItem key={s.id} value={s.id}>
-                          ↳ {s.name}
+                      {g.descendants.map((d) => (
+                        <SelectItem key={d.id} value={d.id}>
+                          {d.path}
                         </SelectItem>
                       ))}
                     </SelectGroup>

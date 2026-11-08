@@ -2,17 +2,21 @@
  * bot-service — store helpers: settings + catalog queries used by the engine.
  */
 import { db } from './db'
+import { DEFAULT_WELCOME_TEMPLATE } from '../../src/lib/bot-templates'
 
 export type StoreSettings = {
   storeName: string
   storeDescription: string
   supportUsername: string
+  /** /start greeting template — editable from the panel; {name}/{store} vars */
+  welcomeMessage: string
 }
 
 const DEFAULTS: StoreSettings = {
   storeName: 'فروشگاه من',
   storeDescription: '',
   supportUsername: '',
+  welcomeMessage: DEFAULT_WELCOME_TEMPLATE,
 }
 
 export async function getStoreSettings(): Promise<StoreSettings> {
@@ -23,6 +27,7 @@ export async function getStoreSettings(): Promise<StoreSettings> {
       storeName: map.get('storeName') || DEFAULTS.storeName,
       storeDescription: map.get('storeDescription') || DEFAULTS.storeDescription,
       supportUsername: map.get('supportUsername') || DEFAULTS.supportUsername,
+      welcomeMessage: map.get('welcomeMessage') || DEFAULTS.welcomeMessage,
     }
   } catch {
     return { ...DEFAULTS }

@@ -310,6 +310,8 @@ export type Settings = {
   storeDescription: string
   supportUsername: string
   currency: string
+  /** /start greeting template — {name} = customer, {store} = shop */
+  welcomeMessage: string
   aiEnabled: boolean
   aiTone: string
 }
