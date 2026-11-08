@@ -208,6 +208,17 @@ async function callTelegramApi(
   }
 }
 
+/**
+ * Show «typing…» in the chat (Telegram chat action, lasts ~5s per call).
+ * Fire-and-forget: a sales bot never cares whether it failed. Mock mode →
+ * silent no-op so the keep-alive loop in index.ts cannot spam the ActivityLog.
+ */
+export async function sendTyping(chatId: string | number): Promise<void> {
+  await loadConfig()
+  if (isMockMode()) return
+  await callTelegramApi('sendChatAction', { chat_id: chatId, action: 'typing' })
+}
+
 /** Send an HTML message. Mock mode → ActivityLog row. Never throws. */
 export async function send(
   chatId: string | number,

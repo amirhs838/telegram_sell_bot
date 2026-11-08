@@ -16,10 +16,12 @@ import {
   botUsername,
   currentBotToken,
   getUpdatesPolling,
+  isMockMode,
   registerBotMenu,
   resolveMode,
   send,
   sendPhoto,
+  sendTyping,
   type PhotoSource,
   type TelegramUpdate,
 } from './telegram'
@@ -223,6 +225,21 @@ async function deliver(chatId: string, r: Reply): Promise<void> {
   }
 }
 
+/**
+ * «typing…» keep-alive for the duration of one handleUpdate: one chat action
+ * immediately, then a re-send every 4s (Telegram shows it for ~5s per call).
+ * Typical AI turns take 2–4s; heavy tool rounds or a 60s AI timeout would
+ * otherwise leave the customer staring at dead air. Mock mode → no-op.
+ * Returns stop() for the finally-block; never throws.
+ */
+function startTypingKeepAlive(chatId: string): () => void {
+  if (isMockMode()) return () => undefined
+  void sendTyping(chatId).catch(() => undefined)
+  const timer = setInterval(() => void sendTyping(chatId).catch(() => undefined), 4_000)
+  timer.unref?.() // a typing indicator must never keep the process alive
+  return () => clearInterval(timer)
+}
+
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms))
 
 /**
@@ -394,9 +411,14 @@ async function pollingLoop(gen: number, abort: AbortController): Promise<void> {
         try {
           const input = mapTelegramUpdate(u)
           if (!input) continue
-          const replies = await handleUpdate(input)
-          for (const r of replies) {
-            await deliver(input.telegramUserId, r)
+          const stopTyping = startTypingKeepAlive(input.telegramUserId)
+          try {
+            const replies = await handleUpdate(input)
+            for (const r of replies) {
+              await deliver(input.telegramUserId, r)
+            }
+          } finally {
+            stopTyping()
           }
         } catch (e) {
           console.error('[bot-service] update handling error:', e)
