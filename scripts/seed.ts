@@ -5,6 +5,7 @@
  */
 import { PrismaClient } from '@prisma/client'
 import bcrypt from 'bcryptjs'
+import { randomBytes } from 'node:crypto'
 import fs from 'node:fs'
 import path from 'node:path'
 import { upsertProductEmbedding } from '../src/lib/ai/embedding'
@@ -78,6 +79,27 @@ async function main() {
     console.log(`✓ setting ${key} restored from env`)
   }
 
+  // ── INTERNAL_API_KEY (bot ⇄ Next.js auth) — reboot-proof ────────────────
+  // start.sh rewrites .env on EVERY sandbox boot, so an env-only key dies
+  // each restart and the bot's AI calls start failing with 401. The durable
+  // copy lives in the Setting table (db file is tracked in git → survives
+  // via the sandbox backup); .env gets a mirror only when missing.
+  let internalKey = (await db.setting.findUnique({ where: { key: 'internalApiKey' } }))?.value?.trim()
+  if (!internalKey) {
+    internalKey = `slk_${randomBytes(24).toString('hex')}`
+    await db.setting.create({ data: { key: 'internalApiKey', value: internalKey } })
+    console.log('✓ internalApiKey generated (stored in Setting)')
+  }
+  try {
+    const envPath = path.join(process.cwd(), '.env')
+    const envRaw = fs.existsSync(envPath) ? fs.readFileSync(envPath, 'utf8') : ''
+    if (!/^INTERNAL_API_KEY=/m.test(envRaw)) {
+      fs.appendFileSync(envPath, `INTERNAL_API_KEY=${internalKey}\n`)
+    }
+  } catch {
+    // .env mirror is best-effort — the Setting row is the source of truth
+  }
+
   const existing = await db.product.count()
   if (existing > 0 && !process.argv.includes('--reset')) {
     console.log('⏭️  already seeded — use --reset to reseed')
@@ -98,14 +120,13 @@ async function main() {
   }
   console.log('✓ settings (Silver Love)')
 
-  // ── Silver categories ───────────────────────────────────────────────────
+  // ── Silver categories (owner-approved menu v2.2.8) ──────────────────────
+  // Menu order = creation order: زنانه | مردانه — آفرها | سرمایه‌گذاری.
   const catData = [
-    { name: 'انگشتر', slug: 'ring', description: 'انگشترهای نقره زنانه و مردانه با عیار ۹۲۵' },
-    { name: 'دستبند', slug: 'bracelet', description: 'دستبندهای نقره ظریف و اسپرت' },
-    { name: 'گردنبند و آویز', slug: 'necklace', description: 'گردنبند، زنجیر و آویز نقره' },
-    { name: 'گوشواره', slug: 'earring', description: 'گوشواره‌های نقره ظریف و مدرن' },
-    { name: 'ست و هدیه', slug: 'gift-set', description: 'ست‌های نقره و جعبه‌های هدیه' },
-    { name: 'شمش و سرمایه‌ای', slug: 'silver-bar', description: 'شمش نقره خالص برای سرمایه‌گذاری' },
+    { name: '👩 زیور زنانه وارداتی', slug: 'women-imported', description: 'زیورآلات وارداتی زنانه — گردنبند، انگشتر، گوشواره، دستبند و ست' },
+    { name: '👨 زیور مردانه وارداتی', slug: 'men-imported', description: 'زیورآلات وارداتی مردانه — دستبند، زنجیر و انگشتر' },
+    { name: '🔥 آفرهای هفتگی', slug: 'weekly-offers', description: 'تخفیف‌های ویژه این هفته — به‌صورت خودکار از محصولات تخفیف‌دار ساخته می‌شود' },
+    { name: '💎 سرمایه‌گذاری', slug: 'investment', description: 'شمش نقره و زیورآلات با ارزش سرمایه‌گذاری' },
   ]
   const cats: Record<string, string> = {}
   for (const c of catData) {
@@ -117,6 +138,11 @@ async function main() {
     cats[c.slug] = row.id
   }
   console.log(`✓ ${catData.length} silver categories`)
+
+  // Remove legacy demo categories if an older database is reseeded.
+  await db.category.deleteMany({
+    where: { slug: { in: ['ring', 'bracelet', 'necklace', 'earring', 'gift-set', 'silver-bar'] } },
+  })
 
   // ── Silver products (price = FINAL seller price; never computed) ────────
   type Img = { url: string; isPrimary: boolean; sortOrder: number }
@@ -131,7 +157,7 @@ async function main() {
   }
   const products: P[] = [
     {
-      name: 'انگشتر نقره زنانه مدل نگارین', slug: 'nagarin-silver-ring', code: 'SL-R-101', cat: 'ring',
+      name: 'انگشتر نقره زنانه مدل نگارین', slug: 'nagarin-silver-ring', code: 'SL-R-101', cat: 'women-imported',
       price: 780000, compareAtPrice: 890000, stock: 8, status: 'active',
       shortDescription: 'انگشتر نقره ۹۲۵ با حکاکی دستی اسلیمی، ظریف و مناسب استفاده روزمره.',
       description:
@@ -144,7 +170,7 @@ async function main() {
       images: ['/api/uploads/sl-ring.png', '/api/uploads/sl-set.png'],
     },
     {
-      name: 'دستبند نقره مردانه مدل آریو', slug: 'aryo-silver-bracelet', code: 'SL-B-204', cat: 'bracelet',
+      name: 'دستبند نقره مردانه مدل آریو', slug: 'aryo-silver-bracelet', code: 'SL-B-204', cat: 'men-imported',
       price: 1650000, stock: 5, status: 'active',
       shortDescription: 'دستبند نقره ۹۲۵ مردانه با طرح زنجیر بزل، سنگین و باکلاس.',
       description:
@@ -157,7 +183,7 @@ async function main() {
       images: ['/api/uploads/sl-bracelet.png', '/api/uploads/sl-chain.png'],
     },
     {
-      name: 'گوشواره نقره زنانه مدل باران', slug: 'baran-silver-earrings', code: 'SL-E-330', cat: 'earring',
+      name: 'گوشواره نقره زنانه مدل باران', slug: 'baran-silver-earrings', code: 'SL-E-330', cat: 'women-imported',
       price: 520000, stock: 12, status: 'active',
       shortDescription: 'گوشواره آویز نقره ۹۲۵ با طرح قطره، ظریف و سبک برای هر روز.',
       description:
@@ -170,7 +196,7 @@ async function main() {
       images: ['/api/uploads/sl-earrings.png', '/api/uploads/sl-set.png'],
     },
     {
-      name: 'گردنبند نقره دل‌نقره با زنجیر ظریف', slug: 'delnagare-heart-necklace', code: 'SL-N-412', cat: 'necklace',
+      name: 'گردنبند نقره دل‌نقره با زنجیر ظریف', slug: 'delnagare-heart-necklace', code: 'SL-N-412', cat: 'women-imported',
       price: 940000, compareAtPrice: 1100000, stock: 7, status: 'active',
       shortDescription: 'گردنبند نقره ۹۲۵ با آویز قلب و زنجیر ظریف، محبوب‌ترین انتخاب هدیه.',
       description:
@@ -183,7 +209,7 @@ async function main() {
       images: ['/api/uploads/sl-necklace.png', '/api/uploads/sl-ring.png'],
     },
     {
-      name: 'زنجیر نقره مردانه مدل کوبا', slug: 'cuba-silver-chain', code: 'SL-N-455', cat: 'necklace',
+      name: 'زنجیر نقره مردانه مدل کوبا', slug: 'cuba-silver-chain', code: 'SL-N-455', cat: 'men-imported',
       price: 2450000, stock: 3, status: 'active',
       shortDescription: 'زنجیر نقره ۹۲۵ مردانه طرح کوبا، ضخیم و سنگین با قفل محکم.',
       description:
@@ -197,7 +223,7 @@ async function main() {
       lowStockThreshold: 3,
     },
     {
-      name: 'ست نقره هدیه رزگلد دو پارچه', slug: 'rosegold-gift-set', code: 'SL-S-501', cat: 'gift-set',
+      name: 'ست نقره هدیه رزگلد دو پارچه', slug: 'rosegold-gift-set', code: 'SL-S-501', cat: 'women-imported',
       price: 2180000, compareAtPrice: 2500000, stock: 4, status: 'active',
       shortDescription: 'ست کامل گردنبند و گوشواره نقره ۹۲۵ در جعبه هدیه مخملی.',
       description:
@@ -210,7 +236,7 @@ async function main() {
       images: ['/api/uploads/sl-set.png', '/api/uploads/sl-necklace.png'],
     },
     {
-      name: 'شمش نقره ۵۰ گرمی عیار ۹۹۹', slug: 'silver-bar-50g', code: 'SL-BR-999-50', cat: 'silver-bar',
+      name: 'شمش نقره ۵۰ گرمی عیار ۹۹۹', slug: 'silver-bar-50g', code: 'SL-BR-999-50', cat: 'investment',
       price: 5900000, stock: 6, status: 'active',
       shortDescription: 'شمش نقره خالص ۹۹۹ با بسته‌بندی سیل و شماره سریال منحصربه‌فرد.',
       description:
@@ -224,7 +250,7 @@ async function main() {
       lowStockThreshold: 3,
     },
     {
-      name: 'انگشتر نقره مردانه نگین فیروزه', slug: 'firuzeh-men-ring', code: 'SL-R-140', cat: 'ring',
+      name: 'انگشتر نقره مردانه نگین فیروزه', slug: 'firuzeh-men-ring', code: 'SL-R-140', cat: 'men-imported',
       price: 1320000, stock: 2, status: 'active',
       shortDescription: 'انگشتر نقره ۹۲۵ مردانه با نگین فیروزه نیشابوری، دست‌ساز.',
       description:
@@ -238,7 +264,7 @@ async function main() {
       lowStockThreshold: 2,
     },
     {
-      name: 'دستبند نقره زنانه مدل ناز', slug: 'naz-silver-bracelet', code: 'SL-B-215', cat: 'bracelet',
+      name: 'دستبند نقره زنانه مدل ناز', slug: 'naz-silver-bracelet', code: 'SL-B-215', cat: 'women-imported',
       price: 690000, stock: 0, status: 'out_of_stock',
       shortDescription: 'دستبند نقره ۹۲۵ زنانه با پلاک قلب کوچک، ظریف و دخترانه.',
       description:
@@ -251,7 +277,7 @@ async function main() {
       images: ['/api/uploads/sl-bracelet.png', '/api/uploads/sl-ring.png'],
     },
     {
-      name: 'آویز نقره ستاره و ماه (پیش‌نمایش)', slug: 'star-moon-pendant', code: 'SL-N-470', cat: 'necklace',
+      name: 'آویز نقره ستاره و ماه (پیش‌نمایش)', slug: 'star-moon-pendant', code: 'SL-N-470', cat: 'women-imported',
       price: 610000, stock: 10, status: 'draft',
       shortDescription: 'آویز نقره ۹۲۵ طرح ستاره و ماه، به‌زودی برای پیش‌سفارش.',
       description:

@@ -14,7 +14,9 @@ export const GET = route(async () => {
   await requireAuth()
 
   const categories = await db.category.findMany({
-    orderBy: { name: 'asc' },
+    // Menu order = creation order (matches the bot's «🛍 محصولات» keyboard —
+    // owner-approved layout v2.2.8), NOT alphabetical.
+    orderBy: { createdAt: 'asc' },
     include: { _count: { select: { products: true } } },
   })
 

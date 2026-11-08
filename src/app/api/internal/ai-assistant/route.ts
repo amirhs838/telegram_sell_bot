@@ -118,8 +118,16 @@ if (process.env.NEXT_RUNTIME !== 'edge') {
 }
 
 export const POST = route(async (req: NextRequest) => {
+  // Internal key: prefer env, fall back to the Setting row the seed
+  // provisions (start.sh wipes .env on every sandbox boot — the DB copy is
+  // the durable one).
   const key = req.headers.get('x-internal-key')
-  if (!process.env.INTERNAL_API_KEY || key !== process.env.INTERNAL_API_KEY) {
+  let expected = (process.env.INTERNAL_API_KEY ?? '').trim()
+  if (!expected) {
+    expected =
+      (await db.setting.findUnique({ where: { key: 'internalApiKey' } }).catch(() => null))?.value?.trim() ?? ''
+  }
+  if (!expected || key !== expected) {
     return fail('unauthorized', 401)
   }
 

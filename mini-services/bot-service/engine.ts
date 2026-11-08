@@ -38,6 +38,7 @@ import {
   getCategory,
   getProduct,
   getStoreSettings,
+  listActiveDiscountedProducts,
   listActiveProductsByCategory,
   listCategories,
   searchActiveProducts,
@@ -299,16 +300,33 @@ function faqReply(): Reply {
   }
 }
 
+/**
+ * Products-menu keyboard — EXACT layout the owner approved (RTL pairing):
+ *   row 1: ⬅️ بازگشت (full width)
+ *   row 2: 👨 زیور مردانه وارداتی | 👩 زیور زنانه وارداتی   (first category on the RIGHT)
+ *   row 3: 💎 سرمایه‌گذاری | 🔥 آفرهای هفتگی
+ *   row 4: 🏠 منوی اصلی (full width)
+ * Generic rule: categories pair 2-per-row in creation order, first of each
+ * pair rendered on the RIGHT so Persian reads naturally. Odd leftover gets a
+ * full-width row. "آفرهای هفتگی" is smart — see categoryPageReply().
+ */
+function categoryKeyboardRows(cats: Array<{ id: string; name: string }>): InlineButton[][] {
+  const kb: InlineButton[][] = []
+  for (let i = 0; i < cats.length; i += 2) {
+    const pair = cats.slice(i, i + 2).map((c) => ({ text: c.name, callback_data: `cat:${c.id}` }))
+    kb.push(pair.length === 2 ? [pair[1], pair[0]] : [pair[0]])
+  }
+  return kb
+}
+
 async function categoriesReply(): Promise<Reply> {
   const cats = await listCategories()
+  const backRow: InlineButton[] = [{ text: '⬅️ بازگشت', callback_data: 'back:products' }]
   if (cats.length === 0) {
-    return { text: 'هنوز دسته‌ای ثبت نشده است.', keyboard: MAIN_MENU }
+    return { text: 'هنوز دسته‌ای ثبت نشده است.', keyboard: [backRow, MAIN_MENU] }
   }
-  const kb: InlineButton[][] = cats.map((c) => [
-    { text: c.name, callback_data: `cat:${c.id}` },
-  ])
-  kb.push(HOME_ROW)
-  return { text: '🛍 دسته‌بندی محصولات', keyboard: kb }
+  const kb: InlineButton[][] = [backRow, ...categoryKeyboardRows(cats), HOME_ROW]
+  return { text: '🛍 محصولات\nدستهٔ موردنظر را انتخاب کنید:', keyboard: kb }
 }
 
 /**
@@ -334,10 +352,7 @@ async function consultCategoriesReply(userText?: string): Promise<Reply> {
   if (cats.length === 0) {
     return { text, keyboard: MAIN_MENU }
   }
-  const kb: InlineButton[][] = cats.map((c) => [
-    { text: c.name, callback_data: `cat:${c.id}` },
-  ])
-  kb.push(HOME_ROW)
+  const kb: InlineButton[][] = [...categoryKeyboardRows(cats), HOME_ROW]
   return { text, keyboard: kb }
 }
 
@@ -346,7 +361,13 @@ async function categoryPageReply(catId: string, page: number): Promise<Reply> {
   if (!cat) {
     return { text: 'این دسته یافت نشد.', keyboard: MAIN_MENU }
   }
-  const { items, total } = await listActiveProductsByCategory(catId, page, PRODUCTS_PER_PAGE)
+  // 🔥 آفرهای هفتگی — smart category: ALWAYS lists live-discounted products
+  // (compareAtPrice > price) across the whole shop, never a manual assignment.
+  const listing =
+    cat.slug === 'weekly-offers'
+      ? listActiveDiscountedProducts(page, PRODUCTS_PER_PAGE)
+      : listActiveProductsByCategory(catId, page, PRODUCTS_PER_PAGE)
+  const { items, total } = await listing
   const backRow: InlineButton[] = [{ text: '⬅️ بازگشت', callback_data: 'back:products' }]
   if (items.length === 0) {
     return {
@@ -874,6 +895,16 @@ async function resolveInternalApiKey(): Promise<string | null> {
     const raw = await readFile(path.join(PROJECT_ROOT, '.env'), 'utf8')
     const m = raw.match(/^INTERNAL_API_KEY=(.*)$/m)
     cachedInternalKey = m ? m[1].trim().replace(/^["']|["']$/g, '') || null : null
+    if (cachedInternalKey) return cachedInternalKey
+  } catch {
+    // no .env — fall through to the DB copy
+  }
+  // Last resort: the seed provisions a durable copy in the Setting table
+  // (start.sh rewrites .env on every sandbox boot, so the DB row is the
+  // reboot-proof source of truth).
+  try {
+    const row = await db.setting.findUnique({ where: { key: 'internalApiKey' } })
+    cachedInternalKey = row?.value?.trim() || null
   } catch {
     cachedInternalKey = null
   }

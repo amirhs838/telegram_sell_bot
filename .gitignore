@@ -34,8 +34,10 @@ yarn-error.log*
 .env*
 !.env.example
 
-# local database (user data, password hashes, logs)
-db/custom.db
+# local database — COMMITTED on purpose: the sandbox backup (repo.tar) is
+# git-based, so tracking the SQLite file is the ONLY way catalog/orders/bot
+# settings survive sandbox reboots (they were being wiped on every restart).
+# -shm/-wal are transient SQLite sidecars — still ignored.
 db/custom.db-shm
 db/custom.db-wal
 

@@ -55,6 +55,29 @@ export async function listActiveProductsByCategory(categoryId: string, page: num
 }
 
 /**
+ * Active products with a LIVE discount (compareAtPrice set AND greater than the
+ * final price) — powers the «🔥 آفرهای هفتگی» smart category in the products
+ * menu. compareAtPrice is the pre-discount price; it is never shown as a
+ * standalone category assignment, so the list stays automatic.
+ */
+export async function listActiveDiscountedProducts(page: number, perPage = 5) {
+  const where = {
+    status: 'active' as const,
+    compareAtPrice: { gt: db.product.fields.price },
+  }
+  const [items, total] = await Promise.all([
+    db.product.findMany({
+      where,
+      orderBy: { updatedAt: 'desc' },
+      skip: (page - 1) * perPage,
+      take: perPage,
+    }),
+    db.product.count({ where }),
+  ])
+  return { items, total }
+}
+
+/**
  * Product with gallery images (primary first, then sortOrder) + silver specs.
  * NOTE: `price` is the seller-approved final price — NEVER recomputed from
  * silver rate × weight anywhere in the bot (pricing law).
