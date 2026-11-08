@@ -62,7 +62,7 @@ const SYSTEM_PROMPT = `تو نماینده فروش و مشاور فروشگاه
 - get_product → args: {"product_id":"شناسه محصول"}
 - check_stock → args: {"product_id":"شناسه محصول"}
 - compare_products → args: {"product_ids":["شناسه",...]} یا {"names":["نام محصول",...]} — حداکثر ۳ محصول
-- get_categories → args: {}
+- get_categories → args: {} — فهرست دسته‌های اصلی و زیر‌مجموعه‌ها؛ هر آیتم name و parent (نام دستهٔ والد، برای زیر‌مجموعه‌ها) و product_count دارد
 - get_silver_rate → args: {} — نرخ دستی ثبت‌شده نقره در فروشگاه
 - get_store_policies → args: {} — معرفی فروشگاه، سیاست‌ها و اطلاعات پرداخت کارت به کارت
 - get_customer_orders → args: {"telegram_user_id":"شناسه تلگرام کاربر","limit":1 تا 5}
@@ -276,10 +276,18 @@ async function executeTool(
 
     case 'get_categories': {
       const cats = await db.category.findMany({
-        select: { name: true, _count: { select: { products: { where: { status: 'active' } } } } },
-        orderBy: { name: 'asc' },
+        select: {
+          name: true,
+          parent: { select: { name: true } },
+          _count: { select: { products: { where: { status: 'active' } } } },
+        },
+        orderBy: [{ sortOrder: 'asc' }, { createdAt: 'asc' }],
       })
-      return cats.map((c) => ({ name: c.name, product_count: c._count.products }))
+      return cats.map((c) => ({
+        name: c.name,
+        parent: c.parent?.name ?? null,
+        product_count: c._count.products,
+      }))
     }
 
     case 'get_silver_rate': {
@@ -432,13 +440,29 @@ async function searchFallback(
 async function consultativeFallback(): Promise<{ reply: string; productIds: string[] }> {
   const cats = await db.category
     .findMany({
-      select: { name: true, _count: { select: { products: { where: { status: 'active' } } } } },
-      orderBy: { name: 'asc' },
+      select: {
+        id: true,
+        name: true,
+        parentId: true,
+        _count: { select: { products: { where: { status: 'active' } } } },
+      },
+      orderBy: [{ sortOrder: 'asc' }, { createdAt: 'asc' }],
     })
     .catch(() => [])
-  const catLines = cats.length > 0
-    ? cats.map((c) => `🔹 ${c.name} (${faMoney(c._count.products)} مدل)`)
-    : []
+  // Hierarchical listing: main categories with their subcategories indented
+  // beneath them, each with its real active-product counter.
+  const catLines: string[] = []
+  const roots = cats.filter((c) => !c.parentId)
+  for (const r of roots) {
+    catLines.push(`🔹 ${r.name} (${faMoney(r._count.products)} مدل)`)
+    for (const s of cats.filter((c) => c.parentId === r.id)) {
+      catLines.push(`　 ↳ ${s.name} (${faMoney(s._count.products)} مدل)`)
+    }
+  }
+  // Orphaned subs (parent deleted) still deserve a spot at top level.
+  for (const o of cats.filter((c) => c.parentId && !cats.some((p) => p.id === c.parentId))) {
+    catLines.push(`🔹 ${o.name} (${faMoney(o._count.products)} مدل)`)
+  }
   const lines = [
     'برای اینکه دقیق‌ترین پیشنهاد را به شما بدهم، لطفاً کوتاه راهنمایی‌ام کنید:',
     '',

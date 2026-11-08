@@ -100,12 +100,6 @@ async function main() {
     // .env mirror is best-effort — the Setting row is the source of truth
   }
 
-  const existing = await db.product.count()
-  if (existing > 0 && !process.argv.includes('--reset')) {
-    console.log('⏭️  already seeded — use --reset to reseed')
-    return
-  }
-
   // ── Settings (Silver Love branding + AI toggles) ────────────────────────
   const settings: Array<[string, string]> = [
     ['storeName', 'Silver Love'],
@@ -122,27 +116,92 @@ async function main() {
 
   // ── Silver categories (owner-approved menu v2.2.8) ──────────────────────
   // Menu order = creation order: زنانه | مردانه — آفرها | سرمایه‌گذاری.
+  // v2.2.9: هر دستهٔ اصلی می‌تواند زیر‌مجموعه داشته باشد (سلسله‌مراتب دو سطحی).
   const catData = [
-    { name: '👩 زیور زنانه وارداتی', slug: 'women-imported', description: 'زیورآلات وارداتی زنانه — گردنبند، انگشتر، گوشواره، دستبند و ست' },
-    { name: '👨 زیور مردانه وارداتی', slug: 'men-imported', description: 'زیورآلات وارداتی مردانه — دستبند، زنجیر و انگشتر' },
-    { name: '🔥 آفرهای هفتگی', slug: 'weekly-offers', description: 'تخفیف‌های ویژه این هفته — به‌صورت خودکار از محصولات تخفیف‌دار ساخته می‌شود' },
-    { name: '💎 سرمایه‌گذاری', slug: 'investment', description: 'شمش نقره و زیورآلات با ارزش سرمایه‌گذاری' },
+    { name: '👩 زیور زنانه وارداتی', slug: 'women-imported', sortOrder: 0, description: 'زیورآلات وارداتی زنانه — گردنبند، انگشتر، گوشواره، دستبند و ست' },
+    { name: '👨 زیور مردانه وارداتی', slug: 'men-imported', sortOrder: 1, description: 'زیورآلات وارداتی مردانه — دستبند، زنجیر و انگشتر' },
+    { name: '🔥 آفرهای هفتگی', slug: 'weekly-offers', sortOrder: 2, description: 'تخفیف‌های ویژه این هفته — به‌صورت خودکار از محصولات تخفیف‌دار ساخته می‌شود' },
+    { name: '💎 سرمایه‌گذاری', slug: 'investment', sortOrder: 3, description: 'شمش نقره و زیورآلات با ارزش سرمایه‌گذاری' },
   ]
   const cats: Record<string, string> = {}
   for (const c of catData) {
     const row = await db.category.upsert({
       where: { slug: c.slug },
-      create: c,
-      update: { name: c.name, description: c.description },
+      create: { ...c, parentId: null },
+      update: { name: c.name, description: c.description, sortOrder: c.sortOrder },
     })
     cats[c.slug] = row.id
   }
-  console.log(`✓ ${catData.length} silver categories`)
+
+  // ── Subcategories (زیر‌مجموعه‌ها) — nested under their parent root ──────
+  const subData: Array<{ name: string; slug: string; parent: string; sortOrder: number; description: string }> = [
+    { name: '💍 انگشتر زنانه', slug: 'women-rings', parent: 'women-imported', sortOrder: 0, description: 'انگشترهای نقره زنانه وارداتی' },
+    { name: '📿 گردنبند زنانه', slug: 'women-necklaces', parent: 'women-imported', sortOrder: 1, description: 'گردنبند و آویز نقره زنانه' },
+    { name: '🌸 گوشواره زنانه', slug: 'women-earrings', parent: 'women-imported', sortOrder: 2, description: 'گوشواره‌های نقره زنانه' },
+    { name: '⛓️ دستبند زنانه', slug: 'women-bracelets', parent: 'women-imported', sortOrder: 3, description: 'دستبندهای نقره زنانه' },
+    { name: '🎀 ست زنانه', slug: 'women-sets', parent: 'women-imported', sortOrder: 4, description: 'ست‌های کامل نقره زنانه' },
+    { name: '⛓️ دستبند مردانه', slug: 'men-bracelets', parent: 'men-imported', sortOrder: 0, description: 'دستبندهای نقره مردانه' },
+    { name: '🔗 زنجیر مردانه', slug: 'men-chains', parent: 'men-imported', sortOrder: 1, description: 'زنجیرهای نقره مردانه' },
+    { name: '💍 انگشتر مردانه', slug: 'men-rings', parent: 'men-imported', sortOrder: 2, description: 'انگشترهای نقره مردانه' },
+    { name: '🏤 شمش نقره', slug: 'silver-bars', parent: 'investment', sortOrder: 0, description: 'شمش‌های نقره با عیار تضمینی' },
+  ]
+  for (const s of subData) {
+    const row = await db.category.upsert({
+      where: { slug: s.slug },
+      create: {
+        name: s.name,
+        slug: s.slug,
+        description: s.description,
+        sortOrder: s.sortOrder,
+        parentId: cats[s.parent],
+      },
+      update: {
+        name: s.name,
+        description: s.description,
+        sortOrder: s.sortOrder,
+        parentId: cats[s.parent],
+      },
+    })
+    cats[s.slug] = row.id
+  }
+  console.log(`✓ ${catData.length} main categories + ${subData.length} subcategories`)
 
   // Remove legacy demo categories if an older database is reseeded.
   await db.category.deleteMany({
     where: { slug: { in: ['ring', 'bracelet', 'necklace', 'earring', 'gift-set', 'silver-bar'] } },
   })
+
+  // v2.2.9 migration for already-seeded databases: products that still point
+  // at a MAIN category move into their proper SUBcategory (owner-approved
+  // assignment). Only fires while the product still sits on the old root, so
+  // manual re-assignments made by the owner are never overwritten.
+  const productSubMoves: Array<{ slug: string; sub: string; oldRoot: string }> = [
+    { slug: 'nagarin-silver-ring', sub: 'women-rings', oldRoot: 'women-imported' },
+    { slug: 'baran-silver-earrings', sub: 'women-earrings', oldRoot: 'women-imported' },
+    { slug: 'delnagare-heart-necklace', sub: 'women-necklaces', oldRoot: 'women-imported' },
+    { slug: 'naz-silver-bracelet', sub: 'women-bracelets', oldRoot: 'women-imported' },
+    { slug: 'rosegold-gift-set', sub: 'women-sets', oldRoot: 'women-imported' },
+    { slug: 'star-moon-pendant', sub: 'women-necklaces', oldRoot: 'women-imported' },
+    { slug: 'aryo-silver-bracelet', sub: 'men-bracelets', oldRoot: 'men-imported' },
+    { slug: 'cuba-silver-chain', sub: 'men-chains', oldRoot: 'men-imported' },
+    { slug: 'firuzeh-men-ring', sub: 'men-rings', oldRoot: 'men-imported' },
+    { slug: 'silver-bar-50g', sub: 'silver-bars', oldRoot: 'investment' },
+  ]
+  for (const m of productSubMoves) {
+    const prod = await db.product.findUnique({
+      where: { slug: m.slug },
+      select: { id: true, categoryId: true },
+    })
+    if (prod && prod.categoryId && prod.categoryId === cats[m.oldRoot]) {
+      await db.product.update({ where: { id: prod.id }, data: { categoryId: cats[m.sub] } })
+    }
+  }
+
+  const existing = await db.product.count()
+  if (existing > 0 && !process.argv.includes('--reset')) {
+    console.log('⏭️  already seeded — categories/subcategories refreshed')
+    return
+  }
 
   // ── Silver products (price = FINAL seller price; never computed) ────────
   type Img = { url: string; isPrimary: boolean; sortOrder: number }
@@ -157,7 +216,7 @@ async function main() {
   }
   const products: P[] = [
     {
-      name: 'انگشتر نقره زنانه مدل نگارین', slug: 'nagarin-silver-ring', code: 'SL-R-101', cat: 'women-imported',
+      name: 'انگشتر نقره زنانه مدل نگارین', slug: 'nagarin-silver-ring', code: 'SL-R-101', cat: 'women-rings',
       price: 780000, compareAtPrice: 890000, stock: 8, status: 'active',
       shortDescription: 'انگشتر نقره ۹۲۵ با حکاکی دستی اسلیمی، ظریف و مناسب استفاده روزمره.',
       description:
@@ -170,7 +229,7 @@ async function main() {
       images: ['/api/uploads/sl-ring.png', '/api/uploads/sl-set.png'],
     },
     {
-      name: 'دستبند نقره مردانه مدل آریو', slug: 'aryo-silver-bracelet', code: 'SL-B-204', cat: 'men-imported',
+      name: 'دستبند نقره مردانه مدل آریو', slug: 'aryo-silver-bracelet', code: 'SL-B-204', cat: 'men-bracelets',
       price: 1650000, stock: 5, status: 'active',
       shortDescription: 'دستبند نقره ۹۲۵ مردانه با طرح زنجیر بزل، سنگین و باکلاس.',
       description:
@@ -183,7 +242,7 @@ async function main() {
       images: ['/api/uploads/sl-bracelet.png', '/api/uploads/sl-chain.png'],
     },
     {
-      name: 'گوشواره نقره زنانه مدل باران', slug: 'baran-silver-earrings', code: 'SL-E-330', cat: 'women-imported',
+      name: 'گوشواره نقره زنانه مدل باران', slug: 'baran-silver-earrings', code: 'SL-E-330', cat: 'women-earrings',
       price: 520000, stock: 12, status: 'active',
       shortDescription: 'گوشواره آویز نقره ۹۲۵ با طرح قطره، ظریف و سبک برای هر روز.',
       description:
@@ -196,7 +255,7 @@ async function main() {
       images: ['/api/uploads/sl-earrings.png', '/api/uploads/sl-set.png'],
     },
     {
-      name: 'گردنبند نقره دل‌نقره با زنجیر ظریف', slug: 'delnagare-heart-necklace', code: 'SL-N-412', cat: 'women-imported',
+      name: 'گردنبند نقره دل‌نقره با زنجیر ظریف', slug: 'delnagare-heart-necklace', code: 'SL-N-412', cat: 'women-necklaces',
       price: 940000, compareAtPrice: 1100000, stock: 7, status: 'active',
       shortDescription: 'گردنبند نقره ۹۲۵ با آویز قلب و زنجیر ظریف، محبوب‌ترین انتخاب هدیه.',
       description:
@@ -209,7 +268,7 @@ async function main() {
       images: ['/api/uploads/sl-necklace.png', '/api/uploads/sl-ring.png'],
     },
     {
-      name: 'زنجیر نقره مردانه مدل کوبا', slug: 'cuba-silver-chain', code: 'SL-N-455', cat: 'men-imported',
+      name: 'زنجیر نقره مردانه مدل کوبا', slug: 'cuba-silver-chain', code: 'SL-N-455', cat: 'men-chains',
       price: 2450000, stock: 3, status: 'active',
       shortDescription: 'زنجیر نقره ۹۲۵ مردانه طرح کوبا، ضخیم و سنگین با قفل محکم.',
       description:
@@ -223,7 +282,7 @@ async function main() {
       lowStockThreshold: 3,
     },
     {
-      name: 'ست نقره هدیه رزگلد دو پارچه', slug: 'rosegold-gift-set', code: 'SL-S-501', cat: 'women-imported',
+      name: 'ست نقره هدیه رزگلد دو پارچه', slug: 'rosegold-gift-set', code: 'SL-S-501', cat: 'women-sets',
       price: 2180000, compareAtPrice: 2500000, stock: 4, status: 'active',
       shortDescription: 'ست کامل گردنبند و گوشواره نقره ۹۲۵ در جعبه هدیه مخملی.',
       description:
@@ -236,7 +295,7 @@ async function main() {
       images: ['/api/uploads/sl-set.png', '/api/uploads/sl-necklace.png'],
     },
     {
-      name: 'شمش نقره ۵۰ گرمی عیار ۹۹۹', slug: 'silver-bar-50g', code: 'SL-BR-999-50', cat: 'investment',
+      name: 'شمش نقره ۵۰ گرمی عیار ۹۹۹', slug: 'silver-bar-50g', code: 'SL-BR-999-50', cat: 'silver-bars',
       price: 5900000, stock: 6, status: 'active',
       shortDescription: 'شمش نقره خالص ۹۹۹ با بسته‌بندی سیل و شماره سریال منحصربه‌فرد.',
       description:
@@ -250,7 +309,7 @@ async function main() {
       lowStockThreshold: 3,
     },
     {
-      name: 'انگشتر نقره مردانه نگین فیروزه', slug: 'firuzeh-men-ring', code: 'SL-R-140', cat: 'men-imported',
+      name: 'انگشتر نقره مردانه نگین فیروزه', slug: 'firuzeh-men-ring', code: 'SL-R-140', cat: 'men-rings',
       price: 1320000, stock: 2, status: 'active',
       shortDescription: 'انگشتر نقره ۹۲۵ مردانه با نگین فیروزه نیشابوری، دست‌ساز.',
       description:
@@ -264,7 +323,7 @@ async function main() {
       lowStockThreshold: 2,
     },
     {
-      name: 'دستبند نقره زنانه مدل ناز', slug: 'naz-silver-bracelet', code: 'SL-B-215', cat: 'women-imported',
+      name: 'دستبند نقره زنانه مدل ناز', slug: 'naz-silver-bracelet', code: 'SL-B-215', cat: 'women-bracelets',
       price: 690000, stock: 0, status: 'out_of_stock',
       shortDescription: 'دستبند نقره ۹۲۵ زنانه با پلاک قلب کوچک، ظریف و دخترانه.',
       description:
@@ -277,7 +336,7 @@ async function main() {
       images: ['/api/uploads/sl-bracelet.png', '/api/uploads/sl-ring.png'],
     },
     {
-      name: 'آویز نقره ستاره و ماه (پیش‌نمایش)', slug: 'star-moon-pendant', code: 'SL-N-470', cat: 'women-imported',
+      name: 'آویز نقره ستاره و ماه (پیش‌نمایش)', slug: 'star-moon-pendant', code: 'SL-N-470', cat: 'women-necklaces',
       price: 610000, stock: 10, status: 'draft',
       shortDescription: 'آویز نقره ۹۲۵ طرح ستاره و ماه، به‌زودی برای پیش‌سفارش.',
       description:

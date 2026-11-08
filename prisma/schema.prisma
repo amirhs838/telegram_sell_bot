@@ -41,9 +41,17 @@ model Category {
   name        String
   slug        String    @unique
   description String?
+  // Hierarchy: parentId = null → main (top-level) category shown in the bot's
+  // «🛍 محصولات» menu; set → subcategory nested under its parent.
+  parentId    String?
+  parent      Category?  @relation("CategoryTree", fields: [parentId], references: [id], onDelete: SetNull)
+  children    Category[] @relation("CategoryTree")
+  sortOrder   Int        @default(0) // manual menu order (then createdAt)
   createdAt   DateTime  @default(now())
   updatedAt   DateTime  @updatedAt
   products    Product[]
+
+  @@index([parentId])
 }
 
 model Product {

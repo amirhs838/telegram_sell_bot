@@ -1,6 +1,6 @@
 'use client'
 
-import { useEffect, useRef, useState, type ChangeEvent } from 'react'
+import { useEffect, useMemo, useRef, useState, type ChangeEvent } from 'react'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
@@ -17,7 +17,9 @@ import {
 import {
   Select,
   SelectContent,
+  SelectGroup,
   SelectItem,
+  SelectLabel,
   SelectTrigger,
   SelectValue,
 } from '@/components/ui/select'
@@ -166,6 +168,24 @@ export function ProductFormDialog({
   const [previewUrl, setPreviewUrl] = useState<string | null>(null)
   const fileRef = useRef<HTMLInputElement>(null)
   const isEdit = Boolean(product)
+
+  // Categories grouped by main category (root itself + its subcategories) so
+  // the picker mirrors the bot's hierarchy. Orphaned subs are appended at the
+  // end so they never disappear from the list.
+  const categoryGroups = useMemo(() => {
+    const roots = categories.filter(
+      (c) => !c.parentId || !categories.some((p) => p.id === c.parentId),
+    )
+    const groups = roots.map((root) => ({
+      root,
+      subs: categories.filter((c) => c.parentId === root.id),
+    }))
+    const orphans = categories.filter(
+      (c) => c.parentId && !categories.some((p) => p.id === c.parentId),
+    )
+    for (const o of orphans) groups.push({ root: o, subs: [] })
+    return groups
+  }, [categories])
 
   useEffect(() => {
     if (open) {
@@ -430,10 +450,18 @@ export function ProductFormDialog({
                 </SelectTrigger>
                 <SelectContent>
                   <SelectItem value="none">بدون دسته</SelectItem>
-                  {categories.map((c) => (
-                    <SelectItem key={c.id} value={c.id}>
-                      {c.name}
-                    </SelectItem>
+                  {/* Hierarchy: each main category groups itself + its
+                      subcategories (↳) — product can sit on either level. */}
+                  {categoryGroups.map((g) => (
+                    <SelectGroup key={g.root.id}>
+                      <SelectLabel>{g.root.name}</SelectLabel>
+                      <SelectItem value={g.root.id}>{g.root.name}</SelectItem>
+                      {g.subs.map((s) => (
+                        <SelectItem key={s.id} value={s.id}>
+                          ↳ {s.name}
+                        </SelectItem>
+                      ))}
+                    </SelectGroup>
                   ))}
                 </SelectContent>
               </Select>

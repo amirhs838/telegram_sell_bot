@@ -40,7 +40,8 @@ import {
   getStoreSettings,
   listActiveDiscountedProducts,
   listActiveProductsByCategory,
-  listCategories,
+  listChildCategories,
+  listRootCategories,
   searchActiveProducts,
 } from './store'
 import {
@@ -306,9 +307,11 @@ function faqReply(): Reply {
  *   row 2: 👨 زیور مردانه وارداتی | 👩 زیور زنانه وارداتی   (first category on the RIGHT)
  *   row 3: 💎 سرمایه‌گذاری | 🔥 آفرهای هفتگی
  *   row 4: 🏠 منوی اصلی (full width)
- * Generic rule: categories pair 2-per-row in creation order, first of each
- * pair rendered on the RIGHT so Persian reads naturally. Odd leftover gets a
- * full-width row. "آفرهای هفتگی" is smart — see categoryPageReply().
+ * Generic rule: categories pair 2-per-row in menu order (sortOrder, then
+ * creation order), first of each pair rendered on the RIGHT so Persian reads
+ * naturally. Odd leftover gets a full-width row. The same builder is reused
+ * for SUBcategory keyboards inside a category page. "آفرهای هفتگی" is smart —
+ * see categoryPageReply().
  */
 function categoryKeyboardRows(cats: Array<{ id: string; name: string }>): InlineButton[][] {
   const kb: InlineButton[][] = []
@@ -320,10 +323,11 @@ function categoryKeyboardRows(cats: Array<{ id: string; name: string }>): Inline
 }
 
 async function categoriesReply(): Promise<Reply> {
-  const cats = await listCategories()
+  // Top-level categories only — subcategories appear inside their parent's page.
+  const cats = await listRootCategories()
   const backRow: InlineButton[] = [{ text: '⬅️ بازگشت', callback_data: 'back:products' }]
   if (cats.length === 0) {
-    return { text: 'هنوز دسته‌ای ثبت نشده است.', keyboard: [backRow, MAIN_MENU] }
+    return { text: 'هنوز دسته‌ای ثبت نشده است.', keyboard: [backRow, ...MAIN_MENU] }
   }
   const kb: InlineButton[][] = [backRow, ...categoryKeyboardRows(cats), HOME_ROW]
   return { text: '🛍 محصولات\nدستهٔ موردنظر را انتخاب کنید:', keyboard: kb }
@@ -339,7 +343,7 @@ async function categoriesReply(): Promise<Reply> {
 const GIFT_INTENT_RE = /هدیه|کادو|برای\s?(مادر|پدر|همسر|خواهر|برادر|دوست|استاد|معلم|همکار)/i
 
 async function consultCategoriesReply(userText?: string): Promise<Reply> {
-  const cats = await listCategories().catch(() => [])
+  const cats = await listRootCategories().catch(() => [])
   const gift = userText ? GIFT_INTENT_RE.test(userText) : false
   const text = [
     'برای اینکه بهترین پیشنهاد را به شما بدهم، لطفاً کوتاه راهنمایی‌ام کنید 😊',
@@ -356,6 +360,16 @@ async function consultCategoriesReply(userText?: string): Promise<Reply> {
   return { text, keyboard: kb }
 }
 
+/**
+ * Category page — works for BOTH main and sub categories:
+ *  - subcategories of this category (if any) pair 2-per-row ABOVE the products
+ *    (same RTL pairing rule as the products menu — owner-approved layout);
+ *  - products assigned DIRECTLY to this category are listed below them;
+ *  - «بازگشت» returns to the parent category page for subs, or to the
+ *    products menu for main categories;
+ *  - 🔥 آفرهای هفتگی stays smart: it always lists live-discounted products
+ *    across the whole shop and never holds subcategories.
+ */
 async function categoryPageReply(catId: string, page: number): Promise<Reply> {
   const cat = await getCategory(catId)
   if (!cat) {
@@ -363,31 +377,40 @@ async function categoryPageReply(catId: string, page: number): Promise<Reply> {
   }
   // 🔥 آفرهای هفتگی — smart category: ALWAYS lists live-discounted products
   // (compareAtPrice > price) across the whole shop, never a manual assignment.
-  const listing =
-    cat.slug === 'weekly-offers'
-      ? listActiveDiscountedProducts(page, PRODUCTS_PER_PAGE)
-      : listActiveProductsByCategory(catId, page, PRODUCTS_PER_PAGE)
+  const isOffers = cat.slug === 'weekly-offers'
+  const subs = isOffers ? [] : await listChildCategories(catId)
+  const listing = isOffers
+    ? listActiveDiscountedProducts(page, PRODUCTS_PER_PAGE)
+    : listActiveProductsByCategory(catId, page, PRODUCTS_PER_PAGE)
   const { items, total } = await listing
-  const backRow: InlineButton[] = [{ text: '⬅️ بازگشت', callback_data: 'back:products' }]
-  if (items.length === 0) {
+  // Back target: the parent category page for subs, products menu for mains.
+  const backRow: InlineButton[] = [
+    { text: '⬅️ بازگشت', callback_data: cat.parentId ? `cat:${cat.parentId}` : 'back:products' },
+  ]
+  if (subs.length === 0 && items.length === 0) {
     return {
       text: `دسته: ${escapeHtml(cat.name)}\n\nمحصولی در این دسته موجود نیست.`,
       keyboard: [backRow, HOME_ROW],
     }
   }
   const totalPages = Math.max(1, Math.ceil(total / PRODUCTS_PER_PAGE))
-  const kb: InlineButton[][] = items.map((p) => [
-    { text: productButtonLabel(p), callback_data: `prod:${p.id}` },
-  ])
-  const navRow: InlineButton[] = []
-  if (page > 1) navRow.push({ text: '◀️', callback_data: `page:${catId}:${page - 1}` })
-  if (page < totalPages) navRow.push({ text: '▶️', callback_data: `page:${catId}:${page + 1}` })
-  if (navRow.length > 0) kb.push(navRow)
-  kb.push(backRow, HOME_ROW)
-  return {
-    text: `دسته: ${escapeHtml(cat.name)}\n\nصفحه ${formatNumber(page)} از ${formatNumber(totalPages)}`,
-    keyboard: kb,
+  const kb: InlineButton[][] = []
+  const textParts: string[] = [`دسته: ${escapeHtml(cat.name)}`]
+  if (subs.length > 0) {
+    textParts.push('زیر‌مجموعهٔ موردنظر را انتخاب کنید:')
+    kb.push(...categoryKeyboardRows(subs))
   }
+  if (items.length > 0) {
+    if (subs.length > 0) textParts.push('محصولات این دسته:')
+    textParts.push(`صفحه ${formatNumber(page)} از ${formatNumber(totalPages)}`)
+    kb.push(...items.map((p) => [{ text: productButtonLabel(p), callback_data: `prod:${p.id}` }]))
+    const navRow: InlineButton[] = []
+    if (page > 1) navRow.push({ text: '◀️', callback_data: `page:${catId}:${page - 1}` })
+    if (page < totalPages) navRow.push({ text: '▶️', callback_data: `page:${catId}:${page + 1}` })
+    if (navRow.length > 0) kb.push(navRow)
+  }
+  kb.push(backRow, HOME_ROW)
+  return { text: textParts.join('\n\n'), keyboard: kb }
 }
 
 // ─── Product cards ───────────────────────────────────────────────────────────
@@ -442,7 +465,10 @@ function productCardKeyboard(p: ProductFull, includeMore: boolean): InlineButton
   if (includeMore && p.images.length > 1) {
     kb.push([{ text: '📸 تصاویر بیشتر', callback_data: `moreimgs:${p.id}` }])
   }
-  kb.push([{ text: '⬅️ بازگشت', callback_data: 'back:products' }])
+  // Back returns to the product's OWN category page (sub or main) so browsing
+  // flows stay in place; products without a category fall back to the menu.
+  const backCb = p.categoryId ? `cat:${p.categoryId}` : 'back:products'
+  kb.push([{ text: '⬅️ بازگشت', callback_data: backCb }])
   return kb
 }
 

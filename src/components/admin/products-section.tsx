@@ -1,6 +1,6 @@
 'use client'
 
-import { useCallback, useEffect, useState } from 'react'
+import { useCallback, useEffect, useMemo, useState } from 'react'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { Badge } from '@/components/ui/badge'
@@ -16,7 +16,9 @@ import {
 import {
   Select,
   SelectContent,
+  SelectGroup,
   SelectItem,
+  SelectLabel,
   SelectTrigger,
   SelectValue,
 } from '@/components/ui/select'
@@ -134,6 +136,38 @@ export function ProductsSection() {
         /* filter list is non-critical */
       })
   }, [])
+
+  // Categories grouped by main category (root + its subs) — mirrors the bot.
+  const categoryGroups = useMemo(() => {
+    const roots = categories.filter(
+      (c) => !c.parentId || !categories.some((p) => p.id === c.parentId),
+    )
+    const groups = roots.map((root) => ({
+      root,
+      subs: categories.filter((c) => c.parentId === root.id),
+    }))
+    const orphans = categories.filter(
+      (c) => c.parentId && !categories.some((p) => p.id === c.parentId),
+    )
+    for (const o of orphans) groups.push({ root: o, subs: [] })
+    return groups
+  }, [categories])
+
+  /** «والد ← » prefix for the products table (hidden on small screens). */
+  const categoryParentPrefix = useCallback(
+    (id: string) => {
+      const c = categories.find((x) => x.id === id)
+      if (!c?.parentId) return ''
+      const parent = categories.find((x) => x.id === c.parentId)
+      return parent ? `${parent.name} ← ` : ''
+    },
+    [categories],
+  )
+
+  const categoryName = useCallback(
+    (id: string) => categories.find((x) => x.id === id)?.name ?? '',
+    [categories],
+  )
 
   function resetToFirst() {
     setPage(1)
@@ -258,10 +292,17 @@ export function ProductsSection() {
           </SelectTrigger>
           <SelectContent>
             <SelectItem value="all">همه دسته‌ها</SelectItem>
-            {categories.map((c) => (
-              <SelectItem key={c.id} value={c.id}>
-                {c.name}
-              </SelectItem>
+            {/* Hierarchy: main categories with their subcategories (↳) nested */}
+            {categoryGroups.map((g) => (
+              <SelectGroup key={g.root.id}>
+                <SelectLabel>{g.root.name}</SelectLabel>
+                <SelectItem value={g.root.id}>{g.root.name}</SelectItem>
+                {g.subs.map((s) => (
+                  <SelectItem key={s.id} value={s.id}>
+                    ↳ {s.name}
+                  </SelectItem>
+                ))}
+              </SelectGroup>
             ))}
           </SelectContent>
         </Select>
@@ -354,7 +395,15 @@ export function ProductsSection() {
                     </TableCell>
                     <TableCell>
                       {p.category ? (
-                        <Badge variant="secondary">{p.category.name}</Badge>
+                        <Badge variant="secondary">
+                          {/* full «والد ← زیر‌مجموعه» on wide screens, sub-only on mobile */}
+                          {categoryParentPrefix(p.category.id) && (
+                            <span className="hidden lg:inline">
+                              {categoryParentPrefix(p.category.id)}
+                            </span>
+                          )}
+                          {categoryName(p.category.id)}
+                        </Badge>
                       ) : (
                         <span className="text-xs text-muted-foreground">—</span>
                       )}

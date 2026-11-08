@@ -23,7 +23,10 @@ export type Category = {
   name: string
   slug: string
   description: string | null
+  parentId: string | null
+  sortOrder: number
   productCount: number
+  childCount: number
   createdAt: string
 }
 

@@ -30,7 +30,23 @@ export async function getStoreSettings(): Promise<StoreSettings> {
 }
 
 export async function listCategories() {
-  return db.category.findMany({ orderBy: { createdAt: 'asc' } })
+  return db.category.findMany({ orderBy: [{ sortOrder: 'asc' }, { createdAt: 'asc' }] })
+}
+
+/** Main (top-level) categories — the ones shown in the «🛍 محصولات» menu. */
+export async function listRootCategories() {
+  return db.category.findMany({
+    where: { parentId: null },
+    orderBy: [{ sortOrder: 'asc' }, { createdAt: 'asc' }],
+  })
+}
+
+/** Subcategories nested directly under the given parent (menu order). */
+export async function listChildCategories(parentId: string) {
+  return db.category.findMany({
+    where: { parentId },
+    orderBy: [{ sortOrder: 'asc' }, { createdAt: 'asc' }],
+  })
 }
 
 export async function getCategory(id: string) {
