@@ -59,8 +59,9 @@ local-*
 *.log
 dev.log
 dev.out.log
-test
-prompt
+# root-level scratch folders only — a bare "test" swallowed src/app/api/bale/test/
+/test
+/prompt
 
 server.log
 # Skills directory
