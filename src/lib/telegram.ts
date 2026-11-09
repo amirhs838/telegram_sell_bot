@@ -9,12 +9,20 @@ import {
   hashContent,
   type InlineButton,
   type RenderProduct,
+  type PostPlatform,
 } from '@/lib/telegram-render'
 import {
   getSettings,
   getTelegramConfig,
   resetTelegramConfigCache,
 } from '@/lib/settings'
+import { getBaleConfig } from '@/lib/settings'
+import {
+  baleRequest,
+  callBaleApiForm,
+  isBaleMockMode,
+  sendBaleSellerNotification,
+} from '@/lib/bale'
 
 // ─── Configuration ───────────────────────────────────────────────────────────
 
@@ -71,7 +79,17 @@ export class TelegramApiError extends Error {
 
 type TgResponse<T> = { ok: boolean; result?: T; description?: string }
 
+/**
+ * Dual-platform routing: any chat_id carrying the `bale:` prefix goes to the
+ * Bale Bot API (prefix stripped, text converted, parse_mode dropped). This is
+ * the single choke point — every sender/editer above inherits it, so channel
+ * posts and notifications can address either messenger transparently.
+ */
 async function tgRequest<T>(method: string, payload: unknown): Promise<T> {
+  const chatId = String((payload as { chat_id?: unknown } | null)?.chat_id ?? '')
+  if (chatId.startsWith('bale:')) {
+    return baleRequest<T>(method, payload)
+  }
   const token = await getBotToken()
   if (!token) throw new TelegramApiError('توکن ربات تنظیم نشده است', method)
   let res: Response
@@ -108,6 +126,10 @@ export async function callTelegramApiForm<T = unknown>(
   method: string,
   form: FormData,
 ): Promise<T> {
+  const chatId = String(form.get('chat_id') ?? '')
+  if (chatId.startsWith('bale:')) {
+    return callBaleApiForm<T>(method, form)
+  }
   const token = await getBotToken()
   if (!token) throw new TelegramApiError('توکن ربات تنظیم نشده است', method)
   let res: Response
@@ -318,15 +340,23 @@ async function mockCall(
   payload: Record<string, unknown>,
 ): Promise<{ message_id?: number }> {
   const text = String(payload['text'] ?? payload['caption'] ?? '')
+  const bale = chatId.startsWith('bale:')
   await logEvent(
-    'telegram_out',
-    `[حالت شبیه‌سازی] ${method} → ${chatId}`,
+    bale ? 'bale_out' : 'telegram_out',
+    bale
+      ? `[حالت شبیه‌سازی بله] ${method} → ${chatId.replace(/^bale:/, '')}`
+      : `[حالت شبیه‌سازی] ${method} → ${chatId}`,
     { method, chatId, preview: text.slice(0, 600), payloadKeys: Object.keys(payload) },
   )
   if (method === 'sendMessage' || method === 'sendPhoto') {
     return { message_id: mockMessageId() }
   }
   return {}
+}
+
+/** Mock check per routed platform (bale-prefixed ids consult the Bale config). */
+async function isMockForChat(chatId: string): Promise<boolean> {
+  return chatId.startsWith('bale:') ? isBaleMockMode() : isMockMode()
 }
 
 // ─── Public helpers ──────────────────────────────────────────────────────────
@@ -361,16 +391,20 @@ export async function sendMessage(
     parse_mode: 'HTML',
     ...(keyboard?.length ? { reply_markup: { inline_keyboard: keyboard } } : {}),
   }
-  if (await isMockMode()) {
+  if (await isMockForChat(chatId)) {
     const r = await mockCall('sendMessage', chatId, payload)
     return { messageId: r.message_id ?? null }
   }
   const result = await tgRequest<{ message_id: number }>('sendMessage', payload)
-  await logEvent('telegram_out', `پیام ارسال شد به ${chatId}`, {
-    method: 'sendMessage',
-    chatId,
-    preview: text.slice(0, 300),
-  })
+  await logEvent(
+    chatId.startsWith('bale:') ? 'bale_out' : 'telegram_out',
+    `پیام ارسال شد به ${chatId}`,
+    {
+      method: 'sendMessage',
+      chatId,
+      preview: text.slice(0, 300),
+    },
+  )
   return { messageId: result.message_id }
 }
 
@@ -387,16 +421,20 @@ export async function sendPhoto(
     parse_mode: 'HTML',
     ...(keyboard?.length ? { reply_markup: { inline_keyboard: keyboard } } : {}),
   }
-  if (await isMockMode()) {
+  if (await isMockForChat(chatId)) {
     const r = await mockCall('sendPhoto', chatId, payload)
     return { messageId: r.message_id ?? null }
   }
   const result = await tgRequest<{ message_id: number }>('sendPhoto', payload)
-  await logEvent('telegram_out', `پست تصویری ارسال شد به ${chatId}`, {
-    method: 'sendPhoto',
-    chatId,
-    preview: caption.slice(0, 300),
-  })
+  await logEvent(
+    chatId.startsWith('bale:') ? 'bale_out' : 'telegram_out',
+    `پست تصویری ارسال شد به ${chatId}`,
+    {
+      method: 'sendPhoto',
+      chatId,
+      preview: caption.slice(0, 300),
+    },
+  )
   return { messageId: result.message_id }
 }
 
@@ -413,7 +451,7 @@ export async function sendPhotoBuffer(
   keyboard?: InlineButton[][],
 ): Promise<{ messageId: number | null }> {
   const payload = { caption, photo: `[file:${filename}]` }
-  if (await isMockMode()) {
+  if (await isMockForChat(chatId)) {
     const r = await mockCall('sendPhoto', chatId, {
       ...payload,
       reply_markup: keyboard?.length ? { inline_keyboard: keyboard } : undefined,
@@ -440,20 +478,28 @@ export async function sendPhotoBuffer(
   return { messageId: result.message_id }
 }
 
-/** Seller notification (order alerts etc.). Best-effort — never throws. */
+/** Seller notification (order alerts etc.) — sent to EVERY connected platform. */
 export async function sendSellerNotification(text: string, keyboard?: InlineButton[][]) {
   const chatId = await getAdminChatId()
-  if (!chatId) {
-    await logEvent('telegram_warn', 'ارسال اعلان به فروشنده ناموفق بود: شناسه چت مدیر تنظیم نشده است — از بخش «تلگرام و ربات» پنل تنظیم کنید', { text: text.slice(0, 200) }, 'warn')
-    return { ok: false }
+  let any = false
+  if (chatId) {
+    try {
+      await sendMessage(chatId, text, keyboard)
+      any = true
+    } catch (e) {
+      await logEvent('telegram_error', `خطای ارسال اعلان به فروشنده: ${(e as Error).message}`, undefined, 'error')
+    }
+  } else {
+    await logEvent('telegram_warn', 'ارسال اعلان به فروشنده ناموفق بود: شناسه چت مدیر تلگرام تنظیم نشده است — از بخش «تلگرام و ربات» پنل تنظیم کنید', { text: text.slice(0, 200) }, 'warn')
   }
+  // Bale mirror — best-effort, only when a bale admin chat is configured
   try {
-    await sendMessage(chatId, text, keyboard)
-    return { ok: true }
-  } catch (e) {
-    await logEvent('telegram_error', `خطای ارسال اعلان به فروشنده: ${(e as Error).message}`, undefined, 'error')
-    return { ok: false }
+    const r = await sendBaleSellerNotification(text, keyboard)
+    if (r.ok) any = true
+  } catch {
+    // best-effort
   }
+  return { ok: any }
 }
 
 /** Direct message to a customer. Best-effort (user may have never started the bot). */
@@ -503,54 +549,90 @@ async function resolveProductImage(url?: string | null): Promise<ResolvedProduct
 }
 
 async function publishOrSync(product: TgProduct, mode: 'publish' | 'sync') {
-  const channelId = await getChannelId()
-  if (!channelId) {
-    throw new TelegramApiError('شناسه کانال تنظیم نشده است — از بخش «تلگرام و ربات» پنل تنظیم کنید', 'sendMessage')
-  }
+  // Dual-channel publish: every CONFIGURED channel gets the post — Telegram
+  // first (its result keeps the legacy return shape), Bale second with a
+  // `bale:`-prefixed mapping id so edits/unpublish route correctly.
   const settings = await getSettings()
-  const botUsername = await getBotUsername()
-  const { text, keyboard } = renderProductPost(product, botUsername, settings.currency === 'IRT' ? 'تومان' : settings.currency)
-  const contentHash = hashContent(text, keyboard)
+  const currency = settings.currency === 'IRT' ? 'تومان' : settings.currency
+  const tgCfg = await getTelegramConfig()
+  const tgUsername = await getBotUsername()
+  const baleCfg = await getBaleConfig()
 
-  const existing = await db.telegramProduct.findUnique({
-    where: { productId_channelId: { productId: product.id, channelId } },
-  })
-
-  // Never create duplicate posts unnecessarily.
-  if (existing && existing.lastContentHash === contentHash) {
-    return { messageId: existing.messageId, channelId, unchanged: true }
+  type Target = { platform: PostPlatform; channelId: string; botUsername: string }
+  const targets: Target[] = []
+  if (tgCfg.channelId) {
+    targets.push({ platform: 'telegram', channelId: tgCfg.channelId, botUsername: tgUsername })
+  }
+  if (baleCfg.channelId) {
+    targets.push({
+      platform: 'bale',
+      channelId: `bale:${baleCfg.channelId}`,
+      botUsername: baleCfg.botUsername || 'my_store_bot',
+    })
+  }
+  if (targets.length === 0) {
+    throw new TelegramApiError('شناسه کانال تنظیم نشده است — از بخش «تلگرام و ربات» پنل تنظیم کنید', 'sendMessage')
   }
 
   const image = await resolveProductImage(product.imageUrl)
+  let first: { messageId: number; channelId: string; unchanged: boolean } | null = null
 
-  let messageId: number
-  if (existing && mode === 'sync') {
-    messageId = await editChannelPost(channelId, existing.messageId, text, keyboard, Boolean(image), product)
-  } else {
-    if (image?.kind === 'url') {
-      const r = await sendPhoto(channelId, image.url, text, keyboard)
-      messageId = r.messageId ?? mockMessageId()
-    } else if (image?.kind === 'buffer') {
-      const r = await sendPhotoBuffer(channelId, image.buffer, image.filename, text, keyboard)
-      messageId = r.messageId ?? mockMessageId()
-    } else {
-      // No usable image → text-only post (never crashes).
-      const r = await sendMessage(channelId, text, keyboard)
-      messageId = r.messageId ?? mockMessageId()
-    }
-    await logEvent('telegram.publish', `محصول «${product.name}» در کانال منتشر شد`, {
-      productId: product.id,
-      channelId,
-      messageId,
+  for (const t of targets) {
+    const { text, keyboard } = renderProductPost(product, t.botUsername, currency, t.platform)
+    const contentHash = hashContent(text, keyboard)
+    const existing = await db.telegramProduct.findUnique({
+      where: { productId_channelId: { productId: product.id, channelId: t.channelId } },
     })
+
+    // Never create duplicate posts unnecessarily.
+    if (existing && existing.lastContentHash === contentHash) {
+      first ??= { messageId: existing.messageId, channelId: t.channelId, unchanged: true }
+      continue
+    }
+
+    let messageId: number
+    if (existing && mode === 'sync') {
+      messageId = await editChannelPost(t.channelId, existing.messageId, text, keyboard, Boolean(image), product)
+    } else {
+      if (image?.kind === 'url') {
+        const r = await sendPhoto(t.channelId, image.url, text, keyboard)
+        messageId = r.messageId ?? mockMessageId()
+      } else if (image?.kind === 'buffer') {
+        const r = await sendPhotoBuffer(t.channelId, image.buffer, image.filename, text, keyboard)
+        messageId = r.messageId ?? mockMessageId()
+      } else {
+        // No usable image → text-only post (never crashes).
+        const r = await sendMessage(t.channelId, text, keyboard)
+        messageId = r.messageId ?? mockMessageId()
+      }
+      await logEvent(
+        t.platform === 'bale' ? 'bale.publish' : 'telegram.publish',
+        `محصول «${product.name}» در ${t.platform === 'bale' ? 'کانال بله' : 'کانال'} منتشر شد`,
+        {
+          productId: product.id,
+          channelId: t.channelId,
+          messageId,
+        },
+      )
+    }
+
+    await db.telegramProduct.upsert({
+      where: { productId_channelId: { productId: product.id, channelId: t.channelId } },
+      create: { productId: product.id, channelId: t.channelId, messageId, lastContentHash: contentHash },
+      update: { messageId, lastContentHash: contentHash, updatedAt: new Date() },
+    })
+    first ??= { messageId, channelId: t.channelId, unchanged: false }
   }
 
-  await db.telegramProduct.upsert({
-    where: { productId_channelId: { productId: product.id, channelId } },
-    create: { productId: product.id, channelId, messageId, lastContentHash: contentHash },
-    update: { messageId, lastContentHash: contentHash, updatedAt: new Date() },
-  })
-  return { messageId, channelId, unchanged: false }
+  if (!first) {
+    // every target unchanged — report the primary mapping as-is
+    const primary = targets[0]
+    const row = await db.telegramProduct.findUnique({
+      where: { productId_channelId: { productId: product.id, channelId: primary.channelId } },
+    })
+    first = { messageId: row?.messageId ?? 0, channelId: primary.channelId, unchanged: true }
+  }
+  return first
 }
 
 /** Publish = create a fresh channel post (or update if one already exists). */
@@ -578,28 +660,31 @@ export async function syncProductPost(product: TgProduct): Promise<{ synced: boo
   }
 }
 
-/** Remove the channel post + mapping. Best-effort. */
+/** Remove EVERY platform's channel post + mappings. Best-effort. */
 export async function unpublishProduct(product: TgProduct) {
-  const channelId = await getChannelId()
-  const mapping = await db.telegramProduct.findUnique({
-    where: { productId_channelId: { productId: product.id, channelId: channelId || '-' } },
-  }).catch(() => null)
-  const m =
-    mapping ??
-    (await db.telegramProduct.findFirst({ where: { productId: product.id } }))
-  if (m) {
-    if (!(await isMockMode())) {
+  const mappings = await db.telegramProduct.findMany({ where: { productId: product.id } })
+  for (const m of mappings) {
+    if (!(await isMockForChat(m.channelId))) {
       await tgRequest('deleteMessage', { chat_id: m.channelId, message_id: m.messageId }).catch(
         async (e) => {
-          await logEvent('telegram_error', `حذف پست کانال ناموفق بود: ${(e as Error).message}`, { productId: product.id }, 'warn')
+          await logEvent(
+            m.channelId.startsWith('bale:') ? 'bale_error' : 'telegram_error',
+            `حذف پست کانال ناموفق بود: ${(e as Error).message}`,
+            { productId: product.id },
+            'warn',
+          )
         },
       )
     } else {
-      await logEvent('telegram_out', `[حالت شبیه‌سازی] deleteMessage → ${m.channelId}`, {
-        method: 'deleteMessage',
-        chatId: m.channelId,
-        messageId: m.messageId,
-      })
+      await logEvent(
+        m.channelId.startsWith('bale:') ? 'bale_out' : 'telegram_out',
+        `[حالت شبیه‌سازی] deleteMessage → ${m.channelId}`,
+        {
+          method: 'deleteMessage',
+          chatId: m.channelId,
+          messageId: m.messageId,
+        },
+      )
     }
     await db.telegramProduct.delete({ where: { id: m.id } }).catch(() => undefined)
   }

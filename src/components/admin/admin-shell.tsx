@@ -32,6 +32,7 @@ import {
   CircleDollarSign,
   Users,
   Send,
+  MessageCircle,
   Sparkles,
   Settings,
   Menu,
@@ -59,6 +60,7 @@ export const SECTION_KEYS = [
   'silver-rate',
   'customers',
   'telegram',
+  'bale',
   'ai',
   'settings',
 ] as const
@@ -74,6 +76,7 @@ export const SECTION_TITLES: Record<SectionKey, string> = {
   'silver-rate': 'نرخ نقره',
   customers: 'مشتریان',
   telegram: 'تلگرام و ربات',
+  bale: 'بله و ربات',
   ai: 'ابزارهای هوش مصنوعی',
   settings: 'تنظیمات',
 }
@@ -87,6 +90,7 @@ const NAV_ICONS: Record<SectionKey, LucideIcon> = {
   'silver-rate': CircleDollarSign,
   customers: Users,
   telegram: Send,
+  bale: MessageCircle,
   ai: Sparkles,
   settings: Settings,
 }

@@ -38,14 +38,25 @@ export function formatWeightFa(grams: number): string {
   return `${grams.toLocaleString('fa-IR', { maximumFractionDigits: 2 })} گرم`
 }
 
+export type PostPlatform = 'telegram' | 'bale'
+
+/** Messenger-specific deep-link base (bale links live at ble.ir). */
+function deepLinkBase(platform: PostPlatform): string {
+  return platform === 'bale' ? 'https://ble.ir' : 'https://t.me'
+}
+
 /** Deep link that connects the channel post to the bot order flow. */
-export function productDeepLink(botUsername: string, productId: string): string {
-  return `https://t.me/${botUsername}?start=product_${productId}`
+export function productDeepLink(
+  botUsername: string,
+  productId: string,
+  platform: PostPlatform = 'telegram',
+): string {
+  return `${deepLinkBase(platform)}/${botUsername}?start=product_${productId}`
 }
 
 /** Deep link that opens the AI shopping-consultant entry point in the bot. */
-export function aiConsultDeepLink(botUsername: string): string {
-  return `https://t.me/${botUsername}?start=ai_consult`
+export function aiConsultDeepLink(botUsername: string, platform: PostPlatform = 'telegram'): string {
+  return `${deepLinkBase(platform)}/${botUsername}?start=ai_consult`
 }
 
 const DIVIDER = '━━━━━━━━━━━━━━'
@@ -62,6 +73,7 @@ export function renderProductPost(
   product: RenderProduct,
   botUsername: string,
   currency = 'تومان',
+  platform: PostPlatform = 'telegram',
 ): PostContent {
   const lines: string[] = []
   lines.push(`✨ <b>SILVER LOVE</b> | انتخابی خاص`)
@@ -113,7 +125,7 @@ export function renderProductPost(
     keyboard.push([
       {
         text: '🛒 مشاهده و خرید',
-        url: productDeepLink(botUsername, product.id),
+        url: productDeepLink(botUsername, product.id, platform),
       },
     ])
   }
@@ -121,7 +133,7 @@ export function renderProductPost(
     keyboard.push([
       {
         text: '💬 مشاوره هوشمند',
-        url: aiConsultDeepLink(botUsername),
+        url: aiConsultDeepLink(botUsername, platform),
       },
     ])
   }
@@ -163,6 +175,7 @@ export function renderSilverRatePost(
   botUsername: string,
   storeName = 'SILVER LOVE',
   timeZone = 'Asia/Tehran',
+  platform: PostPlatform = 'telegram',
 ): PostContent {
   const { date, time } = rateDateTimeFa(rate.createdAt, timeZone)
   const unit = rate.unit || 'تومان / گرم'
@@ -192,7 +205,7 @@ export function renderSilverRatePost(
 
   const keyboard: InlineButton[][] = []
   if (botUsername) {
-    keyboard.push([{ text: '🤖 ورود به ربات فروشگاه', url: `https://t.me/${botUsername}` }])
+    keyboard.push([{ text: '🤖 ورود به ربات فروشگاه', url: `${deepLinkBase(platform)}/${botUsername}` }])
   }
   return { text: lines.join('\n'), keyboard }
 }

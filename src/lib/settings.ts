@@ -160,3 +160,98 @@ export async function deleteTelegramConfig(): Promise<void> {
   })
   resetTelegramConfigCache()
 }
+
+// ---------------------------------------------------------------------------
+// Bale runtime config — same shape/priority rules as Telegram. The Bale Bot
+// API is a Telegram clone at tapi.bale.ai; the connection keys are mirrored.
+// ---------------------------------------------------------------------------
+
+export type BaleRuntimeConfig = {
+  botToken: string
+  channelId: string
+  adminChatId: string
+  botUsername: string
+  /** true when the token comes from the panel (DB) rather than env */
+  dbConfigured: boolean
+}
+
+export const BALE_SETTING_KEYS = [
+  'baleBotToken',
+  'baleChannelId',
+  'baleAdminChatId',
+  'baleBotUsername',
+] as const
+
+let baleCache: { at: number; value: BaleRuntimeConfig } | null = null
+
+function envBaleConfig(): BaleRuntimeConfig {
+  return {
+    botToken: (process.env.BALE_BOT_TOKEN ?? '').trim(),
+    channelId: (process.env.BALE_CHANNEL_ID ?? '').trim(),
+    adminChatId: (process.env.BALE_ADMIN_CHAT_ID ?? '').trim(),
+    botUsername: (process.env.BALE_BOT_USERNAME ?? '').trim(),
+    dbConfigured: false,
+  }
+}
+
+export async function getBaleConfig(): Promise<BaleRuntimeConfig> {
+  if (baleCache && Date.now() - baleCache.at < 5_000) return baleCache.value
+  const env = envBaleConfig()
+  let value = env
+  try {
+    const rows = await db.setting.findMany({
+      where: { key: { in: [...BALE_SETTING_KEYS] } },
+    })
+    const map = Object.fromEntries(rows.map((r) => [r.key, r.value]))
+    const dbToken = (map['baleBotToken'] ?? '').trim()
+    value = {
+      botToken: dbToken || env.botToken,
+      channelId: (map['baleChannelId'] ?? '').trim() || env.channelId,
+      adminChatId: (map['baleAdminChatId'] ?? '').trim() || env.adminChatId,
+      botUsername: (map['baleBotUsername'] ?? '').trim() || env.botUsername,
+      dbConfigured: Boolean(dbToken),
+    }
+  } catch {
+    // DB unavailable → fall back to env silently
+  }
+  baleCache = { at: Date.now(), value }
+  return value
+}
+
+/** Force the next getBaleConfig() to re-read from the DB. */
+export function resetBaleConfigCache() {
+  baleCache = null
+}
+
+/** Runtime field name → Setting table key */
+const BALE_FIELD_TO_KEY: Record<string, (typeof BALE_SETTING_KEYS)[number]> = {
+  botToken: 'baleBotToken',
+  channelId: 'baleChannelId',
+  adminChatId: 'baleAdminChatId',
+  botUsername: 'baleBotUsername',
+}
+
+export async function updateBaleConfig(
+  patch: Partial<Omit<BaleRuntimeConfig, 'dbConfigured'>>,
+): Promise<BaleRuntimeConfig> {
+  const entries = Object.entries(patch)
+    .filter(([k, v]) => v !== undefined && k in BALE_FIELD_TO_KEY)
+    .map(([k, v]) => [BALE_FIELD_TO_KEY[k], String(v).trim()] as const)
+  for (const [key, value] of entries) {
+    await db.setting.upsert({
+      where: { key },
+      create: { key, value },
+      update: { value },
+    })
+  }
+  resetBaleConfigCache()
+  return getBaleConfig()
+}
+
+/** Remove panel-stored bale config (falls back to env / mock mode). */
+export async function deleteBaleConfig(): Promise<void> {
+  await db.setting.deleteMany({
+    where: { key: { in: [...BALE_SETTING_KEYS] } },
+  })
+  resetBaleConfigCache()
+}

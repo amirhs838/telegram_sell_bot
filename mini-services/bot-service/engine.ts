@@ -50,9 +50,9 @@ import {
   downloadFile,
   getFileInfo,
   loadConfig,
+  type Platform,
   type PhotoSource,
-  send,
-  sendPhoto,
+  notifyAdmin,
 } from './telegram'
 
 export type Reply = { text: string; keyboard?: InlineButton[][]; photo?: PhotoSource }
@@ -79,14 +79,17 @@ export type BotState = {
 
 export type UpdateInput = {
   telegramUserId: string
+  /** Bale customers arrive with the `bale:` prefix (platform-scoped identity) */
   firstName?: string
   username?: string
   text?: string
-  /** largest photo in a private-chat message (Telegram) */
+  /** largest photo in a private-chat message (Telegram/Bale) */
   photo?: { fileId: string; caption?: string }
   callbackData?: string
   callbackId?: string
   action?: string // 'reset' (simulator convenience)
+  /** which messenger this update came from — defaults to 'telegram' */
+  platform?: Platform
 }
 
 const SESSION_TTL_MS = 30 * 60 * 1000
@@ -579,11 +582,13 @@ async function myOrdersReply(telegramUserId: string): Promise<Reply> {
   }
 }
 
-async function supportReply(): Promise<Reply> {
+async function supportReply(platform: Platform = 'telegram'): Promise<Reply> {
   const settings = await getStoreSettings()
   const kb: InlineButton[][] = []
   if (settings.supportUsername) {
-    kb.push([{ text: '💬 گفتگو با پشتیبانی', url: `https://t.me/${settings.supportUsername}` }])
+    // same support handle on both messengers, platform-correct deep link
+    const base = platform === 'bale' ? 'https://ble.ir' : 'https://t.me'
+    kb.push([{ text: '💬 گفتگو با پشتیبانی', url: `${base}/${settings.supportUsername}` }])
   }
   kb.push(HOME_ROW)
   return {
@@ -759,7 +764,7 @@ async function handlePhotoMessage(
   if (!photo?.fileId) return []
 
   if (state.flow === 'await_receipt' && state.orderId) {
-    return receiptUploadFlow(telegramUserId, state, photo)
+    return receiptUploadFlow(telegramUserId, state, photo, input.platform)
   }
 
   // Photo outside the receipt flow → guide the customer to the right place
@@ -790,6 +795,7 @@ async function receiptUploadFlow(
   telegramUserId: string,
   state: BotState,
   photo: { fileId: string; caption?: string },
+  platform: Platform = 'telegram',
 ): Promise<Reply[]> {
   const order = await db.order.findUnique({
     where: { id: state.orderId },
@@ -818,8 +824,8 @@ async function receiptUploadFlow(
     ]
   }
 
-  // 1. download the photo from Telegram
-  const info = await getFileInfo(photo.fileId)
+  // 1. download the photo from the platform it arrived on
+  const info = await getFileInfo(platform, photo.fileId)
   const filePath =
     info.ok && info.result && typeof (info.result as { file_path?: unknown }).file_path === 'string'
       ? (info.result as { file_path: string }).file_path
@@ -829,7 +835,7 @@ async function receiptUploadFlow(
       { text: 'متأسفانه دریافت فایل تصویر ممکن نشد. لطفاً یک بار دیگر تصویر رسید را ارسال کنید. 🙏' },
     ]
   }
-  const dl = await downloadFile(filePath)
+  const dl = await downloadFile(platform, filePath)
   if (!dl.ok || !dl.buffer) {
     return [
       { text: 'متأسفانه دریافت تصویر ممکن نشد. لطفاً یک بار دیگر تصویر رسید را ارسال کنید. 🙏' },
@@ -879,15 +885,11 @@ async function receiptUploadFlow(
     ]
   }
 
-  // 3. notify the admin chat (best-effort)
+  // 3. notify the admin chat(s) — every connected platform, best-effort
   try {
-    const { adminChatId } = await loadConfig()
-    if (adminChatId) {
-      await send(
-        adminChatId,
-        `📩 رسید سفارش #${formatNumber(order.orderNumber)} دریافت شد؛ در پنل مدیریت بررسی کنید.`,
-      )
-    }
+    await notifyAdmin(
+      `📩 رسید سفارش #${formatNumber(order.orderNumber)} دریافت شد؛ در پنل مدیریت بررسی کنید.`,
+    )
   } catch {
     // best-effort
   }
@@ -1101,7 +1103,7 @@ async function handleText(
     }
     if (cmd === '/support') {
       await clearFlow(telegramUserId)
-      return [await supportReply()]
+      return [await supportReply(input.platform)]
     }
     return [mainMenuReply('دستور شناخته‌شده نیست. از منوی زیر استفاده کنید:')]
   }
@@ -1265,7 +1267,7 @@ async function handleCallback(
   }
   if (cb === 'menu:support') {
     await clearFlow(telegramUserId)
-    return [await supportReply()]
+    return [await supportReply(input.platform)]
   }
   if (cb === 'menu:about') {
     await clearFlow(telegramUserId)
@@ -1310,7 +1312,7 @@ async function handleCallback(
     return startReceiptFlow(telegramUserId, cb.slice('receipt:'.length))
   }
   if (cb.startsWith('seller:confirm:') || cb.startsWith('seller:cancel:')) {
-    return sellerStatusCallback(cb, telegramUserId)
+    return sellerStatusCallback(cb, telegramUserId, input.platform)
   }
   // unknown callback → main menu
   await clearFlow(telegramUserId)
@@ -1390,11 +1392,17 @@ async function confirmOrderCallback(
   }
 }
 
-async function sellerStatusCallback(cb: string, telegramUserId: string): Promise<Reply[]> {
+async function sellerStatusCallback(
+  cb: string,
+  telegramUserId: string,
+  platform: Platform = 'telegram',
+): Promise<Reply[]> {
   // cb = seller:confirm:<id> | seller:cancel:<id>
-  // Admin-only: the callback must come from the configured admin chat id.
-  const cfg = await loadConfig()
-  const callerId = Number.parseInt(telegramUserId, 10)
+  // Admin-only: the callback must come from the configured admin chat id of
+  // the platform the press arrived on (ids differ between Telegram and Bale).
+  const cfg = await loadConfig(platform)
+  const rawCaller = telegramUserId.replace(/^bale:/, '')
+  const callerId = Number.parseInt(rawCaller, 10)
   const adminId = Number.parseInt(cfg.adminChatId, 10)
   if (!Number.isFinite(callerId) || !Number.isFinite(adminId) || callerId !== adminId) {
     return [] // silently ignore unauthorized presses
@@ -1435,24 +1443,26 @@ export async function handleUpdate(input: UpdateInput): Promise<Reply[]> {
     if (input.username) inputUsernameCache.set(input.telegramUserId, input.username)
 
     // Owner auto-discovery: when the store owner (telegram username matches,
-    // case-insensitive) messages the bot, persist their chat id as
-    // telegramAdminChatId. Feeds order notifications AND the daily Telegram
-    // backup job — no manual chat-id setup, no getUpdates conflicts with
-    // long-polling. Write only on change to avoid a DB write per message.
+    // case-insensitive) messages the bot, persist their chat id as the
+    // platform's admin chat id. Feeds order notifications AND the daily
+    // Telegram backup job — no manual chat-id setup, no getUpdates conflicts
+    // with long-polling. Write only on change to avoid a DB write per message.
     const ownerUsername = (
       process.env.OWNER_TELEGRAM_USERNAME ?? 'amirhs_8311'
     ).toLowerCase()
     if (input.username && input.username.toLowerCase() === ownerUsername) {
+      const platform = input.platform ?? 'telegram'
+      const adminKey = platform === 'bale' ? 'baleAdminChatId' : 'telegramAdminChatId'
       try {
-        const row = await db.setting.findUnique({ where: { key: 'telegramAdminChatId' } })
+        const row = await db.setting.findUnique({ where: { key: adminKey } })
         if (row?.value !== input.telegramUserId) {
           await db.setting.upsert({
-            where: { key: 'telegramAdminChatId' },
-            create: { key: 'telegramAdminChatId', value: input.telegramUserId },
+            where: { key: adminKey },
+            create: { key: adminKey, value: input.telegramUserId },
             update: { value: input.telegramUserId },
           })
           console.log(
-            `[bot-service] owner chat captured (@${input.username}) → telegramAdminChatId=${input.telegramUserId}`,
+            `[bot-service] owner chat captured (@${input.username}, ${platform}) → ${adminKey}=${input.telegramUserId}`,
           )
         }
       } catch {
@@ -1479,7 +1489,7 @@ export async function handleUpdate(input: UpdateInput): Promise<Reply[]> {
 
     if (input.callbackId) {
       try {
-        await answerCallback(input.callbackId)
+        await answerCallback(input.platform ?? 'telegram', input.callbackId)
       } catch {
         // best-effort
       }

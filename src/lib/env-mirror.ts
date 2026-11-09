@@ -54,3 +54,30 @@ export function mirrorTelegramToEnv(cfg: TelegramEnvMirror): void {
     }
   }
 }
+
+/** Same shape as the Telegram mirror — the keys are just BALE_*-prefixed. */
+export type BaleEnvMirror = {
+  botToken: string
+  channelId: string
+  adminChatId: string
+  botUsername: string
+}
+
+/** Write the bale connection into .env (+ snapshot copy). Best-effort. */
+export function mirrorBaleToEnv(cfg: BaleEnvMirror): void {
+  const updates: Array<[string, string]> = [
+    ['BALE_BOT_TOKEN', cfg.botToken],
+    ['BALE_CHANNEL_ID', cfg.channelId],
+    ['BALE_ADMIN_CHAT_ID', cfg.adminChatId],
+    ['BALE_BOT_USERNAME', cfg.botUsername],
+    ['BALE_MOCK', 'false'],
+  ]
+  for (const p of [ENV_PATH, ENV_SNAPSHOT_PATH]) {
+    try {
+      if (!existsSync(p)) continue
+      writeFileSync(p, upsertEnvLines(readFileSync(p, 'utf8'), updates))
+    } catch {
+      // single file failing (e.g. root-owned) must not abort the other
+    }
+  }
+}

@@ -1,11 +1,11 @@
 /**
- * bot-service — HTTP surface + Telegram long-polling.
+ * bot-service — HTTP surface + Telegram/Bale long-polling.
  *
- *   GET  /health   → {ok, mode:'polling'|'mock', botUsername}
+ *   GET  /health   → {ok, mode, platforms:{telegram:{mode,botUsername}, bale:{...}}}
  *   POST /simulate → run handleUpdate() and return replies (Bot Lab simulator)
  *
- * In real mode (token set && TELEGRAM_MOCK !== 'true') a sequential
- * long-polling loop forwards Telegram updates through the SAME handleUpdate()
+ * In real mode (token set && not mock-forced) a sequential long-polling loop
+ * PER PLATFORM forwards messenger updates through the SAME handleUpdate()
  * and sends replies back to the originating chat.
  * The process never crashes: every path is wrapped.
  */
@@ -13,6 +13,7 @@ import { existsSync, readFileSync, rmSync, writeFileSync, mkdirSync } from 'node
 import path from 'node:path'
 import { handleUpdate, MAIN_KEYBOARD, type Reply, type UpdateInput } from './engine'
 import {
+  PLATFORMS,
   botUsername,
   currentBotToken,
   getUpdatesPolling,
@@ -23,6 +24,7 @@ import {
   sendPhoto,
   sendTyping,
   type PhotoSource,
+  type Platform,
   type TelegramUpdate,
 } from './telegram'
 
@@ -101,6 +103,7 @@ function validateSimulateInput(body: unknown): UpdateInput {
     throw new Error('telegramUserId (string) is required')
   }
   const input: UpdateInput = { telegramUserId: b.telegramUserId }
+  if (b.platform === 'bale' || b.platform === 'telegram') input.platform = b.platform
   if (typeof b.firstName === 'string') input.firstName = b.firstName
   if (typeof b.username === 'string') input.username = b.username
   if (typeof b.text === 'string') input.text = b.text
@@ -128,10 +131,21 @@ Bun.serve({
       pathname = url.pathname
 
       if (pathname === '/health' && req.method === 'GET') {
+        const platforms: Record<string, { mode: string; botUsername?: string }> = {}
+        for (const p of PLATFORMS) {
+          const uname = await botUsername(p)
+          platforms[p] = {
+            mode: await resolveMode(p),
+            ...(uname ? { botUsername: uname } : {}),
+          }
+        }
+        const modes = PLATFORMS.map((p) => platforms[p]?.mode)
         return json({
           ok: true,
-          mode: await resolveMode(),
-          botUsername: (await botUsername()) || undefined,
+          // aggregate for legacy UI consumers: real when ANY platform is real
+          mode: modes.includes('real') ? 'real' : 'mock',
+          botUsername: platforms['telegram']?.botUsername,
+          platforms,
         })
       }
 
@@ -176,14 +190,19 @@ function sanitizeReplyForSim(r: Reply): Record<string, unknown> {
   }
 }
 
-function mapTelegramUpdate(u: TelegramUpdate): UpdateInput | null {
+function mapTelegramUpdate(u: TelegramUpdate, platform: Platform): UpdateInput | null {
+  // Bale customers get a `bale:` prefixed id — the two id spaces are separate,
+  // so Customer/ChatMessage/session rows never collide across messengers.
+  const withPrefix = (id: number | string): string =>
+    platform === 'bale' ? `bale:${id}` : String(id)
   if (u.callback_query) {
     return {
-      telegramUserId: String(u.callback_query.from.id),
+      telegramUserId: withPrefix(u.callback_query.from.id),
       firstName: u.callback_query.from.first_name,
       username: u.callback_query.from.username,
       callbackData: u.callback_query.data,
       callbackId: u.callback_query.id,
+      platform,
     }
   }
   if (u.message && u.message.from && u.message.chat?.type === 'private') {
@@ -194,18 +213,20 @@ function mapTelegramUpdate(u: TelegramUpdate): UpdateInput | null {
         b.width * b.height > a.width * a.height ? b : photos[0],
       )
       return {
-        telegramUserId: String(u.message.from.id),
+        telegramUserId: withPrefix(u.message.from.id),
         firstName: u.message.from.first_name,
         username: u.message.from.username,
         photo: { fileId: largest.file_id, caption: u.message.caption },
+        platform,
       }
     }
     if (u.message.text) {
       return {
-        telegramUserId: String(u.message.from.id),
+        telegramUserId: withPrefix(u.message.from.id),
         firstName: u.message.from.first_name,
         username: u.message.from.username,
         text: u.message.text,
+        platform,
       }
     }
   }
@@ -213,29 +234,29 @@ function mapTelegramUpdate(u: TelegramUpdate): UpdateInput | null {
 }
 
 /** Deliver one reply: photo replies go through multipart sendPhoto. */
-async function deliver(chatId: string, r: Reply): Promise<void> {
+async function deliver(platform: Platform, chatId: string, r: Reply): Promise<void> {
   // No inline buttons on this reply → (re)assert the persistent bottom menu
   // keyboard, so the shop menu is always visible above the input field.
   const bottom = r.keyboard ? undefined : MAIN_KEYBOARD
   if (r.photo) {
     const source: PhotoSource = r.photo
-    await sendPhoto(chatId, source, r.text, r.keyboard, bottom)
+    await sendPhoto(platform, chatId, source, r.text, r.keyboard, bottom)
   } else {
-    await send(chatId, r.text, r.keyboard, bottom)
+    await send(platform, chatId, r.text, r.keyboard, bottom)
   }
 }
 
 /**
  * «typing…» keep-alive for the duration of one handleUpdate: one chat action
- * immediately, then a re-send every 4s (Telegram shows it for ~5s per call).
- * Typical AI turns take 2–4s; heavy tool rounds or a 60s AI timeout would
- * otherwise leave the customer staring at dead air. Mock mode → no-op.
- * Returns stop() for the finally-block; never throws.
+ * immediately, then a re-send every 4s (Telegram shows it for ~5s per call,
+ * Bale for ~6s). Typical AI turns take 2–4s; heavy tool rounds or a 60s AI
+ * timeout would otherwise leave the customer staring at dead air.
+ * Mock mode → no-op. Returns stop() for the finally-block; never throws.
  */
-function startTypingKeepAlive(chatId: string): () => void {
-  if (isMockMode()) return () => undefined
-  void sendTyping(chatId).catch(() => undefined)
-  const timer = setInterval(() => void sendTyping(chatId).catch(() => undefined), 4_000)
+function startTypingKeepAlive(platform: Platform, chatId: string): () => void {
+  if (isMockMode(platform)) return () => undefined
+  void sendTyping(platform, chatId).catch(() => undefined)
+  const timer = setInterval(() => void sendTyping(platform, chatId).catch(() => undefined), 4_000)
   timer.unref?.() // a typing indicator must never keep the process alive
   return () => clearInterval(timer)
 }
@@ -243,16 +264,17 @@ function startTypingKeepAlive(chatId: string): () => void {
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms))
 
 /**
- * Defensive redelivery guard: Telegram long-poll guarantees at-least-once in
+ * Defensive redelivery guard: messenger long-poll guarantees at-least-once in
  * edge cases (offset reset on token change, 409 races with a stale poller).
  * The same update must NEVER be handled twice — keep a small LRU of recently
- * seen update_ids.
+ * seen update ids, keyed per platform (the two id spaces are independent).
  */
-const seenUpdateIds = new Set<number>()
+const seenUpdateIds = new Set<string>()
 const SEEN_UPDATE_LIMIT = 500
-function isDuplicateUpdate(updateId: number): boolean {
-  if (seenUpdateIds.has(updateId)) return true
-  seenUpdateIds.add(updateId)
+function isDuplicateUpdate(platform: Platform, updateId: number): boolean {
+  const key = `${platform}:${updateId}`
+  if (seenUpdateIds.has(key)) return true
+  seenUpdateIds.add(key)
   if (seenUpdateIds.size > SEEN_UPDATE_LIMIT) {
     // drop the oldest half (Set iterates in insertion order)
     let drop = seenUpdateIds.size - Math.floor(SEEN_UPDATE_LIMIT / 2)
@@ -275,29 +297,35 @@ function isDuplicateUpdate(updateId: number): boolean {
 type PollRegistry = {
   /** bumped at every module evaluation — only the current generation polls */
   gen: number
-  /** aborts the in-flight long poll of the previous generation */
-  abort: AbortController | null
+  /** aborts the in-flight long poll of the previous generation(s), per platform */
+  aborts: Partial<Record<Platform, AbortController>>
 }
 
 const POLL_REG_KEY = '__silverlove_bot_poll_registry__'
 const g = globalThis as unknown as { __silverlove_bot_poll_registry__?: PollRegistry }
-const registry: PollRegistry = g[POLL_REG_KEY] ?? { gen: 0, abort: null }
+const registry: PollRegistry = g[POLL_REG_KEY] ?? { gen: 0, aborts: {} }
 g[POLL_REG_KEY] = registry
 
 registry.gen += 1
 const MY_GEN = registry.gen
-if (registry.abort) {
-  try {
-    registry.abort.abort() // previous generation: cancel its in-flight poll
-  } catch {
-    // already dead
+for (const p of PLATFORMS) {
+  const prev = registry.aborts[p]
+  if (prev) {
+    try {
+      prev.abort() // previous generation: cancel its in-flight poll
+    } catch {
+      // already dead
+    }
   }
 }
-const myAbort = new AbortController()
-registry.abort = myAbort
+const myAborts = {} as Record<Platform, AbortController>
+for (const p of PLATFORMS) {
+  myAborts[p] = new AbortController()
+  registry.aborts[p] = myAborts[p]
+}
 
-// ─── Persisted getUpdates offset (per bot) ────────────────────────────────────
-// Telegram confirms updates only via the offset of the NEXT getUpdates call,
+// ─── Persisted getUpdates offset (per platform + per bot) ─────────────────────
+// Messengers confirm updates only via the offset of the NEXT getUpdates call,
 // so an in-memory offset re-delivers every recent message after a restart or
 // hot-reload handover → duplicates. Persisting it makes handover at-most-once.
 const OFFSET_FILE = path.join(import.meta.dir, '.bot-offset.json')
@@ -306,19 +334,37 @@ function botIdOf(token: string): string {
   return token.split(':')[0] || 'unknown'
 }
 
-function readPersistedOffset(botId: string): number {
+type OffsetFileShape = {
+  /** legacy single-platform format (telegram only) */
+  botId?: string
+  offset?: number
+  /** current per-platform format */
+  platforms?: Partial<Record<Platform, { botId: string; offset: number; at: number }>>
+}
+
+function readPersistedOffset(platform: Platform, botId: string): number {
   try {
-    const raw = JSON.parse(readFileSync(OFFSET_FILE, 'utf8')) as {
-      botId?: string
-      offset?: number
-    }
+    const raw = JSON.parse(readFileSync(OFFSET_FILE, 'utf8')) as OffsetFileShape
+    const entry = raw.platforms?.[platform]
     if (
-      raw.botId === botId &&
-      typeof raw.offset === 'number' &&
-      Number.isFinite(raw.offset) &&
-      raw.offset > 0
+      entry &&
+      entry.botId === botId &&
+      typeof entry.offset === 'number' &&
+      Number.isFinite(entry.offset) &&
+      entry.offset > 0
     ) {
-      return Math.trunc(raw.offset)
+      return Math.trunc(entry.offset)
+    }
+    // legacy format → telegram's offset (bale starts fresh, as it should)
+    if (platform === 'telegram' && !raw.platforms) {
+      if (
+        raw.botId === botId &&
+        typeof raw.offset === 'number' &&
+        Number.isFinite(raw.offset) &&
+        raw.offset > 0
+      ) {
+        return Math.trunc(raw.offset)
+      }
     }
   } catch {
     // first run / unreadable → start from scratch
@@ -326,21 +372,29 @@ function readPersistedOffset(botId: string): number {
   return 0
 }
 
-function persistOffset(botId: string, offset: number): void {
+function persistOffset(platform: Platform, botId: string, offset: number): void {
   try {
-    writeFileSync(OFFSET_FILE, JSON.stringify({ botId, offset, at: Date.now() }))
+    let raw: OffsetFileShape = {}
+    try {
+      raw = JSON.parse(readFileSync(OFFSET_FILE, 'utf8')) as OffsetFileShape
+    } catch {
+      // no file yet — start a fresh structure
+    }
+    raw.platforms = raw.platforms ?? {}
+    raw.platforms[platform] = { botId, offset, at: Date.now() }
+    writeFileSync(OFFSET_FILE, JSON.stringify(raw))
   } catch {
     // best effort — worst case after a crash: a redelivered update
   }
 }
 
-async function pollingLoop(gen: number, abort: AbortController): Promise<void> {
+async function pollingLoop(platform: Platform, gen: number, abort: AbortController): Promise<void> {
   let offset = 0
   let currentBotId = ''
   let lastMode: 'mock' | 'real' | null = null
   let pollFailures = 0
   let iters = 0
-  console.log(`[bot-service] polling loop gen ${gen} active`)
+  console.log(`[bot-service] ${platform} polling loop gen ${gen} active`)
   for (;;) {
     if (registry.gen !== gen) return // superseded by a hot reload → die quietly
     iters++
@@ -348,19 +402,19 @@ async function pollingLoop(gen: number, abort: AbortController): Promise<void> {
     // hangs before — unobservable wedged states after hot reloads).
     if (iters % 60 === 0) {
       console.log(
-        `[bot-service] heartbeat gen=${gen} iters=${iters} mode=${lastMode ?? '?'} bot=${currentBotId || '-'} offset=${offset} pollFailures=${pollFailures}`,
+        `[bot-service] ${platform} heartbeat gen=${gen} iters=${iters} mode=${lastMode ?? '?'} bot=${currentBotId || '-'} offset=${offset} pollFailures=${pollFailures}`,
       )
     }
     try {
-      const mode = await resolveMode()
+      const mode = await resolveMode(platform)
       if (mode !== lastMode) {
         console.log(
-          `[bot-service] mode → ${mode}${mode === 'real' ? ' (polling activated)' : ' (waiting for a bot to be connected in the panel)'}`,
+          `[bot-service] ${platform} mode → ${mode}${mode === 'real' ? ' (polling activated)' : ' (waiting for a bot to be connected in the panel)'}`,
         )
         if (mode === 'real') {
           // First activation (or reconnect): publish the bot's public menu —
-          // / command list + the ☰ chat menu button in the input's left corner.
-          void registerBotMenu().catch(() => undefined) // never blocks polling
+          // / command list (+ the ☰ chat menu button on Telegram).
+          void registerBotMenu(platform).catch(() => undefined) // never blocks polling
         }
         lastMode = mode
       }
@@ -370,32 +424,31 @@ async function pollingLoop(gen: number, abort: AbortController): Promise<void> {
         await sleep(10_000)
         continue
       }
-      const token = await currentBotToken()
+      const token = await currentBotToken(platform)
       const botId = botIdOf(token)
       if (botId !== currentBotId) {
         if (currentBotId) {
-          console.log(`[bot-service] bot changed → restarting polling (${botId})`)
+          console.log(`[bot-service] ${platform} bot changed → restarting polling (${botId})`)
         }
         currentBotId = botId
-        offset = readPersistedOffset(botId) // offsets are per-bot, persisted
-        seenUpdateIds.clear()
-        console.log(`[bot-service] polling bot ${botId} from persisted offset ${offset}`)
+        offset = readPersistedOffset(platform, botId) // offsets are per-platform+bot, persisted
+        console.log(`[bot-service] polling ${platform} bot ${botId} from persisted offset ${offset}`)
       }
       // 25s server-side long-poll; the HTTP timeout (35s) always exceeds it
-      const res = await getUpdatesPolling(offset, 25, abort.signal)
+      const res = await getUpdatesPolling(platform, offset, 25, abort.signal)
       if (registry.gen !== gen) return // superseded mid-poll
       if ('error' in res) {
         pollFailures++
         if (pollFailures === 1 || pollFailures % 20 === 0) {
           console.error(
-            `[bot-service] getUpdates failed ×${pollFailures}: ${res.error} (bot=${currentBotId})`,
+            `[bot-service] ${platform} getUpdates failed ×${pollFailures}: ${res.error} (bot=${currentBotId})`,
           )
         }
         await sleep(3000)
         continue
       }
       if (pollFailures > 0) {
-        console.log(`[bot-service] getUpdates recovered after ${pollFailures} failures`)
+        console.log(`[bot-service] ${platform} getUpdates recovered after ${pollFailures} failures`)
         pollFailures = 0
       }
       const updates = res.updates
@@ -404,18 +457,18 @@ async function pollingLoop(gen: number, abort: AbortController): Promise<void> {
         // neither a hot-reload handover nor a process restart can re-deliver
         // these updates (at-most-once beats duplicates for a sales bot).
         offset = Math.max(offset, ...updates.map((u) => u.update_id + 1))
-        persistOffset(botId, offset)
+        persistOffset(platform, botId, offset)
       }
       for (const u of updates) {
-        if (isDuplicateUpdate(u.update_id)) continue
+        if (isDuplicateUpdate(platform, u.update_id)) continue
         try {
-          const input = mapTelegramUpdate(u)
+          const input = mapTelegramUpdate(u, platform)
           if (!input) continue
-          const stopTyping = startTypingKeepAlive(input.telegramUserId)
+          const stopTyping = startTypingKeepAlive(platform, input.telegramUserId)
           try {
             const replies = await handleUpdate(input)
             for (const r of replies) {
-              await deliver(input.telegramUserId, r)
+              await deliver(platform, input.telegramUserId, r)
             }
           } finally {
             stopTyping()
@@ -426,19 +479,22 @@ async function pollingLoop(gen: number, abort: AbortController): Promise<void> {
       }
     } catch (e) {
       if (registry.gen !== gen || abort.signal.aborted) return
-      console.error('[bot-service] polling loop error:', e)
+      console.error(`[bot-service] ${platform} polling loop error:`, e)
       await sleep(3000)
     }
   }
 }
 
-// Polling runs unconditionally: it self-waits in mock mode and activates
-// automatically (~10s) once a bot is connected from the admin panel.
-// A module re-evaluation (--hot) aborts THIS loop and starts the next gen.
-void pollingLoop(MY_GEN, myAbort).catch((e) =>
-  console.error('[bot-service] polling crashed:', e),
-)
-console.log(`[bot-service] polling supervisor started (gen ${MY_GEN})`)
+// Polling runs unconditionally for BOTH platforms: each loop self-waits in
+// mock mode and activates automatically (~10s) once its bot is connected from
+// the admin panel. A module re-evaluation (--hot) aborts THIS generation's
+// loops and starts the next gen.
+for (const p of PLATFORMS) {
+  void pollingLoop(p, MY_GEN, myAborts[p]).catch((e) =>
+    console.error(`[bot-service] ${p} polling crashed:`, e),
+  )
+}
+console.log(`[bot-service] polling supervisor started (gen ${MY_GEN}, platforms: ${PLATFORMS.join(', ')})`)
 
 console.log(`[bot-service] listening on http://127.0.0.1:${PORT}`)
 // handover test marker 2

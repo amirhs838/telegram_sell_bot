@@ -221,6 +221,9 @@ model SilverRate {
   // the SAME record edits the existing message — never a duplicate post).
   telegramMessageId Int      ?
   telegramChannelId String?
+  // Bale mirror of the same post (message ids differ per messenger)
+  baleMessageId     Int      ?
+  baleChannelId     String?
   publishStatus     String    @default("pending") // pending | published | failed
   publishError      String?
   publishedAt       DateTime?

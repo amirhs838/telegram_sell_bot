@@ -18,6 +18,7 @@ import { PaymentsSection } from '@/components/admin/payments-section'
 import { SilverRateSection } from '@/components/admin/silver-rate-section'
 import { CustomersSection } from '@/components/admin/customers-section'
 import { TelegramSection } from '@/components/admin/telegram-section'
+import { BaleSection } from '@/components/admin/bale-section'
 import { AiSection } from '@/components/admin/ai-section'
 import { SettingsSection } from '@/components/admin/settings-section'
 
@@ -127,6 +128,7 @@ export default function Home() {
       {section === 'silver-rate' && <SilverRateSection />}
       {section === 'customers' && <CustomersSection />}
       {section === 'telegram' && <TelegramSection />}
+      {section === 'bale' && <BaleSection />}
       {section === 'ai' && <AiSection />}
       {section === 'settings' && <SettingsSection />}
     </AdminShell>

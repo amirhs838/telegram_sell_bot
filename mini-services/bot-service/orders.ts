@@ -10,7 +10,7 @@
  */
 import { formatMoney } from '../../src/lib/telegram-render'
 import { db } from './db'
-import { loadConfig, send } from './telegram'
+import { notifyAdmin, sendToCustomer } from './telegram'
 
 export class InsufficientStockError extends Error {
   readonly available: number
@@ -144,37 +144,33 @@ export async function createOrder(input: CreateOrderInput) {
     return { order: created, product, remainingStock }
   })
 
-  // Seller notification (best-effort, after commit)
-  const { adminChatId: adminChat } = await loadConfig()
-  if (adminChat) {
-    try {
-      await send(
-        adminChat,
+  // Seller notification (best-effort, after commit) — every connected platform
+  try {
+    await notifyAdmin(
+      [
+        '🔔 سفارش جدید',
+        '',
+        `#${order.order.orderNumber}`,
+        '',
+        `👤 مشتری: ${name}`,
+        `📱 ${phone}`,
+        `📍 ${address}`,
+        '',
+        `🛍 ${order.product.name}`,
+        `🔢 تعداد: ${quantity}`,
+        `💰 مبلغ: ${formatMoney(order.order.total)}`,
+        '',
+        '🟡 در انتظار بررسی',
+      ].join('\n'),
+      [
         [
-          '🔔 سفارش جدید',
-          '',
-          `#${order.order.orderNumber}`,
-          '',
-          `👤 مشتری: ${name}`,
-          `📱 ${phone}`,
-          `📍 ${address}`,
-          '',
-          `🛍 ${order.product.name}`,
-          `🔢 تعداد: ${quantity}`,
-          `💰 مبلغ: ${formatMoney(order.order.total)}`,
-          '',
-          '🟡 در انتظار بررسی',
-        ].join('\n'),
-        [
-          [
-            { text: '✅ تأیید', callback_data: `seller:confirm:${order.order.id}` },
-            { text: '❌ لغو', callback_data: `seller:cancel:${order.order.id}` },
-          ],
+          { text: '✅ تأیید', callback_data: `seller:confirm:${order.order.id}` },
+          { text: '❌ لغو', callback_data: `seller:cancel:${order.order.id}` },
         ],
-      )
-    } catch {
-      // never fail the order because of notification
-    }
+      ],
+    )
+  } catch {
+    // never fail the order because of notification
   }
 
   return order.order
@@ -245,7 +241,8 @@ export async function setOrderStatus(
     const text = customerStatusMessage(status, n)
     if (text) {
       try {
-        await send(result.order.customerTelegramUserId, text)
+        // routes by chat-id prefix: Bale customers (bale:…) on Bale, the rest on Telegram
+        await sendToCustomer(result.order.customerTelegramUserId, text)
       } catch {
         // best-effort
       }

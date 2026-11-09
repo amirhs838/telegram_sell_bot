@@ -339,6 +339,32 @@ export type TelegramStatus = TelegramInfo & {
   recentMessages: ActivityLogItem[]
 }
 
+// Bale mirrors the Telegram connection shapes (same Bot API family).
+export type BaleStatus = Omit<TelegramInfo, never> & {
+  recentMessages: ActivityLogItem[]
+}
+
+export type BaleConfigInfo = {
+  source: 'panel' | 'env'
+  mockMode: boolean
+  botUsername: string
+  channelId: string
+  adminChatId: string
+  botTokenMasked: string | null
+}
+
+export type BaleSaveResult = {
+  ok: boolean
+  checks: TelegramCheck[]
+  warnings: string[]
+}
+
+export type BaleTestResult = {
+  ok: boolean
+  mode: 'mock' | 'real'
+  checks: TelegramCheck[]
+}
+
 export type TelegramConfigInfo = {
   source: 'panel' | 'env'
   mockMode: boolean
