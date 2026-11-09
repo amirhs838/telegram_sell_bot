@@ -84,3 +84,4 @@ upload/studio-*
 upload/[0-9]*-[0-9a-f]*.png
 upload/[0-9]*-[0-9a-f]*.jpg
 upload/photo_*
+db/custom.db
