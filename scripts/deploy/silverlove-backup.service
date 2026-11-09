@@ -1,0 +1,10 @@
+[Unit]
+Description=Silver Love - full project backup to Telegram (owner chat)
+After=network-online.target
+
+[Service]
+Type=oneshot
+User=debian
+WorkingDirectory=/home/debian/silverlove
+ExecStart=/usr/bin/env bash /home/debian/silverlove/scripts/backup-telegram.sh
+Nice=10

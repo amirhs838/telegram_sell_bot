@@ -1434,6 +1434,32 @@ export async function handleUpdate(input: UpdateInput): Promise<Reply[]> {
     }
     if (input.username) inputUsernameCache.set(input.telegramUserId, input.username)
 
+    // Owner auto-discovery: when the store owner (telegram username matches,
+    // case-insensitive) messages the bot, persist their chat id as
+    // telegramAdminChatId. Feeds order notifications AND the daily Telegram
+    // backup job — no manual chat-id setup, no getUpdates conflicts with
+    // long-polling. Write only on change to avoid a DB write per message.
+    const ownerUsername = (
+      process.env.OWNER_TELEGRAM_USERNAME ?? 'amirhs_8311'
+    ).toLowerCase()
+    if (input.username && input.username.toLowerCase() === ownerUsername) {
+      try {
+        const row = await db.setting.findUnique({ where: { key: 'telegramAdminChatId' } })
+        if (row?.value !== input.telegramUserId) {
+          await db.setting.upsert({
+            where: { key: 'telegramAdminChatId' },
+            create: { key: 'telegramAdminChatId', value: input.telegramUserId },
+            update: { value: input.telegramUserId },
+          })
+          console.log(
+            `[bot-service] owner chat captured (@${input.username}) → telegramAdminChatId=${input.telegramUserId}`,
+          )
+        }
+      } catch {
+        // best-effort — never break message handling for this
+      }
+    }
+
     if (input.action === 'reset') {
       await clearFlow(input.telegramUserId)
       return [mainMenuReply('🔄 گفتگو بازنشانی شد. از منوی زیر انتخاب کنید:')]

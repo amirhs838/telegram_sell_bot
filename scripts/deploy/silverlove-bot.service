@@ -1,0 +1,18 @@
+[Unit]
+Description=Silver Love - Telegram bot service (:3002, long polling)
+After=network.target silverlove-app.service
+Wants=silverlove-app.service
+
+[Service]
+User=debian
+WorkingDirectory=/home/debian/silverlove/mini-services/bot-service
+EnvironmentFile=/home/debian/silverlove/.env
+Environment=NODE_ENV=production
+ExecStart=/home/debian/.bun/bin/bun index.ts
+Restart=always
+RestartSec=3
+NoNewPrivileges=true
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target

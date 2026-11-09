@@ -1,0 +1,19 @@
+[Unit]
+Description=Silver Love - Next.js admin panel + API (:3000)
+After=network.target
+
+[Service]
+User=debian
+WorkingDirectory=/home/debian/silverlove
+EnvironmentFile=/home/debian/silverlove/.env
+Environment=NODE_ENV=production
+Environment=PORT=3000
+Environment=HOSTNAME=127.0.0.1
+ExecStart=/home/debian/.bun/bin/bun /home/debian/silverlove/.next/standalone/server.js
+Restart=always
+RestartSec=3
+NoNewPrivileges=true
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target
