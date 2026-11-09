@@ -15,7 +15,7 @@ set -uo pipefail
 
 ROOT="${ROOT:-/home/debian/silverlove}"
 BUN="${BUN:-$HOME/.bun/bin/bun}"
-OUT_DIR="${OUT_DIR:-/var/backups/silverlove}"
+OUT_DIR="${OUT_DIR:-$HOME/backups/silverlove}"
 KEEP_LOCAL="${KEEP_LOCAL:-14}"
 MAX_TG_BYTES=$((49 * 1024 * 1024)) # Telegram sendDocument hard limit: 50MB
 
