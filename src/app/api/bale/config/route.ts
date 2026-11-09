@@ -7,7 +7,7 @@ import {
   getBaleConfig,
   updateBaleConfig,
 } from '@/lib/settings'
-import { mirrorBaleToEnv } from '@/lib/env-mirror'
+import { mirrorBaleToEnv, unmirrorPlatformFromEnv } from '@/lib/env-mirror'
 
 // ─── GET: current bale connection (token masked, never returned in full) ─────
 
@@ -160,6 +160,9 @@ export const PUT = route(async (req) => {
 export const DELETE = route(async () => {
   await requireAuth()
   await deleteBaleConfig()
+  // also erase the .env mirror — otherwise the deleted token resurrects on
+  // the next restart and silently reconnects the bot the seller disconnected
+  unmirrorPlatformFromEnv('bale')
   await resetBaleCaches()
   await logEvent('bale.config_removed', 'اتصال ربات و کانال بله از پنل حذف شد')
   const status = await getBaleStatus()

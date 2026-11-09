@@ -55,6 +55,36 @@ export function mirrorTelegramToEnv(cfg: TelegramEnvMirror): void {
   }
 }
 
+function removeEnvLines(content: string, keys: string[]): string {
+  let out = content
+  for (const key of keys) {
+    const re = new RegExp(`^${key}=.*(?:\\r?\\n|$)`, 'gm')
+    out = out.replace(re, '')
+  }
+  return out
+}
+
+/**
+ * Erase a platform's mirrored connection from .env (+ snapshot copy).
+ * Called on panel DISCONNECT: without this, the deleted token would
+ * resurrect on the next process restart (systemd env / Next.js dev reload)
+ * and silently reconnect a bot the seller just disconnected. Best-effort.
+ */
+export function unmirrorPlatformFromEnv(platform: 'telegram' | 'bale'): void {
+  const keys =
+    platform === 'telegram'
+      ? ['TELEGRAM_BOT_TOKEN', 'TELEGRAM_CHANNEL_ID', 'TELEGRAM_ADMIN_CHAT_ID', 'TELEGRAM_BOT_USERNAME', 'TELEGRAM_MOCK']
+      : ['BALE_BOT_TOKEN', 'BALE_CHANNEL_ID', 'BALE_ADMIN_CHAT_ID', 'BALE_BOT_USERNAME', 'BALE_MOCK']
+  for (const p of [ENV_PATH, ENV_SNAPSHOT_PATH]) {
+    try {
+      if (!existsSync(p)) continue
+      writeFileSync(p, removeEnvLines(readFileSync(p, 'utf8'), keys))
+    } catch {
+      // best-effort — never break the disconnect flow
+    }
+  }
+}
+
 /** Same shape as the Telegram mirror — the keys are just BALE_*-prefixed. */
 export type BaleEnvMirror = {
   botToken: string

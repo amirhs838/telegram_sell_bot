@@ -79,7 +79,8 @@ function fullPathOf(categories: Category[], id: string): string {
   while (cursor && !guard.has(cursor.id)) {
     guard.add(cursor.id)
     parts.unshift(cursor.name)
-    cursor = cursor.parentId ? categories.find((c) => c.id === cursor.parentId) : undefined
+    const cur = cursor
+    cursor = cur.parentId ? categories.find((c) => c.id === cur.parentId) : undefined
   }
   return parts.join(' ← ')
 }
@@ -261,7 +262,8 @@ export function CategoriesSection() {
       while (cursor?.parentId && !guard.has(cursor.parentId)) {
         guard.add(cursor.parentId)
         toExpand.add(cursor.parentId)
-        cursor = categories.find((c) => c.id === cursor.parentId)
+        const parentId = cursor.parentId
+        cursor = categories.find((c) => c.id === parentId)
       }
       if (toExpand.size > 0) {
         setExpanded((prev) => new Set([...prev, ...toExpand]))

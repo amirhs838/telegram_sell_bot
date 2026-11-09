@@ -272,10 +272,13 @@ export async function chatComplete(
 
 export type ImageResult = { base64: string; via: 'user-key' | 'platform' }
 
+/** Sizes accepted by the image gateway (SDK type union). */
+export type AiImageSize = '1024x1024' | '768x1344' | '864x1152' | '1344x768' | '1152x864' | '1440x720' | '720x1440'
+
 /** Text → image. Seller key (cogview-4) first, platform gateway fallback. */
 export async function generateImage(
   prompt: string,
-  size = '1024x1024',
+  size: AiImageSize = '1024x1024',
   timeoutMs = 150_000,
 ): Promise<ImageResult> {
   if (!userKeyBlocked()) {
@@ -332,7 +335,7 @@ export async function generateImage(
 export async function editImage(
   prompt: string,
   dataUrl: string,
-  size = '1024x1024',
+  size: AiImageSize = '1024x1024',
   timeoutMs = 150_000,
 ): Promise<ImageResult> {
   const userEditPath = (process.env.AI_USER_EDIT_PATH ?? '').trim()

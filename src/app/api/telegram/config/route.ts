@@ -11,7 +11,7 @@ import {
   getTelegramConfig,
   updateTelegramConfig,
 } from '@/lib/settings'
-import { mirrorTelegramToEnv } from '@/lib/env-mirror'
+import { mirrorTelegramToEnv, unmirrorPlatformFromEnv } from '@/lib/env-mirror'
 
 // ─── GET: current telegram connection (token masked, never returned in full) ──
 
@@ -165,6 +165,9 @@ export const PUT = route(async (req) => {
 export const DELETE = route(async () => {
   await requireAuth()
   await deleteTelegramConfig()
+  // also erase the .env mirror — otherwise the deleted token resurrects on
+  // the next restart and silently reconnects the bot the seller disconnected
+  unmirrorPlatformFromEnv('telegram')
   await resetTelegramCaches()
   await logEvent('telegram.config_removed', 'اتصال ربات و کانال تلگرام از پنل حذف شد')
   const status = await getTelegramStatus()

@@ -120,11 +120,13 @@ export function htmlToBale(html: string): string {
   )
   // <b>/<strong> → *text* with the documented padding spaces
   out = out.replace(/<(b|strong)>([\s\S]*?)<\/\1>/gi, (_m, _t, inner: string) => {
-    return ` ${padBaleMarker(stripTags(inner).trim(), '*')} `
+    const body = stripTags(inner).trim()
+    return body ? ` *${body}* ` : ''
   })
   // <i>/<em> → _text_
   out = out.replace(/<(i|em)>([\s\S]*?)<\/\1>/gi, (_m, _t, inner: string) => {
-    return ` ${padBaleMarker(stripTags(inner).trim(), '_')} `
+    const body = stripTags(inner).trim()
+    return body ? ` _${body}_ ` : ''
   })
   // <code>/<pre> → triple-backtick block (Bale's only documented code format)
   out = out.replace(/<(code|pre)>([\s\S]*?)<\/\1>/gi, (_m, _t, inner: string) => {
@@ -146,11 +148,6 @@ export function htmlToBale(html: string): string {
     .replace(/[ \t]{2,}/g, ' ')
     .replace(/\n{3,}/g, '\n\n')
   return out.trim()
-}
-
-/** Wrap inner with a Bale marker (space padding is added by the caller). */
-function padBaleMarker(inner: string, marker: string): string {
-  return inner ? `${marker}${inner}${marker}` : ''
 }
 
 function stripTags(s: string): string {
