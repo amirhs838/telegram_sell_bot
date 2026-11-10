@@ -1,31 +1,85 @@
 import 'server-only'
 
+import { existsSync } from 'node:fs'
+import path from 'node:path'
 import ZAI from 'z-ai-web-dev-sdk'
+import { db } from '@/lib/db'
 
 /**
- * Dual-provider AI layer.
+ * Three-tier AI layer — designed to keep the bot ALIVE on a bare VPS where
+ * neither the seller's key nor the platform gateway exists (root cause of the
+ * "bot answers the same menu for every message" production bug):
  *
- *  Provider A (primary) — the seller's OWN Z.ai API key (`ZAI_API_KEY` in .env)
- *    called on the public OpenAI-compatible endpoint (api.z.ai/api/paas/v4).
- *    This is the key the shop owner pays for; per the Master prompt the bot AI
- *    and the Image Studio MUST run on it.
+ *  Tier A (best) — the seller's OWN Z.ai key. Sources, in order:
+ *    1. `ZAI_API_KEY` in .env (deploy-time)
+ *    2. Setting row «zaiApiKey» — pasted from the admin panel (no SSH needed)
+ *    Called on the public OpenAI-compatible endpoint (api.z.ai/api/paas/v4).
  *
- *  Provider B (fallback) — the platform-managed z-ai-web-dev-sdk gateway.
- *    Keeps the panel fully functional when the seller's key is missing,
- *    misconfigured or rate-limited.
+ *  Tier B (sandbox/dev) — the platform-managed z-ai-web-dev-sdk gateway.
+ *    Only attempted when a .z-ai-config file actually exists (project/home/etc);
+ *    on a customer VPS it never does, and every blind attempt wasted ~seconds
+ *    before dying with "Configuration file not found".
  *
- * Provider health: an auth failure (401/“身份验证失败”) on provider A is cached
- * for a cooldown window so every request doesn't pay the extra latency; the key
- * is probed again automatically after the cooldown. 429 responses are retried
- * with real backoff (Retry-After aware) on BOTH providers.
+ *  Tier C (zero-config safety net) — a keyless OpenAI-compatible free
+ *    gateway (text.pollinations.ai/openai, env-overridable). Keeps the sales
+ *    assistant responsive out-of-the-box until the owner pastes their own key.
+ *
+ * Tier-A health: an auth failure (401) is cached for a cooldown window so
+ * every request doesn't pay the extra latency; re-probed after the cooldown.
+ * 429 responses retry with real backoff (Retry-After aware) on all tiers.
+ * EVERY leg failure is logged loudly — silent AI death must never happen again.
  */
 
 // ─── Configuration ───────────────────────────────────────────────────────────
 
 const PUBLIC_API_BASE = 'https://api.z.ai/api/paas/v4'
 
+/** Keyless safety-net gateway (OpenAI-compatible POST endpoint). */
+const FREE_API_BASE = (process.env.FREE_TEXT_API_BASE ?? 'https://text.pollinations.ai/openai').trim()
+const FREE_TEXT_MODEL = (process.env.FREE_TEXT_MODEL ?? 'openai').trim()
+
 export function userApiKey(): string {
   return (process.env.ZAI_API_KEY ?? '').trim()
+}
+
+/** Setting-row copy of the seller key (panel-editable), cached 30 s per process. */
+let settingKeyCache: { value: string; at: number } | null = null
+async function settingSellerKey(): Promise<string> {
+  const now = Date.now()
+  if (settingKeyCache && now - settingKeyCache.at < 30_000) return settingKeyCache.value
+  let value = ''
+  try {
+    const row = await db.setting.findUnique({ where: { key: 'zaiApiKey' } })
+    value = row?.value?.trim() ?? ''
+  } catch {
+    value = '' // DB hiccup must not break the AI
+  }
+  settingKeyCache = { value, at: now }
+  return value
+}
+
+/** The seller key from .env, else the panel-pasted Setting copy. */
+export async function resolveSellerKey(): Promise<string> {
+  const env = userApiKey()
+  if (env) return env
+  return settingSellerKey()
+}
+
+// ─── Tier-B availability probe (cached once per process) ────────────────────
+
+let platformGatewayUsable: boolean | null = null
+function platformConfigAvailable(): boolean {
+  if (platformGatewayUsable !== null) return platformGatewayUsable
+  const candidates = [
+    path.join(process.cwd(), '.z-ai-config'),
+    path.join(process.env.HOME ?? '/root', '.z-ai-config'),
+    '/etc/.z-ai-config',
+  ]
+  platformGatewayUsable = candidates.some((p) => existsSync(p))
+  if (!platformGatewayUsable) {
+    console.log('[ai:provider] no .z-ai-config → platform gateway tier skipped (bare-VPS mode)')
+  }
+  return platformGatewayUsable
 }
 
 export function chatModel(): string {
@@ -205,12 +259,98 @@ export type ChatMsg = { role: 'system' | 'assistant' | 'user'; content: string }
 
 export type ChatResult = {
   content: string
-  via: 'user-key' | 'platform'
+  via: 'user-key' | 'platform' | 'free'
+}
+
+// ─── Tier C cooldown (survives HMR via globalThis) ──────────────────────────
+
+/**
+ * The free gateway enforces hard per-IP quotas (observed: HTTP 402 FREE_LIMIT,
+ * «1 reply every 45 seconds per IP»). Hammering it per message wastes seconds
+ * of customer latency, so once it reports a quota failure the tier is skipped
+ * entirely for a cooldown window and the caller degrades immediately.
+ */
+const FREE_TIER_COOLDOWN_MS = 10 * 60 * 1000
+const globalForFreeTier = globalThis as unknown as { __aiFreeTierBlockedUntil?: number }
+
+function freeTierBlocked(): boolean {
+  return (globalForFreeTier.__aiFreeTierBlockedUntil ?? 0) > Date.now()
+}
+
+function blockFreeTier(reason: string): void {
+  globalForFreeTier.__aiFreeTierBlockedUntil = Date.now() + FREE_TIER_COOLDOWN_MS
+  console.warn(
+    `[ai:provider] free gateway quota exhausted (${reason}) → tier skipped for ${FREE_TIER_COOLDOWN_MS / 60000} min`,
+  )
 }
 
 /**
- * Chat completion: the seller's key first, the platform gateway as fallback.
- * Both legs get 429-aware retries; failures surface as Persian AiError.
+ * Tier C — keyless OpenAI-compatible gateway. No auth header at all; keeps
+ * the bot useful on a bare VPS with zero configuration. Env-overridable via
+ * FREE_TEXT_API_BASE / FREE_TEXT_MODEL. Quota (402/429) failures arm the
+ * cooldown instead of retrying — retrying cannot win against a per-IP quota.
+ */
+async function freeFetch(
+  messages: ChatMsg[],
+  maxTokens: number,
+  timeoutMs: number,
+  retries = 2,
+): Promise<string> {
+  let lastErr: unknown = null
+  for (let attempt = 1; attempt <= retries; attempt++) {
+    const controller = new AbortController()
+    const timer = setTimeout(() => controller.abort(), timeoutMs)
+    try {
+      const res = await fetch(FREE_API_BASE, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          model: FREE_TEXT_MODEL,
+          messages,
+          max_tokens: maxTokens,
+          temperature: 0.6,
+        }),
+        signal: controller.signal,
+      })
+      const text = await res.text()
+      if (res.ok) {
+        const data = JSON.parse(text) as {
+          choices?: Array<{ message?: { content?: string }; text?: string }>
+        }
+        const content = data.choices?.[0]?.message?.content ?? data.choices?.[0]?.text
+        if (typeof content === 'string' && content.trim() !== '') return content
+        throw new Error('پاسخ خالی از گیت‌وی رایگان')
+      }
+      // Per-IP quota → arm the cooldown and fail fast; retries are pointless.
+      if (res.status === 402 || res.status === 429) {
+        blockFreeTier(`HTTP ${res.status}: ${text.slice(0, 120)}`)
+        throw new Error(`free gateway quota (HTTP ${res.status})`)
+      }
+      lastErr = new Error(`HTTP ${res.status}: ${text.slice(0, 200)}`)
+      if (res.status >= 500 && attempt < retries) {
+        await sleep(1500 * attempt)
+        continue
+      }
+      throw lastErr
+    } catch (e) {
+      lastErr = e
+      if (e instanceof Error && e.message.startsWith('free gateway quota')) throw e
+      if (attempt < retries) {
+        await sleep(1200 * attempt)
+        continue
+      }
+      throw e
+    } finally {
+      clearTimeout(timer)
+    }
+  }
+  throw lastErr instanceof Error ? lastErr : new Error(String(lastErr))
+}
+
+/**
+ * Chat completion — three-tier chain: seller key → platform gateway → keyless
+ * free gateway. Every leg failure is LOGGED; only when all three fail does the
+ * caller see an AiError (route → 502 → bot deterministic fallback).
  */
 export async function chatComplete(
   messages: ChatMsg[],
@@ -219,8 +359,10 @@ export async function chatComplete(
   const maxTokens = opts.maxTokens ?? 900
   const timeoutMs = opts.timeoutMs ?? 60_000
 
-  // ── Provider A: seller's own key ──
-  if (!userKeyBlocked()) {
+  // ── Tier A: seller's own key (env or panel-pasted) ──
+  const sellerKey = await resolveSellerKey()
+  const keyOnCooldown = health.usable === false && Date.now() < health.nextProbeAt
+  if (sellerKey && !keyOnCooldown) {
     try {
       const data = (await publicFetch(
         '/chat/completions',
@@ -241,33 +383,57 @@ export async function chatComplete(
       if (e instanceof AuthError) {
         markAuthFailure(e.message)
       } else if (!(e instanceof RateError)) {
-        console.warn('[ai:provider] user-key chat failed → platform gateway:', (e as Error).message?.slice(0, 160))
+        console.warn('[ai:provider] user-key chat failed → next tier:', (e as Error).message?.slice(0, 160))
       } else {
-        console.warn('[ai:provider] user-key chat rate-limited → platform gateway')
+        console.warn('[ai:provider] user-key chat rate-limited → next tier')
       }
+    }
+  } else if (sellerKey && keyOnCooldown) {
+    console.warn(`[ai:provider] user key on auth cooldown (${health.lastError?.slice(0, 80)}) → next tier`)
+  }
+
+  // ── Tier B: platform gateway (only when its config file exists) ──
+  if (platformConfigAvailable()) {
+    try {
+      const sdk = await getSdk()
+      const completion = await withBackoff(
+        () =>
+          sdk.chat.completions.create({
+            messages: messages.map((m) => ({
+              role: m.role === 'system' ? ('assistant' as const) : (m.role as 'assistant' | 'user'),
+              content: m.content,
+            })),
+            thinking: { type: 'disabled' },
+            max_tokens: maxTokens,
+          }),
+        3,
+        timeoutMs,
+      )
+      const content = completion.choices[0]?.message?.content
+      if (typeof content === 'string' && content.trim() !== '') {
+        return { content, via: 'platform' }
+      }
+      throw new Error('پاسخ خالی از مدل زبانی')
+    } catch (e) {
+      console.error('[ai:provider] platform gateway chat failed → free tier:', (e as Error).message?.slice(0, 200))
     }
   }
 
-  // ── Provider B: platform gateway (z-ai-web-dev-sdk) ──
-  const sdk = await getSdk()
-  const completion = await withBackoff(
-    () =>
-      sdk.chat.completions.create({
-        messages: messages.map((m) => ({
-          role: m.role === 'system' ? ('assistant' as const) : (m.role as 'assistant' | 'user'),
-          content: m.content,
-        })),
-        thinking: { type: 'disabled' },
-        max_tokens: maxTokens,
-      }),
-    3,
-    timeoutMs,
-  )
-  const content = completion.choices[0]?.message?.content
-  if (typeof content !== 'string' || content.trim() === '') {
-    throw new AiError('پاسخ خالی از مدل زبانی')
+  // ── Tier C: keyless free gateway (bare-VPS safety net) ──
+  if (!freeTierBlocked()) {
+    try {
+      const content = await freeFetch(messages, maxTokens, timeoutMs)
+      return { content, via: 'free' }
+    } catch (e) {
+      if (!(e instanceof Error && e.message.startsWith('free gateway quota'))) {
+        console.error('[ai:provider] free gateway failed too — ALL AI tiers down:', (e as Error).message?.slice(0, 200))
+      }
+    }
+  } else {
+    console.warn('[ai:provider] free gateway on quota cooldown → all AI tiers unavailable')
   }
-  return { content, via: 'platform' }
+
+  throw new AiError('هیچ سرویس هوش مصنوعی در دسترس نیست')
 }
 
 export type ImageResult = { base64: string; via: 'user-key' | 'platform' }

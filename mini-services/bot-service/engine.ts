@@ -18,6 +18,7 @@ import { mkdir, readFile, writeFile } from 'node:fs/promises'
 import path from 'node:path'
 import {
   type InlineButton,
+  aiReplyToTelegramHtml,
   escapeHtml,
   formatMoney,
   formatNumber,
@@ -25,6 +26,7 @@ import {
   isBroadDiscoveryQuery,
   classifySmallTalk,
   smallTalkReplyFa,
+  detectBareTypeAsk,
 } from '../../src/lib/telegram-render'
 import { buildWelcomeMessage } from '../../src/lib/bot-templates'
 import { db } from './db'
@@ -339,29 +341,81 @@ async function categoriesReply(): Promise<Reply> {
 
 /**
  * Consultative answer used whenever the AI layer is unreachable or unusable:
- * short needs-assessment questions + category quick-pick buttons, so the
- * customer is guided by questions AND keeps full freedom to browse.
- * Never mentions any technical failure and never blasts product cards.
- * Gift-related messages skip the redundant "for whom?" question.
+ * CONTEXT-AWARE needs-assessment — a message that names a product type gets
+ * THAT type's follow-up questions («انگشتر مردانه یا زنانه؟ بودجه؟») plus the
+ * matching category buttons; gift messages get gift questions; anything else
+ * gets the generic needs-assessment + category quick-pick. Never mentions any
+ * technical failure and never blasts product cards.
  */
 const GIFT_INTENT_RE = /هدیه|کادو|برای\s?(مادر|پدر|همسر|خواهر|برادر|دوست|استاد|معلم|همکار)/i
 
+/**
+ * Category quick-pick for a named product type: the subcategories whose name
+ * contains the type fragment (e.g. «انگشتر زنانه»، «انگشتر مردانه»), falling
+ * back to the root categories when no dedicated subcategory exists.
+ */
+async function typeQuickPickCategories(base: string): Promise<Array<{ id: string; name: string }>> {
+  const roots = await listRootCategories().catch(() => [])
+  const matches: Array<{ id: string; name: string }> = []
+  for (const r of roots) {
+    const kids = await listChildCategories(r.id).catch(() => [])
+    for (const k of kids) {
+      if (k.name.includes(base) && !matches.some((m) => m.id === k.id)) matches.push(k)
+    }
+  }
+  return matches.length > 0 ? matches : roots
+}
+
 async function consultCategoriesReply(userText?: string): Promise<Reply> {
+  const text = (userText ?? '').trim()
+  const base = detectBareTypeAsk(text)
+
+  // Named product type → the user's own example of a RIGHT question:
+  // «انگشتر مردانه یا زنانه؟ تا چه قیمتی؟» + that type's category buttons.
+  if (base) {
+    const cats = await typeQuickPickCategories(base)
+    const kb: InlineButton[][] =
+      cats.length > 0 ? [...categoryKeyboardRows(cats), HOME_ROW] : MAIN_MENU
+    return {
+      text: [
+        `${base}های متنوعی داریم 😊`,
+        '',
+        '۱️⃣ مردانه می‌خواهید یا زنانه؟',
+        '۲️⃣ حدود بودجه‌تان چقدر است؟',
+        '',
+        'یا مستقیم یکی از دسته‌های زیر را انتخاب کنید 👇',
+      ].join('\n'),
+      keyboard: kb,
+    }
+  }
+
   const cats = await listRootCategories().catch(() => [])
-  const gift = userText ? GIFT_INTENT_RE.test(userText) : false
-  const text = [
-    'برای اینکه بهترین پیشنهاد را به شما بدهم، لطفاً کوتاه راهنمایی‌ام کنید 😊',
-    '',
-    gift ? '۱️⃣ دقیقاً برای چه کسی می‌خواهید؟ (مادر، همسر، …)' : '۱️⃣ برای خودتان می‌خواهید یا برای هدیه؟',
-    '۲️⃣ حدود بودجه‌تان چقدر است؟',
-    '',
-    'یا مستقیم یکی از دسته‌ها را انتخاب کنید تا گزینه‌هایش را ببینید 👇',
-  ].join('\n')
+  const gift = text ? GIFT_INTENT_RE.test(text) : false
+  const lines: string[] = []
+  if (gift) {
+    lines.push(
+      'چه خوب! برای انتخاب هدیهٔ مناسب کوتاه راهنمایی‌ام کنید 😊',
+      '',
+      '۱️⃣ دقیقاً برای چه کسی می‌خواهید؟ (مادر، همسر، …)',
+      '۲️⃣ حدود بودجه‌تان چقدر است؟',
+    )
+  } else {
+    lines.push(
+      'برای اینکه بهترین پیشنهاد را به شما بدهم، لطفاً کوتاه راهنمایی‌ام کنید 😊',
+      '',
+      '۱️⃣ برای خودتان می‌خواهید یا برای هدیه؟',
+      '۲️⃣ حدود بودجه‌تان چقدر است؟',
+    )
+  }
+  if (cats.length > 0) {
+    lines.push('', 'یا مستقیم یکی از دسته‌ها را انتخاب کنید تا گزینه‌هایش را ببینید 👇')
+  }
+  const replyText = lines.join('\n')
   if (cats.length === 0) {
-    return { text, keyboard: MAIN_MENU }
+    return { text: replyText, keyboard: MAIN_MENU }
   }
   const kb: InlineButton[][] = [...categoryKeyboardRows(cats), HOME_ROW]
-  return { text, keyboard: kb }
+  return { text: replyText, keyboard: kb }
 }
 
 /**
@@ -1016,7 +1070,7 @@ async function freeTextReply(
 
   const ai = await askAiAssistant(telegramUserId, text, firstName)
   if (ai) {
-    const out: Reply[] = [{ text: escapeHtml(ai.reply) }]
+    const out: Reply[] = [{ text: aiReplyToTelegramHtml(ai.reply) }]
     if (ai.toolsUsed.includes('request_operator') && !ai.reply.includes('همکار')) {
       out.push({ text: OPERATOR_REFERRAL })
     }

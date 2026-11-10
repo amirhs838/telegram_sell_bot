@@ -16,6 +16,8 @@ import {
   isBroadDiscoveryQuery,
   classifySmallTalk,
   smallTalkReplyFa,
+  detectBareTypeAsk,
+  bareTypeFollowUpFa,
 } from '@/lib/telegram-render'
 
 const MAX_TOOL_ITERATIONS = 6
@@ -33,6 +35,7 @@ const SYSTEM_PROMPT = `تو نماینده فروش و مشاور فروشگاه
 سبک فروش و گفتگو:
 - نیازسنجی را در دل مکالمه طبیعی انجام بده: نوع محصول (انگشتر، گردنبند، دستبند، …)، برای خود مشتری است یا هدیه، برای چه کسی (جنسیت و سلیقهٔ او)، سبک موردعلاقه، بودجه و در صورت لزوم سایز. هر بار فقط یک یا دو سؤال بپرس، نه یک فرم کامل.
 - اگر مشتری گفت برای هدیه یا برای یک نفر (مادر، پدر، همسر، دوست، …) می‌خواهد: اول یک جملهٔ کوتاه و گرم، بعد یک یا دو سؤال نیازسنجی (سلیقه، بودجه، مناسبتی که هدیه باید حس آن را بدهد) بپرس و هنوز محصول نفرست؛ فقط وقتی مشتری سلیقه/بودجه/دسته‌اش را گفت با search_products پیشنهاد بده.
+- **اگر مشتری فقط نوع محصول را گفت و نه جنسیت/گیرنده و نه بودجه (مثلاً «انگشتر می‌خوام»): هرگز فوراً محصول نفرست.** اول یک یا دو سؤال دقیق بپرس — «انگشتر مردانه می‌خواهید یا زنانه؟» و «حدود بودجه‌تان چقدر است؟» — و تا پاسخ مشتری را نگرفتی search_products را صدا نزن. بعد از پاسخ مشتری، با همان مشخصات (جنسیت + بودجه) جستجو کن و بهترین گزینه‌ها را با قیمت واقعی معرفی کن.
 - **سؤال کلی «چیا دارید؟ / چه محصولاتی دارید؟» را هرگز با لیست یا عکس محصول جواب نده.** برای این سؤال‌های کلی: اول با get_categories دسته‌ها را ببین، بعد یک پاسخ مشاوره‌ای کوتاه بنویس که (۱) دسته‌های فروشگاه را با شمارندهٔ واقعی معرفی می‌کند، (۲) یک تا دو سؤال نیازسنجی می‌پرسد و (۳) دست مشتری را باز می‌گذارد («هر دسته‌ای که مدنظرتان بود بگویید تا بهترین گزینه‌ها را نشان بدهم»). در این حالت search_products را صدا نزن تا عکس محصول ارسال نشود — معرفی محصول بعد از این‌که مشتری دسته/سلیقه/بودجه‌اش را گفت.
 - پیشنهادها را «فقط» از موجودی واقعی فروشگاه با ابزارها انتخاب کن و تفاوت‌های گزینه‌ها (قیمت، عیار، وزن، سایز، مدل) را شفاف مقایسه کن.
 - به تردیدها و اعتراض‌ها (قیمت، عیار، وزن، ارسال، تعویض، اصالت) فقط با داده واقعی ابزارها یا تنظیمات فروشگاه پاسخ بده؛ اگر داده‌ای نداری، صادقانه بگو و پیشنهاد پیگیری انسانی بده.
@@ -46,6 +49,7 @@ const SYSTEM_PROMPT = `تو نماینده فروش و مشاور فروشگاه
   • خرید/هدیه برای خانم (مادر، خواهر، همسر، دوست): «زنانه» یا «هر دو» مناسب است؛ محصول صریحاً «مردانه» را فقط اگر خود مشتری خواست.
   • اگر audience محصولی «نامشخص» بود و جنسیت برای انتخاب مهم است، پیش از پیشنهاد get_product را صدا بزن و توضیح کامل را بخوان؛ اگر باز روشن نشد، از مشتری بپرس یا گزینه‌های با سیگنال واضح‌تر را پیشنهاد بده.
   • در search_products برای شخصِ مشخص، واژهٔ جنسیت را در query هم بیاور (مثلاً «انگشتر مردانه»، «دستبند مردانه») و از نتیجه‌ها فقط موارد هم‌جنس را انتخاب کن.
+  • **این قانون در «متن پاسخ» هم رعایت شود:** وقتی مشتری دربارهٔ محصول مردانه می‌پرسد (قیمت، مدل، موجودی)، هرگز محصول زنانه را حتی به‌عنوان نام یا گزینهٔ سوم هم در متن نیاور؛ و برعکس. اگر جستجو نتیجهٔ هم‌جنس نداشت، صادقانه بگو و از مشتری اجازه بگیر.
   • راهنمای رایج: برای آقایان → انگشتر مردانه، زنجیر/دستبند مردانه، شمش؛ برای بانوان → گردنبند ظریف، گوشواره، ست هدیه، انگشتر ظریف.
 - هرگز قیمت، موجودی، وزن، عیار، ضمانت، شرایط ارسال یا تخفیف از خودت نساز — همه فقط از نتایج ابزارها.
 - هرگز قیمت لحظه‌ای نقره را از اینترنت یا دانش خودت نیاور؛ نرخ نقره فقط از ابزار get_silver_rate. اگر نرخ ثبت نشده بود، صادقانه بگو «نرخ نقره فعلاً در سیستم ثبت نشده است».
@@ -53,6 +57,7 @@ const SYSTEM_PROMPT = `تو نماینده فروش و مشاور فروشگاه
 - اگر پاسخ سؤالی را نداری، صادقانه اعتراف کن و ابزار request_operator را برای ارجاع به همکار انسانی بزن.
 - اگر مستقیماً پرسیدند «انسان هستی؟»، صادقانه بگو دستیار هوشمند فروشگاه هستی و در صورت تمایل همکار انسانی ادامه می‌دهد؛ هرگز ادعای انسان بودن نکن.
 - اطلاعات پرداخت و سیاست‌های فروشگاه فقط از ابزار get_store_policies.
+- **برای هر سؤال دربارهٔ شرایط ارسال، زمان/هزینهٔ ارسال، بازگشت کالا، تعویض یا گارانتی: اول get_store_policies را صدا بزن و فقط بر اساس نتیجه‌اش جواب بده؛ هرگز زمان یا هزینهٔ ارسال را از خودت نساز و حدس نزن.** اگر آن ابزار نتیجهٔ خالی داد، صادقانه بگو اطلاعات دقیق را همکاران اعلام می‌کنند و request_operator را بزن.
 
 پروتکل: در هر نوبت «فقط» یک شیء JSON برگردان، بدون متن اضافه، بدون markdown:
 - صدا زدن ابزار: {"tool":"نام ابزار","args":{...}}
@@ -577,7 +582,8 @@ async function assistantTurn(
     try {
       raw = (await chatRawMessages(call)).trim()
     } catch (e) {
-      if (e instanceof AiError) throw e // infra/rate failure → caller decides
+      // ALWAYS log model-call failures — a silent dead AI is undebuggable.
+      console.error('[ai:assistant] chatRawMessages failed:', e instanceof Error ? e.message : e)
       throw e
     }
 
@@ -633,6 +639,19 @@ export async function runAssistant(input: {
   // generated and personal, but product cards are withheld until the customer
   // names a category/taste/budget (enforced again on the bot side too).
   const broadDiscovery = isBroadDiscoveryQuery(message)
+  // Bare product-type ask («انگشتر میخوام» — no gender/gift, no budget) →
+  // DETERMINISTIC consult-first: ask «مردانه یا زنانه؟ بودجه؟» and wait. The
+  // model cannot be trusted to obey this reliably, so it is enforced here —
+  // zero cost, zero latency, always the owner's requested behavior. The next
+  // message (with gender/budget) flows into the full tool-loop assistant.
+  const bareType = detectBareTypeAsk(message)
+  if (bareType) {
+    return {
+      reply: bareTypeFollowUpFa(bareType),
+      toolsUsed: [],
+      productIds: [],
+    }
+  }
   const toolsUsed: string[] = []
   const surfaced: { id: string; audience: string }[] = []
   const trackProduct = (id: string, meta?: { audience?: string }): void => {
@@ -681,9 +700,17 @@ export async function runAssistant(input: {
         turn = await assistantTurn(messages)
       } catch (e) {
         if (e instanceof AiError) throw e // propagate → outer catch → AiError rethrown
-        break // model never produced anything usable → deterministic fallback
+        // NON-AiError (network/SDK/timeout) — previously swallowed SILENTLY here,
+        // which made the bot answer the same fallback for every message with zero
+        // trace in the logs. Log loudly, then degrade.
+        console.error('[ai:assistant] model turn crashed (non-AiError):', e instanceof Error ? e.message : e)
+        break
       }
-      if (!turn) break // no valid protocol turn → deterministic fallback
+      if (!turn) {
+        // 3 protocol attempts produced neither valid JSON nor salvageable text
+        console.error('[ai:assistant] model produced no usable protocol turn after retries → fallback')
+        break
+      }
 
       if ('reply' in turn) {
         return {

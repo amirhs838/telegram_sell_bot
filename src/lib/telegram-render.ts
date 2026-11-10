@@ -282,6 +282,72 @@ export function isBroadDiscoveryQuery(text: string): boolean {
   return BROAD_DISCOVERY_RE.test(t)
 }
 
+// ─── Bare product-type ask detection (pure — shared by assistant + bot) ──────
+
+/**
+ * Product-type keywords → the follow-up label used when the customer names a
+ * type WITHOUT any gender/gift target or budget. For those the assistant must
+ * ask «مردانه یا زنانه؟ بودجه؟» FIRST instead of blasting mixed-gender cards
+ * (owner-reported bug: «انگشتر میخوام» dumped a generic form / mixed cards).
+ */
+export const PRODUCT_TYPE_CONSULT: { re: RegExp; base: string }[] = [
+  { re: /انگشتر|حلقه/, base: 'انگشتر' },
+  { re: /گردنبند|آویز/, base: 'گردنبند' },
+  { re: /دستبند|النگو|پابند/, base: 'دستبند' },
+  { re: /زنجیر/, base: 'زنجیر' },
+  { re: /گوشواره/, base: 'گوشواره' },
+  { re: /(^|\s)(نیم‌)?ست($|\s|[،!.؟])/u, base: 'ست' },
+  { re: /شمش/, base: 'شمش' },
+]
+
+/**
+ * A "bare" product-type ask: names a type but NO gender/gift target and NO
+ * price/budget signal. Returns the type label («انگشتر») or null.
+ * «زن»/«مرد» single words are deliberately NOT matched («زن» lives inside
+ * «زنجیر» — would break bare chain asks); full words like زنانه/مردانه only.
+ */
+export function detectBareTypeAsk(text: string): string | null {
+  const t = (text ?? '').trim()
+  if (!t || t.length > 60) return null
+  const type = PRODUCT_TYPE_CONSULT.find((x) => x.re.test(t))
+  if (!type) return null
+  const hasGenderOrGift =
+    /(مردانه|زنانه|آقا|آقای|آقایان|خانم|بانو|بانوان|مادر|پدر|همسر|خواهر|برادر|دوست|استاد|معلم|همکار|پسر|دختر|شوهر|خودم|هدیه|کادو|بچه)/i.test(
+      t,
+    )
+  if (hasGenderOrGift) return null
+  const hasPriceOrBudget =
+    /(قیمت|بودجه|تومان|تومن|میلیون|هزار|چنده|چقدر|قیمتی|ارزان|گران|زیر|بالای)/i.test(t)
+  if (hasPriceOrBudget) return null
+  return type.base
+}
+
+/** The deterministic consult-first follow-up for a bare type ask. */
+export function bareTypeFollowUpFa(base: string): string {
+  return [
+    `${base}های متنوعی داریم 😊`,
+    '',
+    '۱️⃣ مردانه می‌خواهید یا زنانه؟',
+    '۲️⃣ حدود بودجه‌تان چقدر است؟',
+    '',
+    'بگویید تا بهترین گزینه‌ها را با قیمت واقعی معرفی کنم 💎',
+  ].join('\n')
+}
+
+/**
+ * AI replies arrive in light markdown (`**bold**`, `*italic*`, `` `code` ``)
+ * but the bot sends with Telegram's HTML parse mode — raw asterisks would show
+ * literally in the customer's chat. Escape HTML first, then convert the few
+ * markdown constructs Telegram supports.
+ */
+export function aiReplyToTelegramHtml(reply: string): string {
+  let s = escapeHtml(reply)
+  s = s.replace(/\*\*([^*\n]+)\*\*/g, '<b>$1</b>')
+  s = s.replace(/(^|\s)\*([^*\n]+)\*(?=\s|[،!.؟:]|$)/gu, '$1<i>$2</i>')
+  s = s.replace(/`([^`\n]+)`/g, '<code>$1</code>')
+  return s
+}
+
 // ─── Small talk classification (pure — shared by panel + bot) ────────────────
 
 export type SmallTalkKind = 'greeting' | 'thanks' | 'bye'
@@ -304,6 +370,9 @@ const GREETING_TOKENS = new Set([
   'سلام', 'سلامعلیکم', 'السلام', 'علیکم', 'درود', 'هی', 'های',
   'خوبید', 'چطورید', 'خستگی', 'نباشید', 'خسته', 'بخیر',
   'صبح', 'عصر', 'شب', 'وقت', 'امروز', 'خوب', 'علیکمسلام',
+  // colloquial how-are-you forms — «سلام چطوری» / «سلام خوبی؟» / «چه خبر»
+  'چطوری', 'چطوره', 'چطورین', 'خوبی', 'خوبین', 'چه', 'خبر',
+  'احوال', 'اوضاع', 'شما', 'بر', 'تو', 'شون', 'ایشون',
   'hi', 'hello', 'hey', 'salam',
 ])
 

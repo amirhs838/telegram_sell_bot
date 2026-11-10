@@ -27,6 +27,7 @@ import {
   MessageSquareHeart,
   RotateCcw,
   TriangleAlert,
+  Zap,
 } from 'lucide-react'
 import {
   AlertDialog,
@@ -52,7 +53,8 @@ import {
   renderWelcomeTemplate,
 } from '@/lib/bot-templates'
 
-type SettingsResp = { settings: Settings; telegram: TelegramInfo }
+type AiKeyStatus = { keySource: 'env' | 'panel' | 'none' }
+type SettingsResp = { settings: Settings; telegram: TelegramInfo; ai: AiKeyStatus }
 
 export function SettingsSection() {
   const [data, setData] = useState<SettingsResp | null>(null)
@@ -112,7 +114,7 @@ export function SettingsSection() {
       <PaymentDestinationsCard />
 
       <div className="grid gap-4 md:gap-6 lg:grid-cols-2">
-        <AiAssistantCard settings={data.settings} onSaved={load} />
+        <AiAssistantCard settings={data.settings} ai={data.ai} onSaved={load} />
         <TelegramStatusCard telegram={data.telegram} />
       </div>
 
@@ -647,13 +649,17 @@ function PaymentDestinationsCard() {
 
 function AiAssistantCard({
   settings,
+  ai,
   onSaved,
 }: {
   settings: Settings
+  ai: AiKeyStatus
   onSaved: () => void
 }) {
   const [aiEnabled, setAiEnabled] = useState(Boolean(settings.aiEnabled))
   const [aiTone, setAiTone] = useState(settings.aiTone ?? '')
+  const [apiKey, setApiKey] = useState('')
+  const [testing, setTesting] = useState(false)
   const [saving, setSaving] = useState(false)
 
   // re-sync when settings reload from the server
@@ -662,9 +668,13 @@ function AiAssistantCard({
     setAiTone(settings.aiTone ?? '')
   }, [settings])
 
-  async function save() {
+  async function save(clearKey = false) {
     if (aiTone.length > 1000) {
       toast.error('متن لحن دستیار حداکثر ۱۰۰۰ کاراکتر است')
+      return
+    }
+    if (!clearKey && apiKey.trim() && apiKey.trim().length < 20) {
+      toast.error('کلید واردشده کوتاه به نظر می‌رسد')
       return
     }
     setSaving(true)
@@ -674,9 +684,12 @@ function AiAssistantCard({
         body: JSON.stringify({
           aiEnabled,
           aiTone: aiTone.trim() || undefined,
+          ...(apiKey.trim() ? { zaiApiKey: apiKey.trim() } : {}),
+          ...(clearKey ? { zaiApiKeyClear: true } : {}),
         }),
       })
-      toast.success('تنظیمات دستیار ذخیره شد')
+      toast.success(clearKey ? 'کلید حذف شد' : 'تنظیمات دستیار ذخیره شد')
+      if (!clearKey) setApiKey('')
       onSaved()
     } catch (err) {
       toast.error((err as Error).message)
@@ -684,6 +697,44 @@ function AiAssistantCard({
       setSaving(false)
     }
   }
+
+  async function testConnection() {
+    setTesting(true)
+    try {
+      const res = await api<{ ok: boolean; via?: string; latencyMs?: number; error?: string }>(
+        '/api/ai/test-key',
+        { method: 'POST' },
+      )
+      if (res.ok) {
+        const viaLabel =
+          res.via === 'user-key'
+            ? 'کلید اختصاصی Z.ai'
+            : res.via === 'platform'
+              ? 'گیت‌وی پلتفرم'
+              : 'گیت‌وی رایگان (محدود)'
+        toast.success(
+          `اتصال برقرار است (${viaLabel}) — ${fmtNumber(Math.round((res.latencyMs ?? 0) / 100) / 10)} ثانیه`,
+        )
+      } else {
+        toast.error(`اتصال ناموفق: ${res.error ?? 'خطای نامشخص'}`)
+      }
+    } catch (err) {
+      toast.error((err as Error).message)
+    } finally {
+      setTesting(false)
+    }
+  }
+
+  const keyBadge =
+    ai.keySource === 'env' ? (
+      <Badge className="bg-emerald-100 text-emerald-800 hover:bg-emerald-100">کلید از فایل سرور</Badge>
+    ) : ai.keySource === 'panel' ? (
+      <Badge className="bg-emerald-100 text-emerald-800 hover:bg-emerald-100">کلید متصل است</Badge>
+    ) : (
+      <Badge variant="outline" className="border-amber-300 text-amber-700">
+        بدون کلید — حالت محدود
+      </Badge>
+    )
 
   return (
     <Card className="rounded-xl shadow-sm">
@@ -694,7 +745,58 @@ function AiAssistantCard({
         </CardTitle>
       </CardHeader>
       <CardContent className="space-y-4">
-        <div className="flex items-center justify-between gap-3 rounded-xl border bg-muted/30 p-3">
+        {/* Z.ai key — Tier A: the seller's own paid key gives full-quality replies */}
+        <div className="space-y-2 rounded-xl border bg-muted/30 p-3">
+          <div className="flex items-center justify-between gap-2">
+            <Label htmlFor="ai-key" className="text-sm font-medium">
+              کلید هوش مصنوعی Z.ai
+            </Label>
+            {keyBadge}
+          </div>
+          <p className="text-xs leading-5 text-muted-foreground">
+            کلید خود را از z.ai بگیرید و اینجا وارد کنید تا دستیار فروش با بهترین کیفیت پاسخ بدهد.
+            بدون کلید، دستیار با گزینه‌های جایگزین محدود کار می‌کند.
+          </p>
+          <div className="flex flex-col gap-2 sm:flex-row">
+            <Input
+              id="ai-key"
+              type="password"
+              dir="ltr"
+              autoComplete="off"
+              value={apiKey}
+              onChange={(e) => setApiKey(e.target.value)}
+              placeholder={
+                ai.keySource === 'none'
+                  ? 'کلید Z.ai خود را اینجا بچسبانید'
+                  : '•••••••• (برای تغییر، کلید جدید وارد کنید)'
+              }
+            />
+            <div className="flex gap-2">
+              <Button onClick={() => save(false)} disabled={saving} className="sm:w-auto">
+                {saving && <Loader2 className="size-4 animate-spin" aria-hidden />}
+                ذخیره
+              </Button>
+              <Button variant="outline" onClick={testConnection} disabled={testing}>
+                {testing ? <Loader2 className="size-4 animate-spin" aria-hidden /> : <Zap className="size-4" aria-hidden />}
+                تست اتصال
+              </Button>
+            </div>
+          </div>
+          {ai.keySource === 'panel' && (
+            <Button
+              variant="ghost"
+              size="sm"
+              className="h-8 text-destructive hover:text-destructive"
+              onClick={() => save(true)}
+              disabled={saving}
+            >
+              <Trash2 className="size-3.5" aria-hidden />
+              حذف کلید
+            </Button>
+          )}
+        </div>
+
+        <div className="flex items-center justify-between gap-3 rounded-xl border p-3">
           <div>
             <Label htmlFor="ai-enabled" className="text-sm font-medium">
               فعال‌بودن دستیار فروش
