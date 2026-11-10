@@ -26,7 +26,19 @@ import {
   ShieldCheck,
   MessageSquareHeart,
   RotateCcw,
+  TriangleAlert,
 } from 'lucide-react'
+import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+  AlertDialogTrigger,
+} from '@/components/ui/alert-dialog'
 import { toast } from 'sonner'
 import {
   api,
@@ -105,6 +117,7 @@ export function SettingsSection() {
       </div>
 
       <PasswordCard />
+      <DangerZoneCard />
     </div>
   )
 }
@@ -880,6 +893,151 @@ function PasswordCard() {
             </Button>
           </div>
         </form>
+      </CardContent>
+    </Card>
+  )
+}
+
+// ---------------------------------------------------------------------------
+// 8) Danger zone — irreversible database reset
+// ---------------------------------------------------------------------------
+
+type ResetScope = 'catalog' | 'sales' | 'all'
+
+const RESET_OPTIONS: {
+  scope: ResetScope
+  title: string
+  description: string
+}[] = [
+  {
+    scope: 'catalog',
+    title: 'حذف محصولات و دسته‌بندی‌ها',
+    description: 'همهٔ محصولات، دسته‌ها، گالری تصاویر و نوشته‌های منتشرشده در کانال حذف می‌شوند. سفارش‌ها و مشتریان دست‌نخورده می‌مانند.',
+  },
+  {
+    scope: 'sales',
+    title: 'حذف سفارش‌ها و مشتریان',
+    description: 'همهٔ سفارش‌ها، پرداخت‌ها، مشتریان، گفتگوهای ربات و شماره‌گذاری سفارش‌ها از صفر شروع می‌شود. محصولات دست‌نخورده می‌مانند.',
+  },
+  {
+    scope: 'all',
+    title: 'ریست کامل فروشگاه',
+    description: 'محصولات + دسته‌بندی‌ها + سفارش‌ها + مشتریان، همه با هم حذف می‌شوند. فروشگاه کاملاً خالی می‌شود.',
+  },
+]
+
+function DangerZoneCard() {
+  const [scope, setScope] = useState<ResetScope | null>(null)
+  const [confirmText, setConfirmText] = useState('')
+  const [busy, setBusy] = useState<ResetScope | null>(null)
+
+  const option = RESET_OPTIONS.find((o) => o.scope === scope) ?? null
+  const confirmReady = confirmText.trim() === 'ریست'
+
+  async function runReset() {
+    if (!scope) return
+    setBusy(scope)
+    try {
+      const d = await api<{ ok: boolean; message: string; deleted: Record<string, number> }>(
+        '/api/admin/reset',
+        {
+          method: 'POST',
+          body: JSON.stringify({ scope, confirm: 'ریست' }),
+        },
+      )
+      const total = Object.values(d.deleted ?? {}).reduce((a, b) => a + (b ?? 0), 0)
+      toast.success(`${d.message} (${fmtNumber(total)} رکورد حذف شد)`)
+      setScope(null)
+      setConfirmText('')
+    } catch (err) {
+      toast.error((err as Error).message)
+    } finally {
+      setBusy(null)
+    }
+  }
+
+  return (
+    <Card className="rounded-xl border-red-200 shadow-sm">
+      <CardHeader>
+        <CardTitle className="flex items-center gap-2 text-base text-red-700">
+          <TriangleAlert className="size-4" aria-hidden />
+          منطقهٔ خطر — بازنشانی دیتابیس
+        </CardTitle>
+      </CardHeader>
+      <CardContent className="space-y-4">
+        <p className="text-sm leading-6 text-muted-foreground">
+          این عملیات <span className="font-semibold text-red-600">غیرقابل بازگشت</span> است.
+          اطلاعات فروشگاه (نام، رمز عبور، کارت‌های پرداخت و نرخ نقره) حفظ می‌شود؛ فقط داده‌های
+          انتخاب‌شده در هر گزینه پاک می‌شوند. قبل از ریست، از بکاپ روزانه مطمئن شوید.
+        </p>
+        <div className="grid gap-3 md:grid-cols-3">
+          {RESET_OPTIONS.map((o) => (
+            <div
+              key={o.scope}
+              className="flex flex-col justify-between gap-3 rounded-lg border border-red-100 bg-red-50/40 p-4"
+            >
+              <div className="space-y-1">
+                <p className="text-sm font-semibold text-red-800">{o.title}</p>
+                <p className="text-xs leading-5 text-muted-foreground">{o.description}</p>
+              </div>
+              <AlertDialog
+                onOpenChange={(open) => {
+                  if (!open) {
+                    setScope(null)
+                    setConfirmText('')
+                  }
+                }}
+              >
+                <AlertDialogTrigger asChild>
+                  <Button
+                    variant="destructive"
+                    size="sm"
+                    className="w-full"
+                    onClick={() => {
+                      setScope(o.scope)
+                      setConfirmText('')
+                    }}
+                  >
+                    <Trash2 className="size-4" aria-hidden />
+                    {o.title}
+                  </Button>
+                </AlertDialogTrigger>
+                <AlertDialogContent dir="rtl" className="max-h-[90vh] overflow-y-auto sm:max-w-md">
+                  <AlertDialogHeader className="text-right">
+                    <AlertDialogTitle className="text-red-700">{option?.title}</AlertDialogTitle>
+                    <AlertDialogDescription className="leading-6">
+                      {option?.description}
+                      <br />
+                      <br />
+                      برای تأیید، کلمهٔ <span className="font-bold text-red-700" dir="rtl">ریست</span> را در کادر زیر بنویسید.
+                    </AlertDialogDescription>
+                  </AlertDialogHeader>
+                  <Input
+                    dir="rtl"
+                    placeholder="ریست"
+                    value={confirmText}
+                    onChange={(e) => setConfirmText(e.target.value)}
+                    aria-label="کلمهٔ تأیید"
+                  />
+                  <AlertDialogFooter className="flex-row-reverse gap-2">
+                    <AlertDialogAction
+                      disabled={!confirmReady || busy !== null}
+                      onClick={(e) => {
+                        e.preventDefault() // keep the dialog open while busy
+                        void runReset()
+                      }}
+                      className="bg-red-600 text-white hover:bg-red-700"
+                    >
+                      {busy !== null && <Loader2 className="size-4 animate-spin" aria-hidden />}
+                      بله، حذف کن
+                    </AlertDialogAction>
+                    <AlertDialogCancel>انصراف</AlertDialogCancel>
+                  </AlertDialogFooter>
+                </AlertDialogContent>
+              </AlertDialog>
+            </div>
+          ))}
+        </div>
       </CardContent>
     </Card>
   )

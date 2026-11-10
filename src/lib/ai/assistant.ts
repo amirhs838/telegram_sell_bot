@@ -10,6 +10,7 @@ import { z } from 'zod'
 import { db } from '@/lib/db'
 import { chatRawMessages, tryExtractJson, AiError } from '@/lib/ai/client'
 import { semanticSearch } from '@/lib/ai/embedding'
+import { extractPriceFilterFa } from '@/lib/ai/retrieval'
 import {
   orderStatusFa,
   isBroadDiscoveryQuery,
@@ -58,7 +59,7 @@ const SYSTEM_PROMPT = `تو نماینده فروش و مشاور فروشگاه
 - پاسخ نهایی به کاربر: {"reply":"متن پاسخ فارسی"}
 
 ابزارهای موجود:
-- search_products → args: {"query":"متن جستجو (اختیاری)","category":"نام دسته (اختیاری)","max_price":"حداکثر قیمت تومان (اختیاری)","min_price":"حداقل قیمت (اختیاری)"}
+- search_products → args: {"query":"۲ تا ۴ کلیدواژه محصول (بدون قیمت، بدون جمله کامل)","category":"نام دسته (اختیاری)","max_price":"حداکثر قیمت تومان (اختیاری)","min_price":"حداقل قیمت (اختیاری)"}
 - get_product → args: {"product_id":"شناسه محصول"}
 - check_stock → args: {"product_id":"شناسه محصول"}
 - compare_products → args: {"product_ids":["شناسه",...]} یا {"names":["نام محصول",...]} — حداکثر ۳ محصول
@@ -70,6 +71,7 @@ const SYSTEM_PROMPT = `تو نماینده فروش و مشاور فروشگاه
 
 نکته‌ها:
 - اعداد قیمت‌ها در نتایج ابزار به تومان هستند.
+- **query برای search_products همیشه کوتاه و کلیدواژه‌ای است** (مثل: «گردنبند ظریف زنانه»)؛ هرگز قیمت، جمله کامل یا کلمات محاوره‌ای داخل query ننویس — بودجه را فقط از طریق min_price و max_price منتقل کن. اگر مشتری «زیر ۲ میلیون» گفت → max_price: "2000000".
 - قبل از معرفی محصول، ابتدا search_products را صدا بزن؛ قیمت/موجودی را فقط از TOOL_RESULT بردار.
 - اگر search_products نتیجهٔ خالی داد، هرگز نگویید «موجود نیست» — یک بار دیگر با query ساده‌تر و بدون فیلتر دسته/قیمت امتحان کن؛ فقط اگر دوباره خالی بود، صادقانه بگو و دسته‌های موجود را (از get_categories) پیشنهاد بده.
 - نام دسته‌ها هرگز از خودت نساز؛ فقط همان‌هایی که get_categories برگرداند.
@@ -148,12 +150,22 @@ async function executeTool(
         const match = cats.find((c) => c.name.includes(categoryArg))
         if (match) categoryId = match.id
       }
-      const hits = await semanticSearch(query, {
+      // price filters: explicit tool args WIN; a price phrase inside the query
+      // («زیر ۲ میلیون») is parsed and applied when args are missing
+      const fromQuery = extractPriceFilterFa(query)
+      const minPrice = toFiniteNumber(args.min_price) ?? fromQuery.min
+      const maxPrice = toFiniteNumber(args.max_price) ?? fromQuery.max
+      let hits = await semanticSearch(query, {
         limit: 6,
         categoryId,
-        minPrice: toFiniteNumber(args.min_price),
-        maxPrice: toFiniteNumber(args.max_price),
+        minPrice,
+        maxPrice,
       })
+      // second chance: a too-tight price band is the #1 empty-result cause —
+      // retry once without the price filters before telling the model «empty»
+      if (hits.length === 0 && (minPrice !== undefined || maxPrice !== undefined)) {
+        hits = await semanticSearch(query, { limit: 6, categoryId })
+      }
       const rows = hits.map((h) => {
         const audience = deriveAudience({
           name: h.product.name,
