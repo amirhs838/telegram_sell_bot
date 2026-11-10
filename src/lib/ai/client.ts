@@ -19,7 +19,9 @@ export function getZai(): Promise<ZAI> {
 }
 
 async function complete(messages: ChatMessage[]): Promise<string> {
-  const { content } = await chatComplete(messages, { maxTokens: 900 })
+  // 2000: Gemini 3.x thinking models burn hidden reasoning tokens from the
+  // same budget — 900 starved the visible reply (empty content, finish "length").
+  const { content } = await chatComplete(messages, { maxTokens: 2000 })
   return content
 }
 

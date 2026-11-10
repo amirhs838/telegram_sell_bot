@@ -1017,7 +1017,9 @@ async function askAiAssistant(
 ): Promise<AiAnswer | null> {
   const key = await resolveInternalApiKey()
   const controller = new AbortController()
-  const timer = setTimeout(() => controller.abort(), 60_000)
+  // 90s: the assistant may run several Gemini tool-loop rounds (search → read
+  // → answer); 60s could cut off legitimate multi-tool turns.
+  const timer = setTimeout(() => controller.abort(), 90_000)
   try {
     const res = await fetch('http://127.0.0.1:3000/api/internal/ai-assistant', {
       method: 'POST',

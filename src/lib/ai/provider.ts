@@ -82,9 +82,12 @@ export function geminiEnvKey(): string {
   return (process.env.GEMINI_API_KEY ?? '').trim()
 }
 
-/** Owner-selectable Gemini model (default: fast + great Persian + free tier). */
+/** Owner-selectable Gemini model (default: fast + great Persian + free tier).
+ *  NOTE: Gemini 3.x models are "thinking" models — hidden reasoning tokens
+ *  consume the max_tokens budget, so the Gemini leg always raises the token
+ *  ceiling and runs with reasoning_effort "low" for snappy sales replies. */
 export function geminiModel(): string {
-  return (process.env.GEMINI_TEXT_MODEL ?? 'gemini-2.0-flash').trim()
+  return (process.env.GEMINI_TEXT_MODEL ?? 'gemini-3.5-flash').trim()
 }
 
 let geminiSettingKeyCache: { value: string; at: number } | null = null
@@ -169,6 +172,11 @@ async function geminiChatFetch(
           messages,
           max_tokens: maxTokens,
           temperature: 0.6,
+          // Gemini 3.x is a thinking model — keep reasoning minimal for
+          // conversational latency; without this + a raised token ceiling the
+          // model returns EMPTY content (finish_reason "length") because the
+          // budget was eaten by hidden reasoning tokens.
+          reasoning_effort: 'low',
         }),
         signal: controller.signal,
       })
@@ -562,7 +570,7 @@ export async function chatComplete(
   messages: ChatMsg[],
   opts: { maxTokens?: number; timeoutMs?: number } = {},
 ): Promise<ChatResult> {
-  const maxTokens = opts.maxTokens ?? 900
+  const maxTokens = opts.maxTokens ?? 2000
   const timeoutMs = opts.timeoutMs ?? 60_000
 
   // ── Tier A: Google Gemini (env or panel-pasted key) ──
@@ -572,7 +580,9 @@ export async function chatComplete(
       const data = (await geminiChatFetch(
         messages,
         geminiModel(),
-        maxTokens,
+        // thinking models burn hidden reasoning tokens from the same budget —
+        // give the leg extra headroom so visible content never starves
+        Math.max(maxTokens, 1600),
         { timeoutMs, retries: 3 },
       )) as { choices?: Array<{ message?: { content?: string } }> }
       const content = data.choices?.[0]?.message?.content

@@ -16,8 +16,6 @@ import {
   isBroadDiscoveryQuery,
   classifySmallTalk,
   smallTalkReplyFa,
-  detectBareTypeAsk,
-  bareTypeFollowUpFa,
 } from '@/lib/telegram-render'
 
 const MAX_TOOL_ITERATIONS = 6
@@ -33,9 +31,11 @@ const SYSTEM_PROMPT = `تو نماینده فروش و مشاور فروشگاه
 - هر پاسخ نهایی معمولاً بین ۲ تا ۵ خط باشد (فقط هنگام مقایسهٔ چند محصول طولانی‌تر شود)؛ پیام طولانی و پراکنده ممنوع. حداکثر یک تا دو ایموجی.
 
 سبک فروش و گفتگو:
-- نیازسنجی را در دل مکالمه طبیعی انجام بده: نوع محصول (انگشتر، گردنبند، دستبند، …)، برای خود مشتری است یا هدیه، برای چه کسی (جنسیت و سلیقهٔ او)، سبک موردعلاقه، بودجه و در صورت لزوم سایز. هر بار فقط یک یا دو سؤال بپرس، نه یک فرم کامل.
-- اگر مشتری گفت برای هدیه یا برای یک نفر (مادر، پدر، همسر، دوست، …) می‌خواهد: اول یک جملهٔ کوتاه و گرم، بعد یک یا دو سؤال نیازسنجی (سلیقه، بودجه، مناسبتی که هدیه باید حس آن را بدهد) بپرس و هنوز محصول نفرست؛ فقط وقتی مشتری سلیقه/بودجه/دسته‌اش را گفت با search_products پیشنهاد بده.
-- **اگر مشتری فقط نوع محصول را گفت و نه جنسیت/گیرنده و نه بودجه (مثلاً «انگشتر می‌خوام»): هرگز فوراً محصول نفرست.** اول یک یا دو سؤال دقیق بپرس — «انگشتر مردانه می‌خواهید یا زنانه؟» و «حدود بودجه‌تان چقدر است؟» — و تا پاسخ مشتری را نگرفتی search_products را صدا نزن. بعد از پاسخ مشتری، با همان مشخصات (جنسیت + بودجه) جستجو کن و بهترین گزینه‌ها را با قیمت واقعی معرفی کن.
+- **سؤال‌های نیازسنجی را همیشه خودت از دل همین مکالمه بساز — مطلقاً از قالب آماده استفاده نکن.** سؤال‌ها باید با کلمات تازه و متناسب با همان لحظهٔ گفتگو ساخته شوند؛ هرگز یک عبارت سؤال را در مکالمه‌های مختلف عیناً تکرار نکن. در هر پیام حداکثر یک یا دو سؤال کوتاه بپرس، نه یک فرم کامل.
+- نیازسنجی طبیعی شامل این‌هاست (هر بار فقط هر چه کمبودش حس می‌شود): نوع محصول (انگشتر، گردنبند، دستبند، …)، برای خود مشتری است یا هدیه، برای چه کسی (جنسیت و سلیقهٔ او)، سبک و مدل موردعلاقه، بودجه، و در صورت لزوم سایز.
+- **به حافظهٔ مکالمه وفادار باش: هرگز چیزی را که مشتری قبلاً گفته دوباره نپرس و از ابتدای نیازسنجی شروع مجدد نکن.** وقتی مشتری اطلاعاتی داد (مثلاً «برای مادرم» یا «تا دو میلیون»): اول کوتاه آن را به سیاق خودت تأیید کن («انتخاب قشنگی است؛ گردنبند برای هدیهٔ مادر…»)، بعد مکالمه را دقیقاً یک قدم جلو ببر — سؤال بعدیِ باقی‌مانده را بپرس یا اگر اطلاعات کافی است، همان لحظه با search_products پیشنهادهای واقعی بده.
+- اگر مشتری گفت برای هدیه یا برای یک نفر (مادر، پدر، همسر، دوست، …) می‌خواهد: اول یک جملهٔ کوتاه و گرم به سیاق خودت، بعد فقط سؤال‌هایی که هنوز مشخص نشده را به سبک خودت بپرس (سلیقه، بودجه، مناسبتی که هدیه باید حس آن را بدهد) و هنوز محصول نفرست؛ فقط وقتی سلیقه/بودجه/دستهٔ کافی روشن شد با search_products پیشنهاد بده.
+- **اگر مشتری فقط نوع محصول را گفت و نه جنسیت/گیرنده و نه بودجه (مثلاً «انگشتر می‌خوام»): هرگز فوراً محصول نفرست و search_products را صدا نزن.** اول با عبارت‌بندی خودت یکی دو سؤال لازم بپرس (مثلاً بپرسید برای آقا است یا خانم و حدود بودجه) و تا پاسخ مشتری را نگرفتی جستجو نکن؛ بعد با همان مشخصات جستجو کن و بهترین گزینه‌ها را با قیمت واقعی معرفی کن.
 - **سؤال کلی «چیا دارید؟ / چه محصولاتی دارید؟» را هرگز با لیست یا عکس محصول جواب نده.** برای این سؤال‌های کلی: اول با get_categories دسته‌ها را ببین، بعد یک پاسخ مشاوره‌ای کوتاه بنویس که (۱) دسته‌های فروشگاه را با شمارندهٔ واقعی معرفی می‌کند، (۲) یک تا دو سؤال نیازسنجی می‌پرسد و (۳) دست مشتری را باز می‌گذارد («هر دسته‌ای که مدنظرتان بود بگویید تا بهترین گزینه‌ها را نشان بدهم»). در این حالت search_products را صدا نزن تا عکس محصول ارسال نشود — معرفی محصول بعد از این‌که مشتری دسته/سلیقه/بودجه‌اش را گفت.
 - پیشنهادها را «فقط» از موجودی واقعی فروشگاه با ابزارها انتخاب کن و تفاوت‌های گزینه‌ها (قیمت، عیار، وزن، سایز، مدل) را شفاف مقایسه کن.
 - به تردیدها و اعتراض‌ها (قیمت، عیار، وزن، ارسال، تعویض، اصالت) فقط با داده واقعی ابزارها یا تنظیمات فروشگاه پاسخ بده؛ اگر داده‌ای نداری، صادقانه بگو و پیشنهاد پیگیری انسانی بده.
@@ -404,13 +404,6 @@ async function executeTool(
   }
 }
 
-/** Deterministic gift-gender intent from the user's own words (null = unknown/ambiguous). */
-function giftGenderIntent(text: string): 'men' | 'women' | null {
-  if (/پدر|برادر|پسر|شوهر|مرد|آقا|آقای|آقایان/.test(text)) return 'men'
-  if (/مادر|خواهر|دختر|خانم|بانو|زنانه/.test(text)) return 'women'
-  return null
-}
-
 export type HistoryMessage = { role: 'user' | 'assistant'; content: string }
 
 export type AssistantResult = { reply: string; toolsUsed: string[]; productIds: string[] }
@@ -611,6 +604,17 @@ async function assistantTurn(
 }
 
 /**
+ * Deterministic gift-gender intent from the user's own words (null = unknown/ambiguous).
+ * Used ONLY as a safety net behind the model (a card blast must never contain
+ * a gender-clashing product) — never to bypass the AI.
+ */
+function giftGenderIntent(text: string): 'men' | 'women' | null {
+  if (/پدر|برادر|پسر|شوهر|مرد|آقا|آقای|آقایان/.test(text)) return 'men'
+  if (/مادر|خواهر|دختر|خانم|بانو|زنانه/.test(text)) return 'women'
+  return null
+}
+
+/**
  * Run the tool-loop assistant for one user message.
  * `history` carries the persistent ChatMessage memory (user+assistant turns);
  * only the system prompt + last 12 turns are sent to the model.
@@ -625,33 +629,16 @@ export async function runAssistant(input: {
   aiTone?: string
 }): Promise<AssistantResult> {
   const { telegramUserId, message, firstName } = input
-  // Pure small talk (سلام / ممنون / خداحافظ) → warm deterministic reply.
-  // No AI call at all: zero cost, zero failure modes, always consistent.
-  const smallTalk = classifySmallTalk(message)
-  if (smallTalk) {
-    return {
-      reply: smallTalkReplyFa(smallTalk, firstName),
-      toolsUsed: [],
-      productIds: [],
-    }
-  }
-  // Broad «چیا دارید؟» style questions → consult-first: the reply stays AI-
-  // generated and personal, but product cards are withheld until the customer
-  // names a category/taste/budget (enforced again on the bot side too).
+  // OWNER DIRECTIVE: EVERY message — greetings, bare product asks, gift
+  // questions, everything — must be UNDERSTOOD and ANSWERED by the AI with
+  // full conversation memory. No pre-written questions, no deterministic
+  // intercepts before the model (those made the bot ask the same canned
+  // questions regardless of context — owner complaint). The deterministic
+  // logic below the loop is a safety net only, used when the AI is down.
+  // Broad «چیا دارید؟» style questions → product cards are withheld until the
+  // customer names a category/taste/budget (enforced again on the bot side);
+  // the REPLY itself is still AI-generated and personal.
   const broadDiscovery = isBroadDiscoveryQuery(message)
-  // Bare product-type ask («انگشتر میخوام» — no gender/gift, no budget) →
-  // DETERMINISTIC consult-first: ask «مردانه یا زنانه؟ بودجه؟» and wait. The
-  // model cannot be trusted to obey this reliably, so it is enforced here —
-  // zero cost, zero latency, always the owner's requested behavior. The next
-  // message (with gender/budget) flows into the full tool-loop assistant.
-  const bareType = detectBareTypeAsk(message)
-  if (bareType) {
-    return {
-      reply: bareTypeFollowUpFa(bareType),
-      toolsUsed: [],
-      productIds: [],
-    }
-  }
   const toolsUsed: string[] = []
   const surfaced: { id: string; audience: string }[] = []
   const trackProduct = (id: string, meta?: { audience?: string }): void => {
