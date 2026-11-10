@@ -6,25 +6,33 @@ import ZAI from 'z-ai-web-dev-sdk'
 import { db } from '@/lib/db'
 
 /**
- * Three-tier AI layer — designed to keep the bot ALIVE on a bare VPS where
+ * Four-tier AI layer — designed to keep the bot ALIVE on a bare VPS where
  * neither the seller's key nor the platform gateway exists (root cause of the
  * "bot answers the same menu for every message" production bug):
  *
- *  Tier A (best) — the seller's OWN Z.ai key. Sources, in order:
+ *  Tier A (best, owner-requested default) — GOOGLE GEMINI.
+ *    Sources, in order:
+ *    1. `GEMINI_API_KEY` in .env (deploy-time)
+ *    2. Setting row «geminiApiKey» — pasted from the admin panel (no SSH needed)
+ *    Called on Google's OpenAI-compatible endpoint
+ *    (generativelanguage.googleapis.com/v1beta/openai) with model gemini-2.0-flash
+ *    (fast, excellent Persian, generous free tier).
+ *
+ *  Tier B — the seller's OWN Z.ai key. Sources, in order:
  *    1. `ZAI_API_KEY` in .env (deploy-time)
  *    2. Setting row «zaiApiKey» — pasted from the admin panel (no SSH needed)
  *    Called on the public OpenAI-compatible endpoint (api.z.ai/api/paas/v4).
  *
- *  Tier B (sandbox/dev) — the platform-managed z-ai-web-dev-sdk gateway.
+ *  Tier C (sandbox/dev) — the platform-managed z-ai-web-dev-sdk gateway.
  *    Only attempted when a .z-ai-config file actually exists (project/home/etc);
  *    on a customer VPS it never does, and every blind attempt wasted ~seconds
  *    before dying with "Configuration file not found".
  *
- *  Tier C (zero-config safety net) — a keyless OpenAI-compatible free
+ *  Tier D (zero-config safety net) — a keyless OpenAI-compatible free
  *    gateway (text.pollinations.ai/openai, env-overridable). Keeps the sales
  *    assistant responsive out-of-the-box until the owner pastes their own key.
  *
- * Tier-A health: an auth failure (401) is cached for a cooldown window so
+ * Gemini/Z.ai health: an auth failure (401) is cached for a cooldown window so
  * every request doesn't pay the extra latency; re-probed after the cooldown.
  * 429 responses retry with real backoff (Retry-After aware) on all tiers.
  * EVERY leg failure is logged loudly — silent AI death must never happen again.
@@ -33,6 +41,9 @@ import { db } from '@/lib/db'
 // ─── Configuration ───────────────────────────────────────────────────────────
 
 const PUBLIC_API_BASE = 'https://api.z.ai/api/paas/v4'
+
+/** Google Gemini — OpenAI-compatible surface (same request/response shapes). */
+const GEMINI_API_BASE = 'https://generativelanguage.googleapis.com/v1beta/openai'
 
 /** Keyless safety-net gateway (OpenAI-compatible POST endpoint). */
 const FREE_API_BASE = (process.env.FREE_TEXT_API_BASE ?? 'https://text.pollinations.ai/openai').trim()
@@ -65,6 +76,192 @@ export async function resolveSellerKey(): Promise<string> {
   return settingSellerKey()
 }
 
+// ─── Gemini key sources (env first, then the panel-pasted Setting copy) ─────
+
+export function geminiEnvKey(): string {
+  return (process.env.GEMINI_API_KEY ?? '').trim()
+}
+
+/** Owner-selectable Gemini model (default: fast + great Persian + free tier). */
+export function geminiModel(): string {
+  return (process.env.GEMINI_TEXT_MODEL ?? 'gemini-2.0-flash').trim()
+}
+
+let geminiSettingKeyCache: { value: string; at: number } | null = null
+async function geminiSettingKey(): Promise<string> {
+  const now = Date.now()
+  if (geminiSettingKeyCache && now - geminiSettingKeyCache.at < 30_000) return geminiSettingKeyCache.value
+  let value = ''
+  try {
+    const row = await db.setting.findUnique({ where: { key: 'geminiApiKey' } })
+    value = row?.value?.trim() ?? ''
+  } catch {
+    value = '' // DB hiccup must not break the AI
+  }
+  geminiSettingKeyCache = { value, at: now }
+  return value
+}
+
+export async function resolveGeminiKey(): Promise<string> {
+  const env = geminiEnvKey()
+  if (env) return env
+  return geminiSettingKey()
+}
+
+// ─── Gemini health cache (survives HMR via globalThis) ───────────────────────
+
+const globalForGeminiHealth = globalThis as unknown as { __aiGeminiHealth?: Health }
+const geminiHealth: Health = (globalForGeminiHealth.__aiGeminiHealth ??= {
+  usable: null,
+  nextProbeAt: 0,
+  lastProbeAt: 0,
+})
+
+function geminiMarkAuthFailure(error: string) {
+  geminiHealth.usable = false
+  geminiHealth.lastError = error.slice(0, 300)
+  geminiHealth.lastProbeAt = Date.now()
+  geminiHealth.nextProbeAt = Date.now() + AUTH_COOLDOWN_MS
+  console.error(
+    `[ai:provider] Gemini key rejected by Google (${error.slice(0, 120)}) — skipping the Gemini tier for the next ${AUTH_COOLDOWN_MS / 60000} min`,
+  )
+}
+
+function geminiMarkUsable() {
+  geminiHealth.usable = true
+  geminiHealth.lastError = undefined
+  geminiHealth.lastProbeAt = Date.now()
+  geminiHealth.nextProbeAt = Date.now()
+}
+
+function geminiBlocked(): boolean {
+  return geminiHealth.usable === false && Date.now() < geminiHealth.nextProbeAt
+}
+
+/**
+ * Gemini chat completion on the OpenAI-compatible endpoint. Same contract as
+ * the Z.ai publicFetch leg: auth errors throw AuthError (→ cooldown), 429
+ * backs off with Retry-After, 5xx retries, empty content throws.
+ */
+async function geminiChatFetch(
+  messages: ChatMsg[],
+  model: string,
+  maxTokens: number,
+  opts: FetchOpts,
+): Promise<unknown> {
+  const key = await resolveGeminiKey()
+  if (!key) throw new Error('کلید جمنای تنظیم نشده است')
+  let lastStatus = 0
+  let lastBody = ''
+
+  for (let attempt = 1; attempt <= opts.retries; attempt++) {
+    const controller = new AbortController()
+    const timer = setTimeout(() => controller.abort(), opts.timeoutMs)
+    try {
+      const res = await fetch(`${GEMINI_API_BASE}/chat/completions`, {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${key}`,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          model,
+          messages,
+          max_tokens: maxTokens,
+          temperature: 0.6,
+        }),
+        signal: controller.signal,
+      })
+      const text = await res.text()
+
+      if (res.ok) {
+        geminiMarkUsable()
+        return JSON.parse(text) as unknown
+      }
+
+      lastStatus = res.status
+      lastBody = text.slice(0, 400)
+
+      if (res.status === 401 || res.status === 403) {
+        throw new AuthError(`HTTP ${res.status}: ${lastBody}`)
+      }
+      // Google reports malformed/invalid keys as 400 INVALID_ARGUMENT —
+      // treat it as an auth failure so the cooldown applies (no per-message
+      // retry tax for a dead key).
+      if (res.status === 400 && lastBody.includes('API key')) {
+        throw new AuthError(`HTTP 400: ${lastBody}`)
+      }
+
+      if (res.status === 429) {
+        const retryAfter = Number(res.headers.get('retry-after'))
+        const waitMs = Number.isFinite(retryAfter) && retryAfter > 0
+          ? Math.min(retryAfter * 1000, 30_000)
+          : Math.min(2000 * 2 ** (attempt - 1), 20_000)
+        if (attempt < opts.retries) {
+          console.warn(`[ai:provider] Gemini 429 — backing off ${waitMs}ms (attempt ${attempt}/${opts.retries})`)
+          await sleep(waitMs)
+          continue
+        }
+        throw new RateError(lastBody)
+      }
+
+      if (res.status >= 400 && res.status < 500) {
+        throw new Error(`HTTP ${res.status}: ${lastBody}`)
+      }
+
+      if (attempt < opts.retries) {
+        await sleep(1500 * attempt)
+        continue
+      }
+      throw new Error(`HTTP ${res.status}: ${lastBody}`)
+    } catch (e) {
+      if (e instanceof AuthError || e instanceof RateError) throw e
+      if (attempt < opts.retries) {
+        await sleep(1500 * attempt)
+        continue
+      }
+      throw e
+    } finally {
+      clearTimeout(timer)
+    }
+  }
+  throw new Error(`HTTP ${lastStatus || 0}: ${lastBody || 'no response'}`)
+}
+
+/**
+ * Targeted Gemini probe for the panel's «تست اتصال» button — NEVER falls back
+ * to another tier, so a broken key is reported as broken instead of silently
+ * passing via the free gateway.
+ */
+export async function probeGemini(): Promise<{
+  ok: boolean
+  error?: string
+  latencyMs: number
+  sample?: string
+}> {
+  const t0 = Date.now()
+  const key = await resolveGeminiKey()
+  if (!key) return { ok: false, error: 'کلید جمنای تنظیم نشده است', latencyMs: 0 }
+  try {
+    const data = (await geminiChatFetch(
+      [
+        { role: 'assistant', content: 'فقط یک واژه فارسی برگردان.' },
+        { role: 'user', content: 'سلام' },
+      ],
+      geminiModel(),
+      30,
+      { timeoutMs: 30_000, retries: 2 },
+    )) as { choices?: Array<{ message?: { content?: string } }> }
+    const content = data.choices?.[0]?.message?.content
+    if (typeof content === 'string' && content.trim() !== '') {
+      return { ok: true, latencyMs: Date.now() - t0, sample: content.trim().slice(0, 60) }
+    }
+    return { ok: false, error: 'پاسخ خالی از جمنای', latencyMs: Date.now() - t0 }
+  } catch (e) {
+    return { ok: false, error: (e as Error).message.slice(0, 300), latencyMs: Date.now() - t0 }
+  }
+}
+
 // ─── Tier-B availability probe (cached once per process) ────────────────────
 
 let platformGatewayUsable: boolean | null = null
@@ -92,17 +289,25 @@ export function imageModel(): string {
 
 export function providerStatus(): {
   userKeyConfigured: boolean
+  geminiKeyConfigured: boolean
+  geminiModel: string
   chatModel: string
   imageModel: string
   userKeyHealthy: boolean | null // null = not probed yet
+  geminiHealthy: boolean | null // null = not probed yet
   lastUserKeyError?: string
+  lastGeminiError?: string
 } {
   return {
     userKeyConfigured: userApiKey() !== '',
+    geminiKeyConfigured: geminiEnvKey() !== '',
+    geminiModel: geminiModel(),
     chatModel: chatModel(),
     imageModel: imageModel(),
     userKeyHealthy: health.usable,
+    geminiHealthy: geminiHealth.usable,
     lastUserKeyError: health.lastError,
+    lastGeminiError: geminiHealth.lastError,
   }
 }
 
@@ -259,7 +464,7 @@ export type ChatMsg = { role: 'system' | 'assistant' | 'user'; content: string }
 
 export type ChatResult = {
   content: string
-  via: 'user-key' | 'platform' | 'free'
+  via: 'gemini' | 'user-key' | 'platform' | 'free'
 }
 
 // ─── Tier C cooldown (survives HMR via globalThis) ──────────────────────────
@@ -348,9 +553,10 @@ async function freeFetch(
 }
 
 /**
- * Chat completion — three-tier chain: seller key → platform gateway → keyless
- * free gateway. Every leg failure is LOGGED; only when all three fail does the
- * caller see an AiError (route → 502 → bot deterministic fallback).
+ * Chat completion — four-tier chain: Gemini (owner-requested default) →
+ * seller Z.ai key → platform gateway → keyless free gateway. Every leg
+ * failure is LOGGED; only when all four fail does the caller see an AiError
+ * (route → 502 → bot deterministic fallback).
  */
 export async function chatComplete(
   messages: ChatMsg[],
@@ -359,7 +565,35 @@ export async function chatComplete(
   const maxTokens = opts.maxTokens ?? 900
   const timeoutMs = opts.timeoutMs ?? 60_000
 
-  // ── Tier A: seller's own key (env or panel-pasted) ──
+  // ── Tier A: Google Gemini (env or panel-pasted key) ──
+  const geminiKey = await resolveGeminiKey()
+  if (geminiKey && !geminiBlocked()) {
+    try {
+      const data = (await geminiChatFetch(
+        messages,
+        geminiModel(),
+        maxTokens,
+        { timeoutMs, retries: 3 },
+      )) as { choices?: Array<{ message?: { content?: string } }> }
+      const content = data.choices?.[0]?.message?.content
+      if (typeof content === 'string' && content.trim() !== '') {
+        return { content, via: 'gemini' }
+      }
+      throw new Error('پاسخ خالی از جمنای')
+    } catch (e) {
+      if (e instanceof AuthError) {
+        geminiMarkAuthFailure(e.message)
+      } else if (!(e instanceof RateError)) {
+        console.warn('[ai:provider] Gemini chat failed → next tier:', (e as Error).message?.slice(0, 160))
+      } else {
+        console.warn('[ai:provider] Gemini rate-limited → next tier')
+      }
+    }
+  } else if (geminiKey && geminiBlocked()) {
+    console.warn(`[ai:provider] Gemini key on auth cooldown (${geminiHealth.lastError?.slice(0, 80)}) → next tier`)
+  }
+
+  // ── Tier B: seller's own key (env or panel-pasted) ──
   const sellerKey = await resolveSellerKey()
   const keyOnCooldown = health.usable === false && Date.now() < health.nextProbeAt
   if (sellerKey && !keyOnCooldown) {

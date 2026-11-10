@@ -5,7 +5,7 @@ import { logEvent } from '@/lib/logger'
 import { getSettings, updateSettings } from '@/lib/settings'
 import { getTelegramStatus } from '@/lib/telegram'
 import { db } from '@/lib/db'
-import { userApiKey } from '@/lib/ai/provider'
+import { userApiKey, geminiEnvKey } from '@/lib/ai/provider'
 
 export const GET = route(async () => {
   await requireAuth()
@@ -19,7 +19,16 @@ export const GET = route(async () => {
       .catch(() => null)
     if (row?.value?.trim()) keySource = 'panel'
   }
-  return ok({ settings, telegram: await getTelegramStatus(), ai: { keySource } })
+  // Gemini (owner-requested default brain) — same write-only pattern.
+  let geminiKeySource: 'env' | 'panel' | 'none' = 'none'
+  if (geminiEnvKey()) geminiKeySource = 'env'
+  else {
+    const row = await db.setting
+      .findUnique({ where: { key: 'geminiApiKey' }, select: { value: true } })
+      .catch(() => null)
+    if (row?.value?.trim()) geminiKeySource = 'panel'
+  }
+  return ok({ settings, telegram: await getTelegramStatus(), ai: { keySource, geminiKeySource } })
 })
 
 // Boolean-ish: accepts real booleans or 'true'/'false' strings from forms.
@@ -40,9 +49,12 @@ const patchSchema = z.object({
   welcomeMessage: z.string().max(2000, 'متن خوش‌آمد حداکثر ۲۰۰۰ کاراکتر است').optional(),
   aiEnabled: booleanish.optional(),
   aiTone: z.string().trim().max(1000, 'لحن هوش مصنوعی حداکثر ۱۰۰۰ کاراکتر است').optional(),
-  // Z.ai seller key (Tier A) — write-only; GET never returns it
+  // Z.ai seller key (Tier B) — write-only; GET never returns it
   zaiApiKey: z.string().trim().min(20, 'کلید واردشده کوتاه به نظر می‌رسد').max(200).optional(),
   zaiApiKeyClear: z.boolean().optional(),
+  // Gemini key (Tier A — owner-requested default brain) — write-only; GET never returns it
+  geminiApiKey: z.string().trim().min(20, 'کلید واردشده کوتاه به نظر می‌رسد').max(200).optional(),
+  geminiApiKeyClear: z.boolean().optional(),
 })
 
 export const PUT = route(async (req: NextRequest) => {
@@ -50,7 +62,7 @@ export const PUT = route(async (req: NextRequest) => {
   const patch = patchSchema.parse(await readJson(req))
 
   // Secret handled outside updateSettings (never part of the generic store).
-  const { zaiApiKey, zaiApiKeyClear, ...rest } = patch
+  const { zaiApiKey, zaiApiKeyClear, geminiApiKey, geminiApiKeyClear, ...rest } = patch
   if (zaiApiKeyClear) {
     await db.setting.deleteMany({ where: { key: 'zaiApiKey' } })
     await logEvent('settings.updated', 'کلید هوش مصنوعی از پنل حذف شد', { keys: ['zaiApiKey'] })
@@ -62,6 +74,18 @@ export const PUT = route(async (req: NextRequest) => {
       update: { value: zaiApiKey },
     })
     await logEvent('settings.updated', 'کلید هوش مصنوعی از پنل ذخیره شد', { keys: ['zaiApiKey'] })
+  }
+  if (geminiApiKeyClear) {
+    await db.setting.deleteMany({ where: { key: 'geminiApiKey' } })
+    await logEvent('settings.updated', 'کلید جمنای از پنل حذف شد', { keys: ['geminiApiKey'] })
+  }
+  if (geminiApiKey !== undefined) {
+    await db.setting.upsert({
+      where: { key: 'geminiApiKey' },
+      create: { key: 'geminiApiKey', value: geminiApiKey },
+      update: { value: geminiApiKey },
+    })
+    await logEvent('settings.updated', 'کلید جمنای از پنل ذخیره شد', { keys: ['geminiApiKey'] })
   }
 
   const settings = await updateSettings(rest)
