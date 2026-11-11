@@ -5,7 +5,7 @@ import { logEvent } from '@/lib/logger'
 import { getSettings, updateSettings } from '@/lib/settings'
 import { getTelegramStatus } from '@/lib/telegram'
 import { db } from '@/lib/db'
-import { userApiKey, geminiEnvKey } from '@/lib/ai/provider'
+import { userApiKey, geminiEnvKey, invalidateGeminiSettingCache } from '@/lib/ai/provider'
 
 export const GET = route(async () => {
   await requireAuth()
@@ -79,6 +79,7 @@ export const PUT = route(async (req: NextRequest) => {
   }
   if (geminiApiKeyClear) {
     await db.setting.deleteMany({ where: { key: 'geminiApiKey' } })
+    invalidateGeminiSettingCache()
     await logEvent('settings.updated', 'کلید جمنای از پنل حذف شد', { keys: ['geminiApiKey'] })
   }
   if (geminiApiKey !== undefined) {
@@ -87,6 +88,7 @@ export const PUT = route(async (req: NextRequest) => {
       create: { key: 'geminiApiKey', value: geminiApiKey },
       update: { value: geminiApiKey },
     })
+    invalidateGeminiSettingCache()
     await logEvent('settings.updated', 'کلید جمنای از پنل ذخیره شد', { keys: ['geminiApiKey'] })
   }
 

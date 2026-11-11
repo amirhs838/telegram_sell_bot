@@ -54,6 +54,15 @@ import {
 } from '@/lib/bot-templates'
 
 type AiKeyStatus = { keySource: 'env' | 'panel' | 'none'; geminiKeySource: 'env' | 'panel' | 'none' }
+
+/** One masked Gemini key + its live image-tier state (from /api/ai/gemini-keys). */
+type GeminiKeyRow = {
+  fingerprint: string
+  source: 'env' | 'panel' | 'env+panel'
+  parked: boolean
+  parkKind: 'quota' | 'auth' | null
+  parkedUntilTehran: string | null
+}
 type SettingsResp = { settings: Settings; telegram: TelegramInfo; ai: AiKeyStatus }
 
 export function SettingsSection() {
@@ -663,6 +672,26 @@ function AiAssistantCard({
   const [testing, setTesting] = useState(false)
   const [saving, setSaving] = useState(false)
 
+  // Live per-key status for the self-service Gemini key manager (masked).
+  const [keyRows, setKeyRows] = useState<GeminiKeyRow[] | null>(null)
+  const [loadingKeys, setLoadingKeys] = useState(false)
+
+  const loadKeyStatus = useCallback(async () => {
+    setLoadingKeys(true)
+    try {
+      const res = await api<{ count: number; keys: GeminiKeyRow[] }>('/api/ai/gemini-keys')
+      setKeyRows(res.keys)
+    } catch {
+      setKeyRows(null)
+    } finally {
+      setLoadingKeys(false)
+    }
+  }, [])
+
+  useEffect(() => {
+    void loadKeyStatus()
+  }, [loadKeyStatus])
+
   // re-sync when settings reload from the server
   useEffect(() => {
     setAiEnabled(Boolean(settings.aiEnabled))
@@ -699,6 +728,7 @@ function AiAssistantCard({
       if (!clearKey) setApiKey('')
       if (!clearGemini) setGeminiKey('')
       onSaved()
+      if (clearKey || clearGemini || geminiKey.trim()) void loadKeyStatus()
     } catch (err) {
       toast.error((err as Error).message)
     } finally {
@@ -777,16 +807,17 @@ function AiAssistantCard({
         </CardTitle>
       </CardHeader>
       <CardContent className="space-y-4">
-        {/* Gemini key — Tier A: the owner-requested default brain of the sales assistant */}
+        {/* Gemini key — Tier A: the owner-requested default brain of the sales assistant
+            + the engine of the image studio. Self-service: the owner pastes/rotates keys here. */}
         <div className="space-y-2 rounded-xl border-2 border-emerald-200 bg-emerald-50/40 p-3">
           <div className="flex items-center justify-between gap-2">
             <Label htmlFor="gemini-key" className="text-sm font-medium">
-              کلید گوگل جمنای (Gemini) — موتور اصلی دستیار
+              کلید جمنای (Gemini) — دستیار فروش و استودیوی تصویر
             </Label>
             {geminiBadge}
           </div>
           <p className="text-xs leading-5 text-muted-foreground">
-            یک کلید رایگان از{' '}
+            کلید رایگان از{' '}
             <a
               href="https://aistudio.google.com/apikey"
               target="_blank"
@@ -796,38 +827,39 @@ function AiAssistantCard({
             >
               aistudio.google.com/apikey
             </a>{' '}
-            بگیرید و اینجا وارد کنید. با این کلید، دستیار فروش با هوش مصنوعی گوگل جمنای به همه
-            پیام‌ها پاسخ می‌دهد.
+            بگیرید: روی «Create API key» بزنید، کلید را کپی کنید و همین‌جا بچسبانید و «ذخیره» را
+            بزنید. هر وقت خواستید عوضش کنید، کلید جدید را بچسبانید و ذخیره کنید — بدون نیاز به
+            هیچ کار فنی دیگر.
           </p>
           <p className="rounded-lg bg-emerald-100/60 px-2.5 py-1.5 text-xs leading-5 text-emerald-900">
-            نکتهٔ استودیوی تصویر: سهمیهٔ رایگان ساخت تصویر هر کلید محدود است. می‌توانید چند کلید را
-            با کاما جدا کنید و در همین کادر بچسبانید — سیستم خودکار بین آن‌ها می‌چرخد و سهمیه‌ها جمع
-            می‌شود.
+            برای سهمیهٔ بیشتر: هر کلید جمنای سهمیهٔ رایگان روزانهٔ خودش را دارد (هم برای ساخت تصویر
+            هم گفتگو). می‌توانید چند کلید را با هم وارد کنید — هر کلید در یک خط جدید یا با کاما —
+            سیستم خودکار بین‌شان می‌چرخد و سهمیه‌ها جمع می‌شود.
           </p>
+          <Textarea
+            id="gemini-key"
+            dir="ltr"
+            rows={3}
+            autoComplete="off"
+            spellCheck={false}
+            className="min-h-[76px] font-mono text-xs"
+            value={geminiKey}
+            onChange={(e) => setGeminiKey(e.target.value)}
+            placeholder={
+              ai.geminiKeySource === 'none'
+                ? 'AQ.Ab8RN6...\n(هر خط یک کلید — چند کلید = چند برابر سهمیه)'
+                : '•••••••• (برای تغییر، کلید جدید را اینجا بچسبانید و ذخیره بزنید)'
+            }
+          />
           <div className="flex flex-col gap-2 sm:flex-row">
-            <Input
-              id="gemini-key"
-              type="password"
-              dir="ltr"
-              autoComplete="off"
-              value={geminiKey}
-              onChange={(e) => setGeminiKey(e.target.value)}
-              placeholder={
-                ai.geminiKeySource === 'none'
-                  ? 'کلید جمنای خود را اینجا بچسبانید'
-                  : '•••••••• (برای تغییر، کلید جدید وارد کنید)'
-              }
-            />
-            <div className="flex gap-2">
-              <Button onClick={() => save(false, false)} disabled={saving} className="sm:w-auto">
-                {saving && <Loader2 className="size-4 animate-spin" aria-hidden />}
-                ذخیره
-              </Button>
-              <Button variant="outline" onClick={testConnection} disabled={testing}>
-                {testing ? <Loader2 className="size-4 animate-spin" aria-hidden /> : <Zap className="size-4" aria-hidden />}
-                تست اتصال
-              </Button>
-            </div>
+            <Button onClick={() => save(false, false)} disabled={saving} className="sm:w-auto">
+              {saving && <Loader2 className="size-4 animate-spin" aria-hidden />}
+              ذخیره
+            </Button>
+            <Button variant="outline" onClick={testConnection} disabled={testing}>
+              {testing ? <Loader2 className="size-4 animate-spin" aria-hidden /> : <Zap className="size-4" aria-hidden />}
+              تست اتصال
+            </Button>
           </div>
           {ai.geminiKeySource === 'panel' && (
             <Button
@@ -838,9 +870,70 @@ function AiAssistantCard({
               disabled={saving}
             >
               <Trash2 className="size-3.5" aria-hidden />
-              حذف کلید جمنای
+              حذف کلیدهای پنل
             </Button>
           )}
+
+          {/* live key status — self-service diagnostics (owner request) */}
+          <div className="rounded-lg border bg-white/60 p-2.5">
+            <div className="mb-1.5 flex items-center justify-between gap-2">
+              <span className="flex items-center gap-1.5 text-xs font-medium text-muted-foreground">
+                <KeyRound className="size-3.5" aria-hidden />
+                وضعیت کلیدها برای ساخت تصویر
+              </span>
+              <Button
+                variant="ghost"
+                size="sm"
+                className="h-7 px-2 text-xs"
+                onClick={() => void loadKeyStatus()}
+                disabled={loadingKeys}
+              >
+                {loadingKeys ? (
+                  <Loader2 className="size-3.5 animate-spin" aria-hidden />
+                ) : (
+                  <RotateCcw className="size-3.5" aria-hidden />
+                )}
+                به‌روزرسانی
+              </Button>
+            </div>
+            {!keyRows && (
+              <p className="text-xs text-muted-foreground">وضعیت کلیدها در دسترس نیست.</p>
+            )}
+            {keyRows && keyRows.length === 0 && (
+              <p className="text-xs text-muted-foreground">
+                هنوز کلیدی ثبت نشده است — یک کلید بچسبانید و ذخیره کنید تا همین‌جا دیده شود.
+              </p>
+            )}
+            {keyRows && keyRows.length > 0 && (
+              <ul className="space-y-1.5">
+                {keyRows.map((k) => (
+                  <li key={k.fingerprint} className="flex flex-wrap items-center gap-1.5 text-xs">
+                    <code dir="ltr" className="rounded bg-muted px-1.5 py-0.5 font-mono text-[11px]">
+                      {k.fingerprint}
+                    </code>
+                    <Badge variant="outline" className="h-5 px-1.5 text-[10px]">
+                      {k.source === 'env' ? 'فایل سرور' : k.source === 'env+panel' ? 'سرور + پنل' : 'پنل'}
+                    </Badge>
+                    {k.parked && k.parkKind === 'auth' ? (
+                      <Badge className="h-5 bg-red-100 text-red-800 hover:bg-red-100">
+                        کلید پذیرفته نشد — درست بودن کلید را چک کنید
+                      </Badge>
+                    ) : k.parked ? (
+                      <Badge className="h-5 bg-amber-100 text-amber-900 hover:bg-amber-100">
+                        سهمیهٔ تصویر پر است
+                        {k.parkedUntilTehran ? ` — حدود ساعت ${k.parkedUntilTehran} دوباره آماده می‌شود` : ''}
+                      </Badge>
+                    ) : (
+                      <Badge className="h-5 bg-emerald-100 text-emerald-800 hover:bg-emerald-100">آماده</Badge>
+                    )}
+                  </li>
+                ))}
+                <li className="pt-0.5 text-[11px] leading-4 text-muted-foreground">
+                  {fmtNumber(keyRows.filter((k) => !k.parked).length)} کلید آماده — سهمیهٔ روزانهٔ تصویر، جمعِ همهٔ کلیدهای آماده است.
+                </li>
+              </ul>
+            )}
+          </div>
         </div>
 
         {/* Z.ai key — Tier B alternative when no Gemini key is configured */}

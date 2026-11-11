@@ -82,6 +82,11 @@ export function geminiEnvKey(): string {
   return (process.env.GEMINI_API_KEY ?? '').trim()
 }
 
+/** Called when the panel saves/clears the Gemini key so the next call reads fresh. */
+export function invalidateGeminiSettingCache() {
+  geminiSettingKeyCache = null
+}
+
 /** Owner-selectable Gemini model (default: fast + great Persian + free tier).
  *  NOTE: Gemini 3.x models are "thinking" models — hidden reasoning tokens
  *  consume the max_tokens budget, so the Gemini leg always raises the token
@@ -128,6 +133,45 @@ export function splitGeminiKeys(raw: string): string[] {
 async function resolveGeminiImageKeys(): Promise<string[]> {
   const keys = [...splitGeminiKeys(geminiEnvKey()), ...splitGeminiKeys(await geminiSettingKey())]
   return [...new Set(keys)]
+}
+
+export type GeminiKeyStatus = {
+  /** masked preview, e.g. «AQ.Ab8RN6L…Bx9g» — the full key NEVER leaves the server */
+  fingerprint: string
+  source: 'env' | 'panel' | 'env+panel'
+  /** non-null while the key is cooling down (image quota exhausted / rejected) */
+  parkedUntil: number | null
+  /** 'quota' | 'auth' classification of the park reason */
+  parkKind: 'quota' | 'auth' | null
+}
+
+/**
+ * Live per-key status for the panel's self-service Gemini key manager:
+ * masked fingerprints + which keys are currently parked for image quota/auth.
+ */
+export async function geminiImageKeyStatuses(): Promise<GeminiKeyStatus[]> {
+  const envKeys = splitGeminiKeys(geminiEnvKey())
+  const panelKeys = splitGeminiKeys(await geminiSettingKey())
+  const all = [...new Set([...envKeys, ...panelKeys])]
+  return all.map((key) => {
+    const park = imageKeyState.get(keyFingerprint(key)) ?? null
+    const active = park && Date.now() < park.blockedUntil ? park : null
+    const parkKind = active
+      ? /quota|resource_exhausted|rate|429/i.test(active.reason)
+        ? ('quota' as const)
+        : ('auth' as const)
+      : null
+    return {
+      fingerprint: keyFingerprint(key),
+      source: envKeys.includes(key) && panelKeys.includes(key)
+        ? 'env+panel'
+        : envKeys.includes(key)
+          ? 'env'
+          : 'panel',
+      parkedUntil: active ? active.blockedUntil : null,
+      parkKind,
+    }
+  })
 }
 
 // ─── Gemini health cache (survives HMR via globalThis) ───────────────────────
