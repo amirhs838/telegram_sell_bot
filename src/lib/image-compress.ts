@@ -67,31 +67,45 @@ export async function compressImageFile(file: File): Promise<File> {
   }
 }
 
-/**
- * POST a file to /api/uploads with REAL upload progress (fetch() exposes no
- * upload events, XHR does — on slow links the seller must see movement or
- * they abort). Auth mirrors api(): Bearer token beats cookie-restricted
- * preview iframes; on 401 the same global unauthorized event fires.
- */
-export function uploadImageWithProgress(
-  file: File,
-  onProgress?: (pct: number) => void,
-): Promise<UploadResult> {
+const CHUNK_SIZE = 64 * 1024
+const MAX_CHUNK_ATTEMPTS = 5
+const CHUNK_TIMEOUT_MS = 120_000
+
+const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms))
+
+function newUploadId(): string {
+  try {
+    if (typeof crypto !== 'undefined' && crypto.randomUUID) {
+      return crypto.randomUUID().replace(/-/g, '').slice(0, 24)
+    }
+  } catch {
+    /* non-secure context without randomUUID — fall through */
+  }
+  return `${Date.now().toString(36)}${Math.random().toString(36).slice(2, 14)}`
+}
+
+/** One XHR request; resolves with parsed JSON or rejects with ApiError. */
+function xhrJson(
+  url: string,
+  init: {
+    body?: Blob | string
+    contentType?: string
+    timeoutMs?: number
+    onProgress?: (loaded: number, total: number) => void
+  },
+): Promise<Record<string, unknown>> {
   return new Promise((resolve, reject) => {
     const xhr = new XMLHttpRequest()
-    xhr.open('POST', '/api/uploads')
+    xhr.open('POST', url)
+    if (init.contentType) xhr.setRequestHeader('Content-Type', init.contentType)
     const token = getToken()
     if (token) xhr.setRequestHeader('Authorization', `Bearer ${token}`)
+    if (init.timeoutMs) xhr.timeout = init.timeoutMs
 
-    xhr.upload.onprogress = (e) => {
-      if (e.lengthComputable && onProgress) {
-        onProgress(Math.min(100, Math.round((e.loaded / e.total) * 100)))
-      }
-    }
     xhr.onload = () => {
-      let data: { url?: string; name?: string; size?: number; error?: string } | null = null
+      let data: Record<string, unknown> | null = null
       try {
-        data = JSON.parse(xhr.responseText) as typeof data
+        data = JSON.parse(xhr.responseText) as Record<string, unknown>
       } catch {
         /* empty / non-JSON body */
       }
@@ -100,23 +114,113 @@ export function uploadImageWithProgress(
         reject(new ApiError('نشست شما منقضی شده است — دوباره وارد شوید', 401))
         return
       }
-      if (xhr.status >= 200 && xhr.status < 300 && data?.url) {
-        resolve({ url: data.url, name: data.name ?? '', size: data.size ?? file.size })
+      if (xhr.status >= 200 && xhr.status < 300 && data) {
+        resolve(data)
       } else {
-        reject(new ApiError(data?.error ?? 'آپلود ناموفق بود — لطفاً دوباره تلاش کنید', xhr.status || 0))
+        reject(
+          new ApiError(
+            typeof data?.error === 'string' ? data.error : 'درخواست آپلود ناموفق بود',
+            xhr.status || 0,
+          ),
+        )
       }
     }
-    xhr.onerror = () =>
-      reject(
-        new ApiError(
-          'ارتباط با سرور حین آپلود قطع شد — لطفاً دوباره تلاش کنید (عکس‌های بزرگ خودکار کوچک می‌شوند)',
-          0,
-        ),
-      )
-    xhr.ontimeout = () => reject(new ApiError('آپلود بیش از حد طول کشید — دوباره تلاش کنید', 0))
+    xhr.onerror = () => reject(new ApiError('ارتباط با سرور قطع شد', 0))
+    xhr.ontimeout = () => reject(new ApiError('زمان ارسال بخش به پایان رسید', 0))
+    xhr.upload.onprogress = (e) => {
+      if (e.lengthComputable) init.onProgress?.(e.loaded, e.total)
+    }
+    xhr.send(init.body ?? null)
+  })
+}
 
-    const fd = new FormData()
-    fd.append('file', file)
-    xhr.send(fd)
+/**
+ * POST a file to /api/uploads in SMALL RESUMABLE CHUNKS with real progress
+ * (fetch() exposes no upload events, XHR does).
+ *
+ * Why chunked: the seller's link to the server is a slow, reset-prone mobile
+ * route — a 253KB single POST died mid-transfer after 1–3 minutes (verified
+ * in the access log) and restarted from zero on every retry. 64KB pieces
+ * finish before the carrier kills the flow, each piece retries independently
+ * (progress never goes backwards), and /api/uploads/complete stitches the
+ * file together server-side once every piece has landed.
+ *
+ * Auth mirrors api(): Bearer token beats cookie-restricted preview iframes;
+ * on 401 the same global unauthorized event fires.
+ */
+export function uploadImageWithProgress(
+  file: File,
+  onProgress?: (pct: number) => void,
+): Promise<UploadResult> {
+  return new Promise((resolve, reject) => {
+    void (async () => {
+      try {
+        const id = newUploadId()
+        const totalChunks = Math.max(1, Math.ceil(file.size / CHUNK_SIZE))
+        let completedBytes = 0
+        let intraLoaded = 0
+
+        const report = () => {
+          const pct = Math.min(99, Math.round(((completedBytes + intraLoaded) / Math.max(file.size, 1)) * 100))
+          onProgress?.(pct)
+        }
+
+        for (let i = 0; i < totalChunks; i++) {
+          const start = i * CHUNK_SIZE
+          const chunk = file.slice(start, Math.min(file.size, start + CHUNK_SIZE))
+          intraLoaded = 0
+
+          let sent = false
+          let lastErr: unknown = null
+          for (let attempt = 1; attempt <= MAX_CHUNK_ATTEMPTS && !sent; attempt++) {
+            if (attempt > 1) {
+              intraLoaded = 0
+              report() // honest dip inside the retried chunk
+              await sleep(Math.min(500 * attempt, 2500))
+            }
+            try {
+              await xhrJson(`/api/uploads/chunk?id=${id}&i=${i}`, {
+                body: chunk,
+                contentType: 'application/octet-stream',
+                timeoutMs: CHUNK_TIMEOUT_MS,
+                onProgress: (loaded) => {
+                  intraLoaded = loaded
+                  report()
+                },
+              })
+              sent = true
+            } catch (e) {
+              lastErr = e
+              if (e instanceof ApiError && e.status === 401) throw e // session dead — stop early
+            }
+          }
+          if (!sent) {
+            const status = lastErr instanceof ApiError ? lastErr.status : 0
+            throw new ApiError(
+              `بخش ${(i + 1).toLocaleString('fa-IR')} از ${totalChunks.toLocaleString('fa-IR')} بعد از چند تلاش ارسال نشد — اینترنت این لحظه ناپایدار است؛ کمی بعد یا با اینترنت دیگری امتحان کنید`,
+              status,
+            )
+          }
+          completedBytes += chunk.size
+          intraLoaded = 0
+          report()
+        }
+
+        const res = await xhrJson('/api/uploads/complete', {
+          body: JSON.stringify({ id, mime: file.type, total: totalChunks }),
+          contentType: 'application/json',
+          timeoutMs: CHUNK_TIMEOUT_MS,
+        })
+        if (typeof res.url !== 'string') throw new ApiError('پاسخ سرور نامعتبر بود', 0)
+        onProgress?.(100)
+        resolve({
+          url: res.url,
+          name: typeof res.name === 'string' ? res.name : '',
+          size: typeof res.size === 'number' ? res.size : file.size,
+        })
+      } catch (e) {
+        reject(e)
+      }
+    })()
   })
 }
