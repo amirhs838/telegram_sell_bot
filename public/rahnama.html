@@ -1,0 +1,746 @@
+<!doctype html>
+<html lang="fa" dir="rtl">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>راهنمای کامل و ساده — سیلور لاو</title>
+<style>
+  @font-face{
+    font-family:'Vazirmatn';
+    src:url('fonts/Vazirmatn-Regular.woff2') format('woff2');
+    font-weight:400;font-display:swap;
+  }
+  @font-face{
+    font-family:'Vazirmatn';
+    src:url('fonts/Vazirmatn-Medium.woff2') format('woff2');
+    font-weight:500;font-display:swap;
+  }
+  @font-face{
+    font-family:'Vazirmatn';
+    src:url('fonts/Vazirmatn-SemiBold.woff2') format('woff2');
+    font-weight:600;font-display:swap;
+  }
+  @font-face{
+    font-family:'Vazirmatn';
+    src:url('fonts/Vazirmatn-Bold.woff2') format('woff2');
+    font-weight:700;font-display:swap;
+  }
+  :root{
+    --ink:#292524;
+    --muted:#6b625b;
+    --line:#e7e0d8;
+    --bg:#faf8f5;
+    --card:#ffffff;
+    --brand:#b45309;
+    --brand-soft:#fdf3e3;
+    --brand-line:#f0d9b5;
+    --ok-bg:#eefaf1;  --ok-line:#bfe8cc;  --ok-ink:#1d6b3c;
+    --warn-bg:#fdf6e3;--warn-line:#f0dca8;--warn-ink:#8a6116;
+    --bad-bg:#fdefee; --bad-line:#f3c6c2; --bad-ink:#a03028;
+    --info-bg:#f4f1ec;--info-line:#ddd3c7;
+  }
+  *{box-sizing:border-box}
+  html{scroll-behavior:smooth}
+  body{
+    margin:0;
+    background:var(--bg);
+    color:var(--ink);
+    font-family:'Vazirmatn',Tahoma,'Segoe UI',sans-serif;
+    font-size:16px;
+    line-height:2;
+  }
+  .wrap{max-width:860px;margin:0 auto;padding:0 16px 48px}
+
+  /* ── سربرگ ─────────────────────────────── */
+  header.hero{
+    background:linear-gradient(160deg,#3f3a35,#6b5a41 70%,#8a6d3f);
+    color:#fff;
+    padding:44px 16px 38px;
+    text-align:center;
+  }
+  header.hero .logo{
+    width:64px;height:64px;border-radius:18px;
+    background:rgba(255,255,255,.14);
+    display:flex;align-items:center;justify-content:center;
+    margin:0 auto 14px;font-size:34px;
+    border:1px solid rgba(255,255,255,.25);
+  }
+  header.hero h1{margin:0 0 6px;font-size:26px;font-weight:700}
+  header.hero p{margin:0;color:#efe6d6;font-size:15px}
+  .hero-chips{margin-top:16px;display:flex;gap:8px;justify-content:center;flex-wrap:wrap}
+  .hero-chips span{
+    background:rgba(255,255,255,.13);border:1px solid rgba(255,255,255,.22);
+    padding:4px 14px;border-radius:999px;font-size:13px;
+  }
+
+  /* ── فهرست ─────────────────────────────── */
+  nav.toc{
+    background:var(--card);
+    border:1px solid var(--line);
+    border-radius:16px;
+    padding:20px 22px;
+    margin:-26px auto 30px;
+    position:relative;
+    box-shadow:0 8px 24px rgba(60,45,25,.08);
+  }
+  nav.toc h2{margin:0 0 12px;font-size:17px}
+  nav.toc ol{
+    margin:0;padding:0 18px 0 0;columns:2;column-gap:28px;
+    font-size:14.5px;
+  }
+  nav.toc li{margin:0 0 6px;break-inside:avoid}
+  nav.toc a{color:var(--brand);text-decoration:none}
+  nav.toc a:hover{text-decoration:underline}
+  @media(max-width:600px){nav.toc ol{columns:1}}
+
+  /* ── بخش‌ها ─────────────────────────────── */
+  section{margin:0 0 34px}
+  .sec-head{display:flex;align-items:center;gap:12px;margin:0 0 6px}
+  .sec-num{
+    flex:none;width:40px;height:40px;border-radius:12px;
+    background:var(--brand);color:#fff;
+    display:flex;align-items:center;justify-content:center;
+    font-size:18px;font-weight:700;
+  }
+  section h2{margin:0;font-size:21px;font-weight:700}
+  .sec-sub{color:var(--muted);font-size:14.5px;margin:2px 84px 14px 0}
+  @media(max-width:600px){.sec-sub{margin-right:0}}
+  .card{
+    background:var(--card);
+    border:1px solid var(--line);
+    border-radius:16px;
+    padding:18px 20px;
+  }
+  .card + .card{margin-top:14px}
+  .card h3{margin:0 0 8px;font-size:16.5px}
+  .card h4{margin:14px 0 4px;font-size:15.5px}
+
+  /* ── مراحل ─────────────────────────────── */
+  ol.steps{list-style:none;margin:10px 0 0;padding:0;counter-reset:st}
+  ol.steps li{
+    counter-increment:st;
+    position:relative;
+    padding:0 46px 14px 0;
+  }
+  ol.steps li::before{
+    content:counter(st);
+    position:absolute;right:0;top:3px;
+    width:28px;height:28px;border-radius:50%;
+    background:var(--brand-soft);color:var(--brand);
+    border:1.5px solid var(--brand-line);
+    display:flex;align-items:center;justify-content:center;
+    font-size:13.5px;font-weight:700;
+  }
+  ol.steps li:not(:last-child)::after{
+    content:'';position:absolute;right:13.5px;top:36px;bottom:0;
+    width:1.5px;background:var(--brand-line);
+  }
+  ul.plain{margin:8px 0 0;padding:0 20px 0 0}
+  ul.plain li{margin-bottom:6px}
+
+  /* ── جعبه‌ها ─────────────────────────────── */
+  .box{border-radius:12px;padding:12px 16px;margin:14px 0 2px;font-size:15px}
+  .box b{display:block;margin-bottom:2px}
+  .tip{background:var(--ok-bg);border:1px solid var(--ok-line);color:var(--ok-ink)}
+  .warn{background:var(--warn-bg);border:1px solid var(--warn-line);color:var(--warn-ink)}
+  .bad{background:var(--bad-bg);border:1px solid var(--bad-line);color:var(--bad-ink)}
+  .info{background:var(--info-bg);border:1px solid var(--info-line)}
+
+  /* ── برچسب وضعیت ─────────────────────────── */
+  .pills{display:flex;flex-wrap:wrap;gap:8px;margin:10px 0 2px}
+  .pill{
+    padding:4px 14px;border-radius:999px;font-size:13.5px;font-weight:600;
+    border:1.5px solid;display:inline-flex;align-items:center;gap:6px;
+  }
+  .p-wait{background:#fdf6e3;border-color:#ecd9a0;color:#8a6116}
+  .p-ok{background:#eefaf1;border-color:#bfe8cc;color:#1d6b3c}
+  .p-work{background:#eaf1fb;border-color:#c3d4ef;color:#2f5a94}
+  .p-send{background:#f1eefa;border-color:#d4c9ee;color:#5b3f96}
+  .p-done{background:#eefaf1;border-color:#9fdcb4;color:#166534}
+  .p-cancel{background:#fdefee;border-color:#f3c6c2;color:#a03028}
+  .arrow{color:var(--muted);align-self:center;font-size:18px}
+
+  /* ── کیبورد ربات ─────────────────────────── */
+  .bot-keys{
+    display:grid;grid-template-columns:1fr 1fr;gap:8px;margin:12px 0 4px;max-width:420px;
+  }
+  .bot-keys .wide{grid-column:1 / -1}
+  .bot-key{
+    border:1.5px solid var(--brand-line);background:var(--brand-soft);
+    border-radius:10px;padding:8px 10px;text-align:center;font-size:14px;font-weight:600;color:#7c4a0d;
+  }
+  @media(max-width:480px){.bot-keys{grid-template-columns:1fr}}
+
+  /* ── جدول‌ها ─────────────────────────────── */
+  table{width:100%;border-collapse:collapse;font-size:14.5px;margin:10px 0 4px}
+  th,td{border:1px solid var(--line);padding:8px 12px;text-align:right;vertical-align:top}
+  th{background:#f6f1ea;font-weight:600;white-space:nowrap}
+  tr:nth-child(even) td{background:#fbf9f6}
+
+  /* ── متفرقه ─────────────────────────────── */
+  .kbd{
+    background:#f1ece4;border:1px solid #d9cfc0;border-bottom-width:2.5px;
+    border-radius:7px;padding:1px 9px;font-size:13.5px;font-weight:600;color:#5c4a33;white-space:nowrap;
+  }
+  .path{color:var(--brand);font-weight:600}
+  .small{font-size:13.5px;color:var(--muted)}
+  .two-col{display:grid;grid-template-columns:1fr 1fr;gap:14px}
+  @media(max-width:640px){.two-col{grid-template-columns:1fr}}
+  .icon-li{list-style:none;padding-right:4px}
+  .icon-li::before{content:'✦ ';color:var(--brand)}
+
+  details.faq{
+    background:var(--card);border:1px solid var(--line);border-radius:14px;
+    padding:0;margin-bottom:10px;overflow:hidden;
+  }
+  details.faq summary{
+    cursor:pointer;padding:14px 18px;font-weight:600;list-style:none;
+    display:flex;align-items:center;gap:10px;
+  }
+  details.faq summary::-webkit-details-marker{display:none}
+  details.faq summary::before{content:'؟';flex:none;width:26px;height:26px;border-radius:8px;background:var(--brand-soft);color:var(--brand);border:1px solid var(--brand-line);display:flex;align-items:center;justify-content:center;font-size:14px;font-weight:700}
+  details.faq[open] summary{border-bottom:1px dashed var(--line)}
+  details.faq .ans{padding:12px 18px 14px;font-size:15px}
+
+  .checklist{list-style:none;margin:8px 0 0;padding:0}
+  .checklist li{
+    padding:9px 44px 9px 12px;position:relative;
+    border:1px dashed var(--line);border-radius:10px;margin-bottom:8px;background:#fdfcfa;
+  }
+  .checklist li::before{
+    content:'';position:absolute;right:12px;top:12px;
+    width:18px;height:18px;border:2px solid var(--brand-line);border-radius:5px;background:#fff;
+  }
+
+  footer{
+    margin-top:44px;padding:22px 16px 26px;text-align:center;
+    border-top:1px solid var(--line);color:var(--muted);font-size:14px;
+    background:var(--card);
+  }
+  footer b{color:var(--ink)}
+
+  @media print{
+    body{background:#fff;font-size:12.5px}
+    header.hero{background:#6b5a41 !important;-webkit-print-color-adjust:exact}
+    .card,nav.toc{box-shadow:none}
+    section{break-inside:avoid-page}
+  }
+</style>
+</head>
+<body>
+
+<header class="hero">
+  <div class="logo">💎</div>
+  <h1>راهنمای کامل و سادهٔ سیلور لاو</h1>
+  <p>همهٔ چیزی که برای کار با پنل مدیریت و ربات فروش لازم دارید — قدم‌به‌قدم و به زبان ساده</p>
+  <div class="hero-chips">
+    <span>🛍 فروش در تلگرام و بله</span>
+    <span>🖥 پنل مدیریت</span>
+    <span>🤖 دستیار هوشمند</span>
+    <span>💾 پشتیبان خودکار</span>
+  </div>
+</header>
+
+<div class="wrap">
+
+<!-- ═══════════ فهرست ═══════════ -->
+<nav class="toc" aria-label="فهرست مطالب">
+  <h2>📖 فهرست مطالب</h2>
+  <ol>
+    <li><a href="#s1">کل سیستم در یک نگاه</a></li>
+    <li><a href="#s2">اولین روز — چک‌لیست راه‌اندازی</a></li>
+    <li><a href="#s3">ورود به پنل و تغییر رمز</a></li>
+    <li><a href="#s4">داشبورد</a></li>
+    <li><a href="#s5">مدیریت محصولات</a></li>
+    <li><a href="#s6">دسته‌بندی‌ها</a></li>
+    <li><a href="#s7">سفارش‌ها</a></li>
+    <li><a href="#s8">پرداخت‌ها (بررسی رسیدها)</a></li>
+    <li><a href="#s9">نرخ نقره</a></li>
+    <li><a href="#s10">مشتریان</a></li>
+    <li><a href="#s11">اتصال ربات تلگرام</a></li>
+    <li><a href="#s12">ربات بله</a></li>
+    <li><a href="#s13">ابزارهای هوش مصنوعی</a></li>
+    <li><a href="#s14">تنظیمات فروشگاه</a></li>
+    <li><a href="#s15">ربات از نگاه مشتری</a></li>
+    <li><a href="#s16">پیام‌هایی که خودتان می‌گیرید</a></li>
+    <li><a href="#s17">پشتیبان‌گیری خودکار</a></li>
+    <li><a href="#s18">سوال‌های پرتکرار</a></li>
+  </ol>
+</nav>
+
+<!-- ═══════════ ۱ ═══════════ -->
+<section id="s1">
+  <div class="sec-head"><div class="sec-num">۱</div><h2>کل سیستم در یک نگاه</h2></div>
+  <p class="sec-sub">قبل از هر چیز بفهمیم این سیستم اصلاً چه‌کارهایی می‌کند.</p>
+  <div class="card">
+    <p>سیستم شما از <b>سه قسمت</b> ساخته شده که همه با هم کار می‌کنند:</p>
+    <table>
+      <tr><th style="width:150px">قسمت</th><th>چه‌کاری انجام می‌دهد؟</th></tr>
+      <tr>
+        <td>🤖 <b>ربات فروش</b></td>
+        <td>در تلگرام و بله فعال است. مشتری‌ها با آن گفتگو می‌کنند، محصول می‌بینند، سوال می‌پرسند و سفارش ثبت می‌کنند. یک دستیار هوشمند هم دارد که مثل یک فروشندهٔ واقعی به سوال‌ها جواب می‌دهد.</td>
+      </tr>
+      <tr>
+        <td>🖥 <b>پنل مدیریت</b></td>
+        <td>دفتر کار شماست. از داخل مرورگر باز می‌شود. همه‌چیز را از اینجا کنترل می‌کنید: محصول، موجودی، سفارش‌ها، بررسی رسیدهای واریز، نرخ نقره، تنظیمات و …</td>
+      </tr>
+      <tr>
+        <td>💾 <b>پشتیبان خودکار</b></td>
+        <td>هر شب ساعت ۴ بامداد، از تمام اطلاعات شما نسخهٔ پشتیبان گرفته می‌شود و به تلگرام خودتان فرستاده می‌شود. نگران گم‌شدن اطلاعات نباشید.</td>
+      </tr>
+    </table>
+
+    <h4>⚡ چرخهٔ کار در دنیای واقعی این‌طوری است:</h4>
+    <ol class="steps">
+      <li><b>شما</b> در پنل، محصول‌ها را با قیمت و عکس ثبت می‌کنید.</li>
+      <li><b>مشتری</b> در تلگرام به ربات پیام می‌دهد، محصول را انتخاب و سفارش می‌دهد.</li>
+      <li><b>مشتری</b> پول را کارت‌به‌کارت واریز می‌کند و عکس رسید را برای ربات می‌فرستد.</li>
+      <li><b>شما</b> در پنل رسید را می‌بینید، تأیید می‌کنید و سفارش را ارسال می‌کنید.</li>
+      <li>همهٔ این مراحل، ربات و پنل به شما <b>پیام خبری</b> می‌دهند تا هیچ سفارشی از دستتان در نرود.</li>
+    </ol>
+  </div>
+</section>
+
+<!-- ═══════════ ۲ ═══════════ -->
+<section id="s2">
+  <div class="sec-head"><div class="sec-num">۲</div><h2>اولین روز — چک‌لیست راه‌اندازی</h2></div>
+  <p class="sec-sub">این هشت قدم را به ترتیب انجام دهید تا فروشگاه‌تان بالا بیاید. هر قدم در بخش‌های بعدی کامل توضیح داده شده.</p>
+  <div class="card">
+    <ul class="checklist">
+      <li>به پنل مدیریت وارد شوید (بخش ۳).</li>
+      <li>در «تنظیمات»، نام فروشگاه و آیدی پشتیبانی را ثبت کنید (بخش ۱۴).</li>
+      <li>در «تنظیمات»، کارت‌های واریز (کارت‌به‌کارت) را وارد کنید (بخش ۱۴).</li>
+      <li>در بخش «تلگرام و ربات»، ربات را وصل کنید و دکمهٔ «تست اتصال» را بزنید (بخش ۱۱).</li>
+      <li>یک بار شخصاً به ربات در تلگرام پیام بدهید تا پیام‌های مدیریتی برای شما فعال شود (بخش ۱۶).</li>
+      <li>در «دسته‌بندی‌ها»، گروه‌های فروشگاه را بسازید (بخش ۶).</li>
+      <li>در «مدیریت محصولات»، چند محصول با عکس ثبت کنید (بخش ۵).</li>
+      <li>در «آزمایشگاه ربات»، مثل یک مشتری آزمایش خرید کنید (بخش ۱۱).</li>
+    </ul>
+    <div class="box tip">✅ <b>پایان چک‌لیست!</b> از این لحظه فروشگاه شما باز است و مشتری‌ها می‌توانند خرید کنند.</div>
+  </div>
+</section>
+
+<!-- ═══════════ ۳ ═══════════ -->
+<section id="s3">
+  <div class="sec-head"><div class="sec-num">۳</div><h2>ورود به پنل و تغییر رمز</h2></div>
+  <p class="sec-sub">پنل، دفتر کار شماست. فقط با رمز ورود باز می‌شود.</p>
+  <div class="card">
+    <h3>🔐 ورود</h3>
+    <ol class="steps">
+      <li>آدرس پنل را در مرورگر (کروم، سافاری و …) باز کنید.</li>
+      <li>نام کاربری و رمز عبور خود را بنویسید و دکمهٔ ورود را بزنید.</li>
+      <li>اگر رمز را اشتباه وارد کنید، پیام خطا می‌گیرید؛ دوباره با دقت تایپ کنید.</li>
+    </ol>
+    <h3>🔁 تغییر رمز عبور</h3>
+    <ol class="steps">
+      <li>از منوی کنار صفحه وارد بخش <span class="path">تنظیمات</span> شوید.</li>
+      <li>پایین صفحه، قسمت «امنیت» را پیدا کنید.</li>
+      <li>رمز فعلی، رمز جدید و تکرار رمز جدید را بنویسید و ذخیره کنید.</li>
+    </ol>
+    <div class="box warn">⚠️ <b>مهم:</b> رمز عبور را به کسی ندهید و جای امن یادداشت کنید. اگر رمز را فراموش کردید، فقط پشتیبان سیستم می‌تواند برای شما رمز جدید بسازد.</div>
+    <div class="box info">💡 <b>نکته:</b> پنل با گوشی هم باز می‌شود و منوی کنار صفحه روی گوشی داخل یک دکمهٔ ☰ پنهان است. برای بیرون آمدن، روی آیکن خروج (⏻) در بالای منو بزنید.</div>
+  </div>
+</section>
+
+<!-- ═══════════ ۴ ═══════════ -->
+<section id="s4">
+  <div class="sec-head"><div class="sec-num">۴</div><h2>داشبورد</h2></div>
+  <p class="sec-sub">اولین صفحه‌ای که بعد از ورود می‌بینید؛ خلاصهٔ کل فروشگاه در یک نگاه.</p>
+  <div class="card">
+    <ul class="plain">
+      <li class="icon-li"><b>کارت‌های آماری:</b> تعداد کل محصولات، محصولات فعال، کم‌موجود، ناموجود، سفارش‌های در انتظار، رسیدهای منتظر بررسی، فروش امروز و مجموع مشتریان. روی هر کارت بزنید تا مستقیم به همان بخش بروید.</li>
+      <li class="icon-li"><b>دو نمودار هفتگی:</b> میزان فروش و تعداد سفارش‌های ۷ روز اخیر را نشان می‌دهند تا بفهمید فروش بالا رفته یا پایین.</li>
+      <li class="icon-li"><b>نوار وضعیت پرداخت:</b> چند سفارش پرداخت شده، چند رسید منتظر بررسی مانده و چند مشتری هنوز پرداخت نکرده.</li>
+      <li class="icon-li"><b>آخرین سفارش‌ها:</b> تازه‌ترین خریدها با دکمهٔ «مشاهدهٔ همه».</li>
+    </ul>
+    <div class="box tip">💡 <b>عادت خوب:</b> هر روز صبح اول داشبورد را نگاه کنید؛ اگر کارت «رسید در انتظار بررسی» عدد داشت یعنی مشتری منتظر تأیید شماست.</div>
+  </div>
+</section>
+
+<!-- ═══════════ ۵ ═══════════ -->
+<section id="s5">
+  <div class="sec-head"><div class="sec-num">۵</div><h2>مدیریت محصولات</h2></div>
+  <p class="sec-sub">قلب فروشگاه شما. اینجا محصول اضافه می‌کنید، عکس می‌گذارید، قیمت و موجودی را تغییر می‌دهید.</p>
+  <div class="card">
+    <h3>➕ افزودن محصول جدید</h3>
+    <ol class="steps">
+      <li>وارد بخش <span class="path">مدیریت محصولات</span> شوید و دکمهٔ «افزودن محصول» را بزنید.</li>
+      <li><b>نام محصول</b> را بنویسید (مثلاً: دستبند نقرهٔ زنانهٔ مدل عشق).</li>
+      <li><b>دسته‌بندی</b> را از فهرست درختی انتخاب کنید.</li>
+      <li><b>قیمت نهایی (تومان)</b> را وارد کنید. اگر محصول تخفیف دارد، «قیمت قبل از تخفیف» را هم بزنید تا قیمت قبلی خط‌خورده نمایش داده شود.</li>
+      <li><b>موجودی</b> را بنویسید؛ هر بار که کسی بخرد، خودکار کم می‌شود و وقتی صفر شود، در ربات «ناموجود» نمایش داده می‌شود.</li>
+      <li><b>وضعیت:</b> «فعال» یعنی در ربات دیده می‌شود؛ «پیش‌نویس» یا «غیرفعال» یعنی پنهان است.</li>
+      <li>«توضیح کوتاه» و «توضیحات» را بنویسید — هرچه کامل‌تر، دستیار هوشمند بهتر جواب می‌دهد.</li>
+      <li>عکس‌ها را آپلود کنید (می‌توانید چند عکس بگذارید و یکی را «تصویر اصلی» کنید و ترتیب‌شان را جابه‌جا کنید).</li>
+      <li>در قسمت «ویژگی‌های نقره» می‌توانید عیار، وزن، سایز، ابعاد و… را ثبت کنید.</li>
+      <li>ذخیره کنید. ✅ محصول بلافاصله در ربات دیده می‌شود.</li>
+    </ol>
+
+    <div class="box tip">✨ <b>دستیار نوشتن توضیحات:</b> در فرم محصول دکمهٔ «پیشنهاد هوش مصنوعی» هست؛ اگر چند جملهٔ خام دربارهٔ محصول بنویسید، هوش مصنوعی نام زیبا، توضیح کامل، برچسب و پیشنهاد دسته را برایتان می‌سازد. فقط قیمت و موجودی را همیشه خودتان تعیین کنید.</div>
+
+    <h3>🎨 استودیوی تصویر</h3>
+    <p>از منوی کنار هر محصول، گزینهٔ «🎨 استودیوی تصویر» را بزنید؛ هوش مصنوعی برای محصول شما عکس تبلیغاتی می‌سازد یا عکس فعلی را زیباتر می‌کند.</p>
+
+    <h3>✏️ کارهای دیگر روی هر محصول</h3>
+    <table>
+      <tr><th>گزینه</th><th>چه‌کار می‌کند؟</th></tr>
+      <tr><td>ویرایش</td><td>بازکردن همان فرم برای تغییر قیمت، موجودی، عکس و…</td></tr>
+      <tr><td>انتشار در کانال</td><td>یک پست تبلیغاتی با عکس و دکمهٔ خرید در کانال تلگرام شما می‌فرستد. مشتری روی دکمه می‌زند و مستقیم به همان محصول در ربات می‌رسد. با «حذف انتشار» پست پاک می‌شود.</td></tr>
+      <tr><td>فعال / غیرفعال کردن</td><td>نمایش یا پنهان‌کردن محصول در ربات، بدون پاک‌کردن اطلاعات.</td></tr>
+      <tr><td>حذف</td><td>پاک‌کردن کامل محصول (برگشت‌ناپذیر).</td></tr>
+    </table>
+
+    <div class="box info">💡 <b>جستجو و فیلتر:</b> بالای جدول می‌توانید محصول را با نام پیدا کنید، فقط «فعال»ها یا «کم‌موجود»ها را ببینید یا بر اساس گران‌ترین و جدیدترین مرتب کنید.</div>
+  </div>
+</section>
+
+<!-- ═══════════ ۶ ═══════════ -->
+<section id="s6">
+  <div class="sec-head"><div class="sec-num">۶</div><h2>دسته‌بندی‌ها</h2></div>
+  <p class="sec-sub">قفسه‌بندی فروشگاه شما: انگشتر، گردنبند، دستبند و…</p>
+  <div class="card">
+    <ol class="steps">
+      <li>وارد بخش <span class="path">دسته‌بندی‌ها</span> شوید و «دسته‌بندی جدید» را بزنید.</li>
+      <li>نام دسته را بنویسید (مثلاً «انگشتر»).</li>
+      <li>می‌توانید برای هر دسته، <b>زیرمجموعه</b> بسازید (مثلاً زیرِ «انگشتر»: مردانه، زنانه). کافی است روی کارت دسته «افزودن زیرمجموعه» را بزنید.</li>
+      <li>تعداد سطوح محدودی ندارد؛ هرچقدر لازم است درخت بسازید.</li>
+      <li>با «ویرایش» نام را عوض کنید و با «حذف» دسته را پاک کنید.</li>
+    </ol>
+    <div class="box warn">⚠️ <b>توجه:</b> وقتی یک دسته را حذف می‌کنید، محصول‌های داخل آن پاک نمی‌شوند؛ فقط «بدون دسته» می‌شوند و زیرمجموعه‌ها به سطح اصلی منتقل می‌شوند.</div>
+  </div>
+</section>
+
+<!-- ═══════════ ۷ ═══════════ -->
+<section id="s7">
+  <div class="sec-head"><div class="sec-num">۷</div><h2>سفارش‌ها</h2></div>
+  <p class="sec-sub">هر خریدی که مشتری ثبت کند، اینجا با همهٔ جزئیات می‌آید.</p>
+  <div class="card">
+    <h3>🏷 وضعیت‌های سفارش — به همین ترتیب جلو می‌رود:</h3>
+    <div class="pills">
+      <span class="pill p-wait">🟡 در انتظار</span><span class="arrow">←</span>
+      <span class="pill p-ok">🟢 تأیید شده</span><span class="arrow">←</span>
+      <span class="pill p-work">🔵 در حال پردازش</span><span class="arrow">←</span>
+      <span class="pill p-send">🚚 ارسال شده</span><span class="arrow">←</span>
+      <span class="pill p-done">✅ تکمیل شده</span>
+    </div>
+    <p class="small">وضعیت «لغو شده» از هر مرحله ممکن است. در بالای صفحه هر وضعیت یک تب جدا دارد تا راحت پیدا کنید.</p>
+
+    <h3>👀 داخل هر سفارش چه چیزی می‌بینید؟</h3>
+    <ul class="plain">
+      <li class="icon-li">مشخصات مشتری: نام، آیدی تلگرام، <b>شماره تلفن</b> و <b>آدرس کامل</b> ارسال.</li>
+      <li class="icon-li">فهرست محصولات خریداری‌شده با تعداد و قیمت، و مبلغ نهایی.</li>
+      <li class="icon-li">اطلاعات واریزی: نام پرداخت‌کننده، کد پیگیری، زمان ارسال رسید و عکس رسید.</li>
+    </ul>
+
+    <h3>🛠 کارهایی که می‌توانید انجام دهید</h3>
+    <ol class="steps">
+      <li><b>تغییر وضعیت:</b> از منوی کشوییِ وضعیت را عوض کنید (مثلاً بعد از تحویل به پست، بزنید «ارسال شده»). مشتری از طریق ربات از وضعیت باخبر می‌شود.</li>
+      <li><b>کد رهگیری مرسوله:</b> بعد از ارسال، کد رهگیری پستی را در کادر مربوط بنویسید و «ذخیره» کنید.</li>
+      <li><b>لغو سفارش:</b> اگر سفارش را لغو کنید، موجودی محصولات به‌طور خودکار به انبار برمی‌گردد.</li>
+    </ol>
+    <div class="box tip">💡 <b>نکته:</b> قبل از ارسال مرسوله، حتماً پرداخت مشتری را تأیید کرده باشید (بخش بعدی).</div>
+  </div>
+</section>
+
+<!-- ═══════════ ۸ ═══════════ -->
+<section id="s8">
+  <div class="sec-head"><div class="sec-num">۸</div><h2>پرداخت‌ها — بررسی رسیدها</h2></div>
+  <p class="sec-sub">مشتری پول را کارت‌به‌کارت واریز می‌کند و عکس رسید را برای ربات می‌فرستد؛ شما اینجا بررسی می‌کنید.</p>
+  <div class="card">
+    <ol class="steps">
+      <li>وارد بخش <span class="path">پرداخت‌ها</span> شوید. تب «در انتظار بررسی» فهرست رسیدهایی است که هنوز ندیده‌اید.</li>
+      <li>عکس رسید را باز کنید و با صورتحساب بانک خودتان مقایسه کنید: مبلغ، نام واریزکننده و کد پیگیری.</li>
+      <li>اگر همه‌چیز درست بود، دکمهٔ <b>«تأیید پرداخت»</b> را بزنید. پرداختِ سفارش تأیید و مشتری مطلع می‌شود.</li>
+      <li>اگر مشکلی داشت، <b>«رد پرداخت»</b> را بزنید و <b>دلیل</b> را بنویسید (مثلاً «مبلغ رسید ناقص بود»). این دلیل برای مشتری در ربات نمایش داده می‌شود؛ محترمانه و واضح بنویسید.</li>
+    </ol>
+    <div class="box warn">⚠️ <b>حواستان باشد:</b> فیش‌های دستکاری‌شده واقعی هستند! همیشه مبلغ و کد پیگیری را داخل اپلیکیشن بانک خودتان چک کنید، نه فقط روی عکس.</div>
+    <div class="box info">💡 <b>می‌دانستید؟</b> همین رسیدها داخل خودِ صفحهٔ «سفارش‌ها» هم دیده می‌شوند؛ می‌توانید از همان‌جا هم تأیید یا رد کنید.</div>
+  </div>
+</section>
+
+<!-- ═══════════ ۹ ═══════════ -->
+<section id="s9">
+  <div class="sec-head"><div class="sec-num">۹</div><h2>نرخ نقره</h2></div>
+  <p class="sec-sub">قیمت مرجع هر گرم نقره را ثبت می‌کنید تا در کانال اعلام شود.</p>
+  <div class="card">
+    <ol class="steps">
+      <li>وارد بخش <span class="path">نرخ نقره</span> شوید. بالای صفحه «نرخ فعلی» را می‌بینید.</li>
+      <li>در فرم «ثبت نرخ جدید»، قیمت هر گرم را به تومان بنویسید و اگر توضیحی دارید در «یادداشت» بگذارید.</li>
+      <li>دکمهٔ «ثبت نرخ» را بزنید — نرخ جدید <b>به‌طور خودکار در کانال تلگرام پست می‌شود.</b></li>
+      <li>اگر ارسال به کانال با خطا مواجه شد، دکمهٔ «تلاش مجدد» را بزنید.</li>
+      <li>در «تاریخچهٔ نرخ‌ها» همهٔ نرخ‌های قبلی، زمان ثبت و وضعیت انتشار دیده می‌شود. با کلید کنار هر نرخ می‌توانید آن را غیرفعال کنید.</li>
+    </ol>
+    <div class="box info">💡 <b>نکته:</b> این نرخ فقط برای اطلاع‌رسانی در کانال است؛ قیمت محصول‌ها همیشه همان چیزی است که در فرم محصول نوشته‌اید.</div>
+  </div>
+</section>
+
+<!-- ═══════════ ۱۰ ═══════════ -->
+<section id="s10">
+  <div class="sec-head"><div class="sec-num">۱۰</div><h2>مشتریان</h2></div>
+  <p class="sec-sub">فهرست همهٔ کسانی که از طریق ربات خرید کرده‌اند.</p>
+  <div class="card">
+    <ul class="plain">
+      <li class="icon-li">برای هر مشتری می‌بینید: نام و آیدی تلگرام، شماره تلفن، <b>تعداد سفارش‌ها</b>، <b>مجموع مبلغ خرید</b> و تاریخ آخرین خرید.</li>
+      <li class="icon-li">با کادر جستجو می‌توانید با نام یا آیدی تلگرام مشتری را پیدا کنید.</li>
+      <li class="icon-li">با زدن روی هر مشتری، همهٔ سفارش‌های او را می‌بینید — برای پیگیری سفارش قدیمی خیلی کاربرد دارد.</li>
+    </ul>
+  </div>
+</section>
+
+<!-- ═══════════ ۱۱ ═══════════ -->
+<section id="s11">
+  <div class="sec-head"><div class="sec-num">۱۱</div><h2>اتصال ربات تلگرام</h2></div>
+  <p class="sec-sub">اینجا ربات را به فروشگاه وصل می‌کنید و می‌توانید بدون گوشی، ربات را آزمایش کنید.</p>
+  <div class="card">
+    <h3>🔌 وصل‌کردن ربات</h3>
+    <ol class="steps">
+      <li>وارد بخش <span class="path">تلگرام و ربات</span> شوید.</li>
+      <li>در کادر «توکن ربات»، کد یکتایی که هنگام ساخت ربات از تلگرام گرفته‌اید را بچسبانید (این کد مثل کلید ربات است؛ کسی نباید آن را ببیند).</li>
+      <li>«شناسهٔ کانال» را وارد کنید تا ربات بتواند در کانال شما پست بگذارد (مثل اعلام نرخ نقره و انتشار محصول).</li>
+      <li>«شناسهٔ چت مدیر» را وارد کنید — این همان جایی است که پیام سفارش‌های جدید برایتان می‌آید (بخش ۱۶).</li>
+      <li>«ذخیره» کنید و بعد دکمهٔ <b>«تست اتصال»</b> را بزنید. اگر جواب سبک «متصل» گرفتید، همه‌چیز آماده است.</li>
+    </ol>
+    <div class="pills">
+      <span class="pill p-ok">ربات: پیکربندی شده</span>
+      <span class="pill p-ok">کانال: متصل</span>
+      <span class="pill p-ok">چت مدیر: تنظیم شده</span>
+      <span class="pill p-work">حالت اجرا: واقعی</span>
+    </div>
+    <p class="small">این چهار کارت وضعیت، حال‌وهوای اتصال را یک‌جا نشان می‌دهند.</p>
+
+    <h3>🧪 آزمایشگاه ربات — بدون گوشی امتحان کنید</h3>
+    <p>پایین همین صفحه، «آزمایشگاه ربات» هست: مثل یک چت واقعی می‌توانید به ربات پیام بدهید، دکمه‌ها را بزنید و کل مسیر خرید را تست کنید — <b>بدون اینکه پیامی واقعاً به تلگرام برود.</b> اگر وسط آزمایش گیر کردید، «بازنشانی گفتگو» را بزنید.</p>
+
+    <h3>📜 فعالیت اخیر</h3>
+    <p>پایین صفحه، پیام‌هایی که اخیراً بین مشتری‌ها و ربات رد و بدل شده را می‌بینید؛ برای فهمیدن اینکه ربات درست کار می‌کند خیلی مفید است.</p>
+    <div class="box bad">🚫 <b>هرگز:</b> توکن ربات را در گروه یا کانال نگذارید و به کسی نفرستید. هر کسی توکن را داشته باشد می‌تواند ربات شما را کنترل کند.</div>
+  </div>
+</section>
+
+<!-- ═══════════ ۱۲ ═══════════ -->
+<section id="s12">
+  <div class="sec-head"><div class="sec-num">۱۲</div><h2>ربات بله</h2></div>
+  <p class="sec-sub">اگر علاوه بر تلگرام، در پیام‌رسان بله هم فروشگاه دارید، همین‌جا وصلش کنید.</p>
+  <div class="card">
+    <ul class="plain">
+      <li class="icon-li">بخش <span class="path">بله و ربات</span> دقیقاً مثل تلگرام کار می‌کند: توکن ربات، شناسهٔ کانال، چت مدیر و دکمهٔ تست اتصال.</li>
+      <li class="icon-li">هر دو ربات می‌توانند <b>هم‌زمان فعال باشند:</b> مشتری‌ها از هر دو پیام‌رسان خرید می‌کنند و اعلان سفارش‌ها به هر دو چت مدیر شما می‌رسد.</li>
+      <li class="icon-li">اگر بله ندارید، اصلاً لازم نیست این بخش را پر کنید؛ چیزی خراب نمی‌شود.</li>
+    </ul>
+  </div>
+</section>
+
+<!-- ═══════════ ۱۳ ═══════════ -->
+<section id="s13">
+  <div class="sec-head"><div class="sec-num">۱۳</div><h2>ابزارهای هوش مصنوعی</h2></div>
+  <p class="sec-sub">دستیار فروشندهٔ هوشمند ربات از این‌جا تغذیه می‌شود.</p>
+  <div class="card">
+    <h3>🔑 اول از همه: کلید هوش مصنوعی</h3>
+    <p>کلید هوش مصنوعی گوگل (جمنای) را در بخش <span class="path">تنظیمات</span> وارد کنید (بخش ۱۴). تا وقتی کلید نگذاشته باشید، دستیار با کیفیت پایین‌تری جواب می‌دهد.</p>
+
+    <h3>✍️ تولید محتوای محصول</h3>
+    <p>چند جملهٔ خام دربارهٔ محصول بنویسید (مثلاً «دستبند نقره ۹۲۵، وزن ۱۵ گرم، مناسب هدیه») تا هوش مصنوعی برایتان بسازد: نام جذاب، توضیح کوتاه، توضیح کامل، برچسب‌ها، پیشنهاد دسته و حتی متن آمادهٔ پست تلگرام. بعد با یک کلیک اعمالش کنید.</p>
+
+    <h3>🧠 پایگاه دانش (حافظهٔ دستیار)</h3>
+    <ul class="plain">
+      <li class="icon-li">دستیار برای اینکه دربارهٔ محصول‌های شما جواب درست بدهد، باید اطلاعات محصول‌ها را «حفظ» کند. نوار پیشرفت نشان می‌دهد چند محصول حفظ شده است.</li>
+      <li class="icon-li">هر وقت محصول جدید زیاد اضافه کردید یا اطلاعات محصول‌ها را به‌روز کردید، دکمهٔ <b>«بازسازی بردارها»</b> را بزنید تا حافظهٔ دستیار تازه شود.</li>
+    </ul>
+
+    <h3>🧰 ابزارهای دستیار</h3>
+    <p>این فهرست نشان می‌دهد دستیار هنگام گفتگو با مشتری چه‌کارهایی از دستش برمی‌آید: جستجوی محصول، دیدن جزئیات یک محصول، چک‌کردن موجودی، دیدن دسته‌بندی‌ها و دیدن سفارش‌های قبلی هر مشتری. یعنی دستیار واقعاً داخل فروشگاه شما را می‌گردد و جواب می‌دهد، نه اینکه حرف‌های کلی بزند.</p>
+    <div class="box tip">💡 <b>بهترین تست:</b> بعد از ثبت کلید، در «آزمایشگاه ربات» از دستیار بپرسید: «یه انگشتر نقره برای هدیه تا ۲ میلیون چی داری؟» — باید از محصول‌های واقعی شما پیشنهاد بدهد.</div>
+  </div>
+</section>
+
+<!-- ═══════════ ۱۴ ═══════════ -->
+<section id="s14">
+  <div class="sec-head"><div class="sec-num">۱۴</div><h2>تنظیمات فروشگاه</h2></div>
+  <p class="sec-sub">مشخصات فروشگاه، پیام خوش‌آمد، کارت‌های واریز، هوش مصنوعی و امنیت — همه در یک صفحه.</p>
+  <div class="card">
+    <h3>🏪 اطلاعات فروشگاه</h3>
+    <ul class="plain">
+      <li class="icon-li"><b>نام فروشگاه:</b> در پیام‌های ربات و پیشنهادهای دستیار استفاده می‌شود.</li>
+      <li class="icon-li"><b>آیدی پشتیبانی تلگرام:</b> وقتی مشتری دکمهٔ «ارتباط با فروشگاه» را بزند، همین آیدی به او نشان داده می‌شود.</li>
+      <li class="icon-li"><b>دربارهٔ فروشگاه:</b> متن صفحهٔ «درباره» در ربات.</li>
+    </ul>
+
+    <h3>👋 پیام خوش‌آمدگویی ربات</h3>
+    <p>متن پیامی که مشتری با اولین <span class="kbd">/start</span> می‌گیرد، همین‌جاست. دو عبارت جادویی دارد:</p>
+    <ul class="plain">
+      <li class="icon-li"><span class="kbd">{name}</span> ← خودکار با نام مشتری عوض می‌شود. مثال: «سلام {name} عزیز»</li>
+      <li class="icon-li"><span class="kbd">{store}</span> ← با نام فروشگاه شما عوض می‌شود.</li>
+    </ul>
+    <p>همان‌طور می‌نویسید، همان لحظه پایینش پیش‌نمایش زنده می‌بینید. اگر پشیمان شدید، دکمهٔ «بازگردانی به متن پیش‌فرض» هست.</p>
+
+    <h3>💳 اطلاعات پرداخت (کارت‌به‌کارت)</h3>
+    <ol class="steps">
+      <li>«افزودن مقصد پرداخت» را بزنید.</li>
+      <li>نام بانک، نام صاحب حساب و شماره کارت را وارد کنید (شماره شبا و حساب اختیاری است).</li>
+      <li>می‌توانید چند کارت ثبت کنید و هرکدام را با کلیدش فعال یا غیرفعال کنید. مشتری هنگام پرداخت، کارت‌های فعال را می‌بیند.</li>
+    </ol>
+
+    <h3>🤖 دستیار هوش مصنوعی</h3>
+    <ul class="plain">
+      <li class="icon-li"><b>کلید گوگل جمنای:</b> کلید اصلی دستیار. واردش کنید و «تست اتصال» را بزنید تا مطمئن شوید سالم است.</li>
+      <li class="icon-li"><b>کلید جایگزین:</b> یک کلید دوم (اختیاری)؛ اگر کلید اصلی به هر دلیلی کار نکرد، دستیار خودکار از کلید دوم استفاده می‌کند و فروشگاه بدون جواب نمی‌ماند.</li>
+      <li class="icon-li"><b>کلید فعال/غیرفعال دستیار:</b> اگر بخواهید دستیار موقتاً خاموش باشد، از همین‌جا ببندید.</li>
+      <li class="icon-li"><b>لحن و شخصیت فروشنده:</b> مثلاً بنویسید «رسمی و محترمانه» یا «صمیمی و بامزه»؛ دستیار همان‌طور حرف می‌زند.</li>
+    </ul>
+
+    <h3>🚨 منطقهٔ خطر — بازنشانی دیتابیس</h3>
+    <p>سه دکمهٔ خطرناک: «حذف محصولات و دسته‌بندی‌ها»، «حذف سفارش‌ها و مشتریان» و «ریست کامل فروشگاه». برای جلوگیری از اشتباه، باید کلمهٔ <span class="kbd">ریست</span> را تایپ کنید.</p>
+    <div class="box bad">🚫 <b>خیلی مراقب باشید:</b> پاک‌شده‌ها برگردانده نمی‌شوند. فقط زمانی استفاده کنید که واقعاً می‌خواهید فروشگاه را از صفر شروع کنید. یادتان باشد هر شب پشتیبان خودکار دارید (بخش ۱۷).</div>
+  </div>
+</section>
+
+<!-- ═══════════ ۱۵ ═══════════ -->
+<section id="s15">
+  <div class="sec-head"><div class="sec-num">۱۵</div><h2>ربات از نگاه مشتری</h2></div>
+  <p class="sec-sub">خودتان را جای مشتری بگذارید تا بفهمید ربات چه‌کاره است و بهتر پشتیبانی کنید.</p>
+  <div class="card">
+    <h3>▶️ شروع</h3>
+    <p>مشتری ربات را در تلگرام یا بله باز می‌کند و <span class="kbd">/start</span> می‌زند؛ پیام خوش‌آمدِ خودتان (بخش ۱۴) را می‌گیرد و دکمه‌های ثابت پایین صفحه همیشه همراهش هستند:</p>
+    <div class="bot-keys">
+      <div class="bot-key">🛒 سبد خرید</div>
+      <div class="bot-key">📦 سفارش‌های من</div>
+      <div class="bot-key wide">🛍 محصولات</div>
+      <div class="bot-key">❓ سوالات متداول</div>
+      <div class="bot-key">💬 گفتگو با فروشنده</div>
+    </div>
+
+    <h3>🧭 داخل منوی اصلی</h3>
+    <div class="two-col">
+      <ul class="plain">
+        <li class="icon-li">🛍 مشاهدهٔ محصولات</li>
+        <li class="icon-li">🔎 جستجوی محصول</li>
+        <li class="icon-li">✨ مشاورهٔ خرید (دستیار هوشمند)</li>
+      </ul>
+      <ul class="plain">
+        <li class="icon-li">💳 سفارش‌های من</li>
+        <li class="icon-li">📞 ارتباط با فروشگاه</li>
+        <li class="icon-li">ℹ️ دربارهٔ فروشگاه</li>
+      </ul>
+    </div>
+
+    <h3>💬 گفتگو با فروشنده (دستیار هوشمند)</h3>
+    <p>مشتری هرچه در ذهنش هست می‌نویسد — «یه گردنبند برای هدیهٔ مادرم تا ۳ میلیون می‌خوام» — دستیار نیازش را می‌فهمد، از بین محصول‌های واقعی و موجودِ شما پیشنهاد می‌دهد و تا ثبت سفارش همراهش است. مشتری لازم نیست از قبل بداند اسم محصول چیست.</p>
+
+    <h3>🛒 مسیر خرید قدم‌به‌قدم</h3>
+    <ol class="steps">
+      <li>مشتری محصول را از دسته‌ها، جستجو یا پیشنهاد دستیار انتخاب می‌کند.</li>
+      <li>دکمهٔ «🛒 ثبت سفارش» را می‌زند و تعداد را مشخص می‌کند.</li>
+      <li>ربات به‌ترتیب می‌پرسد: نام و نام خانوادگی ← شماره موبایل ← آدرس کامل.</li>
+      <li>خلاصهٔ سفارش را نشان می‌دهد؛ مشتری تأیید می‌کند.</li>
+      <li>کارت‌های واریزِ شما (از تنظیمات) نمایش داده می‌شود؛ مشتری واریز می‌کند و عکس رسید را همان‌جا می‌فرستد.</li>
+      <li>رسید در پنل شما «در انتظار بررسی» می‌شود (بخش ۸) و برای شما پیام خبری می‌آید (بخش ۱۶).</li>
+      <li>شما تأیید می‌کنید ← مشتری خبردار می‌شود ← شما سفارش را می‌فرستید و کد رهگیری را ثبت می‌کنید. تمام! ✅</li>
+    </ol>
+
+    <h3>⌨️ دستورهای آماده (اختیاری)</h3>
+    <table>
+      <tr><th>دستور</th><th>چه‌کاری می‌کند</th></tr>
+      <tr><td><span class="kbd">/menu</span></td><td>بازکردن منوی اصلی</td></tr>
+      <tr><td><span class="kbd">/products</span></td><td>دیدن محصولات</td></tr>
+      <tr><td><span class="kbd">/cart</span></td><td>سبد خرید</td></tr>
+      <tr><td><span class="kbd">/orders</span></td><td>سفارش‌های من</td></tr>
+      <tr><td><span class="kbd">/faq</span></td><td>سوالات متداول</td></tr>
+      <tr><td><span class="kbd">/support</span></td><td>ارتباط با فروشگاه</td></tr>
+    </table>
+    <div class="box info">💡 <b>اگر مشتری وسط خرید پشیمان شد:</b> کافی است دکمهٔ «🏠 منوی اصلی» را بزند یا «انصراف» بنویسد؛ ثبت سفارش بدون خراب‌کاری رها می‌شود.</div>
+  </div>
+</section>
+
+<!-- ═══════════ ۱۶ ═══════════ -->
+<section id="s16">
+  <div class="sec-head"><div class="sec-num">۱۶</div><h2>پیام‌هایی که خودتان می‌گیرید</h2></div>
+  <p class="sec-sub">سیستم مدام شما را در جریان می‌گذارد — فقط یک بار باید خودتان را به ربات معرفی کنید.</p>
+  <div class="card">
+    <h3>🙋 معرفی خودتان به ربات (فقط یک بار!)</h3>
+    <ol class="steps">
+      <li>در تلگرام، ربات فروشگاه را باز کنید.</li>
+      <li>با اکانت خودتان (همان اکانتی که «مدیر» تعریف شده) یک پیام بدهید؛ حتی یک «سلام» کافی است.</li>
+      <li>از همان لحظه، ربات شما را به‌عنوان مقصد پیام‌های مدیریتی ذخیره می‌کند. همین کار برای ربات بله هم اگر خواستید تکرار کنید.</li>
+    </ol>
+
+    <h3>📨 چه خبرهایی برایتان می‌آید؟</h3>
+    <ul class="plain">
+      <li class="icon-li"><b>سفارش جدید:</b> پیامی با شماره سفارش، نام مشتری، تلفن، آدرس، محصول و مبلغ. جالب‌تر اینکه پایین همین پیام دو دکمه هست:
+        <b>«✅ تأیید»</b> که سفارش را تأیید می‌کند و مشتری باخبر می‌شود، و
+        <b>«❌ لغو»</b> که سفارش را لغو و موجودی را برمی‌گرداند — همهٔ این‌ها بدون بازکردن پنل!</li>
+      <li class="icon-li"><b>رسید واریز جدید:</b> «📩 رسید سفارش دریافت شد؛ در پنل مدیریت بررسی کنید».</li>
+      <li class="icon-li"><b>نسخهٔ پشتیبان شبانه:</b> هر شب فایل پشتیبان به همین چت فرستاده می‌شود (بخش ۱۷).</li>
+    </ul>
+    <div class="box tip">💡 <b>راه میان‌بر:</b> اگر عجله دارید، تأیید سفارش را همان‌جا از تلگرام بزنید؛ جزئیات کامل همیشه در پنل هست.</div>
+  </div>
+</section>
+
+<!-- ═══════════ ۱۷ ═══════════ -->
+<section id="s17">
+  <div class="sec-head"><div class="sec-num">۱۷</div><h2>پشتیبان‌گیری خودکار</h2></div>
+  <p class="sec-sub">اطلاعات شما هیچ‌وقت گم نمی‌شود — خودِ سیستم مواظب است.</p>
+  <div class="card">
+    <ul class="plain">
+      <li class="icon-li"><b>هر شب ساعت ۴ بامداد</b> از کل فروشگاه (محصول‌ها، سفارش‌ها، مشتری‌ها، تنظیمات و عکس‌ها) یک نسخهٔ پشتیبان کامل گرفته می‌شود.</li>
+      <li class="icon-li">فایل پشتیبان به‌صورت خودکار <b>به چت تلگرام شما</b> فرستاده می‌شود.</li>
+      <li class="icon-li">روی سرور هم ۱۴ نسخهٔ آخر نگه‌داری می‌شود؛ یعنی حتی اگر چند شب پیام را ندیده باشید، پشتیبان‌های قبلی هست.</li>
+      <li class="icon-li">فایل‌های بزرگ به چند قسمت تقسیم می‌شوند تا در تلگرام جا شوند.</li>
+    </ul>
+    <div class="box warn">⚠️ <b>توصیه:</b> فایل‌های پشتیبانی که در تلگرام می‌گیرید، گاهی در یک پوشهٔ امن (کامپیوتر شخصی یا هارد اکسترنال) کپی کنید. پیشگیری بهتر از درمان است!</div>
+  </div>
+</section>
+
+<!-- ═══════════ ۱۸ ═══════════ -->
+<section id="s18">
+  <div class="sec-head"><div class="sec-num">۱۸</div><h2>سوال‌های پرتکرار</h2></div>
+  <p class="sec-sub">سریع‌ترین جواب‌های ممکن برای موقعیت‌های واقعی.</p>
+
+  <details class="faq">
+    <summary>محصول را ثبت کردم ولی در ربات دیده نمی‌شود. چرا؟</summary>
+    <div class="ans">سه چیز را چک کنید: ۱) وضعیت محصول در فرم ویرایش «فعال» باشد. ۲) موجودی صفر نباشد. ۳) اگر هنوز باز می‌شود، صفحهٔ چت ربات را ببندید و دوباره باز کنید. اگر باز هم نبود، بخش «فعالیت اخیر» در صفحهٔ تلگرام و ربات را ببینید.</div>
+  </details>
+  <details class="faq">
+    <summary>مشتری می‌گوید پول واریز کرده ولی سفارشش هنوز «در انتظار» است.</summary>
+    <div class="ans">یعنی عکس رسید نرسیده یا بررسی نشده. وارد بخش «پرداخت‌ها» شوید؛ اگر رسید هست و در تب «در انتظار بررسی» مانده، آن را تأیید کنید. اگر اصلاً رسیدی نیامده، از مشتری بخواهید عکس رسید را برای ربات بفرستد.</div>
+  </details>
+  <details class="faq">
+    <summary>سفارش را اشتباهی لغو کردم. چه‌کار کنم؟</summary>
+    <div class="ans">نگران نباشید: موجودی محصولات خودکار برگشته و چیزی از دست نرفته. با مشتری هماهنگ کنید و از او بخواهید دوباره سفارش ثبت کند. اگر پرداختش انجام شده بود، مبلغ را برمی‌گردانید یا به خرید بعدی اعمال می‌کنید.</div>
+  </details>
+  <details class="faq">
+    <summary>دستیار هوشمند خوب جواب نمی‌دهد یا جواب‌های کلی می‌دهد.</summary>
+    <div class="ans">چک‌لیست: ۱) در تنظیمات، کلید هوش مصنوعی وارد شده و «تست اتصال» سبز است؟ ۲) کلید فعال/غیرفعال دستیار روشن است؟ ۳) توضیحات محصولات کامل است؟ ۴) در ابزارهای هوش مصنوعی، «بازسازی بردارها» را زده‌اید؟ ۹۰٪ مشکل‌ها با همین چهار قدم حل می‌شود.</div>
+  </details>
+  <details class="faq">
+    <summary>رمز عبور پنل را فراموش کرده‌ام!</summary>
+    <div class="ans">خودِ پنل راه برگشتی ندارد تا امنیت بالاتر برود. با پشتیبان سیستم (فروشندهٔ این محصول) تماس بگیرید تا برای شما رمز جدید بسازد. بعد از ورود، همان‌جا رمز را عوض کنید.</div>
+  </details>
+  <details class="faq">
+    <summary>پست تلگرام محصول یا نرخ نقره منتشر نشد.</summary>
+    <div class="ans">۱) چک کنید ربات در کانال شما «مدیر» با اجازهٔ ارسال پیام باشد. ۲) شناسهٔ کانال در بخش تلگرام و ربات درست وارد شده باشد. ۳) دوباره «انتشار در کانال» را بزنید؛ برای نرخ نقره، دکمهٔ «تلاش مجدد» وجود دارد.</div>
+  </details>
+  <details class="faq">
+    <summary>دو ربات تلگرام و بله هم‌زمان کار می‌کنند؟ تداخل نمی‌کنند؟</summary>
+    <div class="ans">نه، هیچ تداخلی ندارند. هر دو از یک فروشگاه و یک پنل تغذیه می‌شوند: محصول، سفارش و موجودی یکی است و اعلان‌ها به هر دو چت مدیر می‌آید.</div>
+  </details>
+  <details class="faq">
+    <summary>می‌خواهم همه‌چیز را از صفر شروع کنم.</summary>
+    <div class="ans">به «تنظیمات ← منطقهٔ خطر» بروید. «حذف محصولات و دسته‌بندی‌ها» فقط فروشگاه را خالی می‌کند، «حذف سفارش‌ها و مشتریان» فقط سوابق خرید را پاک می‌کند و «ریست کامل» همه‌چیز را صفر می‌کند. برای تأیید باید کلمهٔ «ریست» را تایپ کنید. قبلش مطمئن شوید آخرین پشتیبان را دارید!</div>
+  </details>
+  <details class="faq">
+    <summary>مشتری می‌گوید پیام‌های من جواب نمی‌گیرد / ربات قفل کرده.</summary>
+    <div class="ans">اول در «آزمایشگاه ربات» خودتان امتحان کنید. اگر آن‌جا جواب می‌دهد، مشکل از اینترنت مشتری است. اگر آن‌جا هم جواب نمی‌دهد، در بخش تلگرام و ربات دکمهٔ «تست اتصال» را بزنید و اگر حل نشد با پشتیبان سیستم تماس بگیرید.</div>
+  </details>
+
+  <div class="box tip" style="margin-top:18px">🌟 <b>خلاصهٔ طلایی:</b> روزی پنج دقیقه داشبورد نگاه کنید، رسیدهای «در انتظار بررسی» را همان روز جمع کنید، وقتی محصول جدید اضافه کردید «بازسازی بردارها» را بزنید — و بقیه‌اش با ربات! موفق باشید 💎</div>
+</section>
+
+</div><!-- /wrap -->
+
+<footer>
+  <b>💎 سیلور لاو</b> — راهنمای استفاده از پنل مدیریت و ربات فروش<br>
+  <span class="small">این راهنما را می‌توانید چاپ کنید یا برای همکارانتان بفرستید · نسخهٔ ۱٫۰</span>
+</footer>
+
+</body>
+</html>
