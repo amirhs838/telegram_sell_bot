@@ -249,6 +249,8 @@ export type StudioJob = {
   subjectUrl: string | null
   finalUrl: string | null
   backgroundKey: string | null
+  customPrompt: string | null
+  customBgUrl: string | null
   status: 'raw' | 'subject_ready' | 'generated' | 'approved' | 'rejected' | 'failed' | string
   error: string | null
   approvedAt: string | null

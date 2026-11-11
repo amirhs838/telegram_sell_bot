@@ -2,18 +2,23 @@
 
 /**
  * AI Image Studio (استودیوی تصویر) — wizard dialog that turns a raw product
- * photo into a professional studio image:
+ * photo into a professional studio image, powered by the seller's own Google
+ * Gemini key (native image-editing models):
  *
- *   1. source image  → pick from product gallery or upload a new raw photo
- *   2. remove background (AI, 20–90s) → subject preview
- *   3. pick a background template from the studio library
- *   4. generate studio composite (AI, 20–120s) → before/after compare
- *   5. approve (attach as product primary image) or reject
+ *   1. source image  → the product's MAIN image is pre-selected automatically;
+ *                      no upload is required to continue (upload is optional)
+ *   2. background    → 8 preset studio templates + «پس‌زمینه دلخواه»:
+ *                      the seller describes a custom background in Persian
+ *                      and/or uploads a reference photo (both optional)
+ *   3. result        → ONE Gemini edit call places the product on the chosen
+ *                      background (1 quota unit per render); optional cutout
+ *                      step for a pure-white catalog shot
+ *   4. approve       → attach as the product's primary image
  *
- * All AI endpoints are slow; action buttons lock while a request is in flight
- * and an elapsed-seconds counter is shown in the loading status card.
- * Previous jobs (سابقه پردازش) are listed in a collapsible section and
- * resumable when their status is subject_ready / generated / approved.
+ * The old hard gate is gone: «ادامه» no longer requires a fresh upload or any
+ * AI call — the seller can go straight from the main image to background
+ * selection. All slow endpoints lock the buttons while in flight, with an
+ * elapsed-seconds counter; quota errors surface with precise Persian copy.
  */
 
 import { useCallback, useEffect, useRef, useState, type ChangeEvent } from 'react'
@@ -22,6 +27,7 @@ import { Badge } from '@/components/ui/badge'
 import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert'
 import { Skeleton } from '@/components/ui/skeleton'
 import { ScrollArea } from '@/components/ui/scroll-area'
+import { Textarea } from '@/components/ui/textarea'
 import {
   Collapsible,
   CollapsibleContent,
@@ -36,17 +42,20 @@ import {
 } from '@/components/ui/dialog'
 import {
   AlertTriangle,
+  ArrowLeft,
   Check,
   CheckCircle2,
   ChevronDown,
   History,
   ImageOff,
+  ImagePlus,
   Loader2,
   RefreshCcw,
   Scissors,
   Sparkles,
   Upload,
   Wand2,
+  X,
 } from 'lucide-react'
 import { toast } from 'sonner'
 import {
@@ -66,9 +75,10 @@ import { cn } from '@/lib/utils'
 
 const MAX_UPLOAD_BYTES = 5 * 1024 * 1024 // 5MB (mirrors POST /api/uploads limit)
 const ACCEPTED_MIME = ['image/jpeg', 'image/png', 'image/webp']
+const CUSTOM_BG_KEY = 'custom'
 
 type Step = 'source' | 'subject' | 'compare' | 'approved'
-type BusyAction = 'remove' | 'generate' | 'approve' | 'reject' | null
+type BusyAction = 'cutout' | 'generate' | 'approve' | 'reject' | null
 
 /** Persian label + outline badge classes for each job status. */
 const JOB_STATUS_FA: Record<string, { label: string; badgeClass: string }> = {
@@ -97,7 +107,7 @@ const CHECKER_STYLE = {
 
 const STEPS: { key: Step; label: string }[] = [
   { key: 'source', label: 'تصویر منبع' },
-  { key: 'subject', label: 'پس‌زمینه' },
+  { key: 'subject', label: 'پس‌زمینه و سبک' },
   { key: 'compare', label: 'نتیجه' },
   { key: 'approved', label: 'اتصال به محصول' },
 ]
@@ -320,7 +330,7 @@ function HistoryRow({
 }) {
   const st = jobStatusFa(job.status)
   const thumb = job.finalUrl ?? job.subjectUrl ?? job.rawUrl
-  const resumable = ['subject_ready', 'generated', 'approved'].includes(job.status)
+  const resumable = ['raw', 'subject_ready', 'generated', 'approved', 'failed'].includes(job.status)
   return (
     <li className="flex items-center gap-3 p-3">
       {thumb ? (
@@ -339,6 +349,11 @@ function HistoryRow({
           <Badge variant="outline" className={st.badgeClass}>
             {st.label}
           </Badge>
+          {job.backgroundKey === CUSTOM_BG_KEY && (
+            <Badge variant="outline" className="border-fuchsia-200 bg-fuchsia-50 text-[10px] text-fuchsia-700">
+              پس‌زمینه دلخواه
+            </Badge>
+          )}
           <span className="text-xs text-muted-foreground">{fmtDate(job.createdAt)}</span>
           {isCurrent && (
             <Badge variant="secondary" className="text-[10px]">
@@ -402,7 +417,13 @@ export function ImageStudioDialog({
   const [backgroundKey, setBackgroundKey] = useState<string | null>(null)
   const [historyOpen, setHistoryOpen] = useState(false)
 
+  // custom background state
+  const [customPrompt, setCustomPrompt] = useState('')
+  const [customBgUrl, setCustomBgUrl] = useState<string | null>(null)
+  const [customUploading, setCustomUploading] = useState(false)
+
   const fileRef = useRef<HTMLInputElement>(null)
+  const customBgRef = useRef<HTMLInputElement>(null)
 
   // -------------------------------------------------------------------------
   // Data loading (fresh start every time the dialog opens)
@@ -444,12 +465,25 @@ export function ImageStudioDialog({
     setRawUrl(null)
     setUploadedUrl(null)
     setBackgroundKey(null)
+    setCustomPrompt('')
+    setCustomBgUrl(null)
     setProduct(null)
     setStudio(null)
     setHistoryOpen(false)
     loadProduct()
     reloadStudio()
   }, [open, productId, loadProduct, reloadStudio])
+
+  // AUTO-SELECT the product's main image as the source — the seller must
+  // never be forced to upload something just to move forward.
+  useEffect(() => {
+    if (!product || rawUrl) return
+    const primary =
+      product.images?.find((im) => im.isPrimary)?.url ?? product.imageUrl ?? null
+    const fallback = productGalleryImages(product)[0] ?? null
+    const pick = primary ?? fallback
+    if (pick) setRawUrl(pick)
+  }, [product])
 
   // elapsed-seconds counter for slow AI requests
   useEffect(() => {
@@ -472,9 +506,10 @@ export function ImageStudioDialog({
     )
   }
 
-  async function removeBackground() {
+  /** Optional AI step: isolate the subject (pure-white catalog shot). */
+  async function cutoutBackground() {
     if (!rawUrl || busy) return
-    setBusy('remove')
+    setBusy('cutout')
     setStepError(null)
     try {
       const d = await api<{ job: StudioJob }>(`/api/products/${productId}/studio`, {
@@ -488,7 +523,7 @@ export function ImageStudioDialog({
         setStepError(j.error || 'حذف پس‌زمینه ناموفق بود — دوباره تلاش کنید.')
       } else {
         setStep('subject')
-        setBackgroundKey(j.backgroundKey)
+        setBackgroundKey((k) => k)
       }
     } catch (err) {
       setStepError((err as Error).message)
@@ -498,13 +533,36 @@ export function ImageStudioDialog({
   }
 
   async function generate() {
-    if (!job || !backgroundKey || busy) return
+    if (busy) return
+    if (!job && !rawUrl) {
+      setStepError('ابتدا تصویر منبع را انتخاب کنید یا عکس جدیدی آپلود کنید.')
+      return
+    }
+    const isCustom = backgroundKey === CUSTOM_BG_KEY
+    if (!isCustom && !backgroundKey) {
+      setStepError('ابتدا یک پس‌زمینه انتخاب کنید.')
+      return
+    }
+    if (isCustom && !customPrompt.trim() && !customBgUrl) {
+      setStepError('برای پس‌زمینه دلخواه، یک توضیح بنویسید یا یک عکس مرجع انتخاب کنید.')
+      return
+    }
     setBusy('generate')
     setStepError(null)
     try {
+      const payload: Record<string, unknown> = job
+        ? { action: 'generate', jobId: job.id }
+        : { action: 'generate', imageUrl: rawUrl }
+      if (isCustom) {
+        payload.backgroundKey = CUSTOM_BG_KEY
+        if (customPrompt.trim()) payload.customPrompt = customPrompt.trim()
+        if (customBgUrl) payload.customBgUrl = customBgUrl
+      } else {
+        payload.backgroundKey = backgroundKey
+      }
       const d = await api<{ job: StudioJob }>(`/api/products/${productId}/studio`, {
         method: 'POST',
-        body: JSON.stringify({ action: 'generate', jobId: job.id, backgroundKey }),
+        body: JSON.stringify(payload),
       })
       const j = d.job
       setJob(j)
@@ -568,8 +626,10 @@ export function ImageStudioDialog({
 
   function resumeJob(j: StudioJob) {
     setStepError(null)
-    setJob(j)
+    setJob(j.status === 'failed' ? null : j)
     setRawUrl(j.rawUrl)
+    setCustomPrompt(j.customPrompt ?? '')
+    setCustomBgUrl(j.customBgUrl)
     setBackgroundKey(j.backgroundKey)
     if (j.status === 'subject_ready') setStep('subject')
     else if (j.status === 'generated') setStep('compare')
@@ -609,6 +669,35 @@ export function ImageStudioDialog({
     }
   }
 
+  async function onUploadCustomBg(e: ChangeEvent<HTMLInputElement>) {
+    const file = e.target.files?.[0]
+    e.target.value = ''
+    if (!file) return
+    if (!ACCEPTED_MIME.includes(file.type)) {
+      toast.error('فرمت فایل مجاز نیست. فقط JPG، PNG یا WebP مجاز است.')
+      return
+    }
+    if (file.size > MAX_UPLOAD_BYTES) {
+      toast.error('حجم فایل نباید بیشتر از ۵ مگابایت باشد.')
+      return
+    }
+    setCustomUploading(true)
+    try {
+      const fd = new FormData()
+      fd.append('file', file)
+      const res = await api<{ url: string; name: string }>('/api/uploads', {
+        method: 'POST',
+        body: fd,
+      })
+      setCustomBgUrl(res.url)
+      toast.success('عکس مرجع پس‌زمینه ذخیره شد')
+    } catch (err) {
+      toast.error(`آپلود ناموفق بود: ${(err as Error).message}`)
+    } finally {
+      setCustomUploading(false)
+    }
+  }
+
   // -------------------------------------------------------------------------
   // Derived
   // -------------------------------------------------------------------------
@@ -618,6 +707,14 @@ export function ImageStudioDialog({
   const jobs = studio?.jobs ?? []
   const disabledByBusy = busy !== null
   const compareRaw = rawUrl ?? job?.rawUrl ?? null
+  const customSelected = backgroundKey === CUSTOM_BG_KEY
+  const customReady = customPrompt.trim().length > 0 || Boolean(customBgUrl)
+  const canGenerate =
+    !disabledByBusy &&
+    Boolean(job || rawUrl) &&
+    Boolean(backgroundKey) &&
+    (!customSelected || customReady)
+  const approvedResultUrl = job?.finalUrl ?? job?.subjectUrl ?? null
 
   // -------------------------------------------------------------------------
   // Render
@@ -632,8 +729,8 @@ export function ImageStudioDialog({
             استودیوی تصویر
           </DialogTitle>
           <DialogDescription>
-            تبدیل عکس خام «{productName}» به تصویر استودیویی حرفه‌ای با هوش مصنوعی — حذف
-            پس‌زمینه، انتخاب تم و تولید نهایی.
+            تبدیل عکس «{productName}» به تصویر استودیویی حرفه‌ای با جمنای — انتخاب پس‌زمینهٔ آماده یا
+            دلخواه، بدون نیاز به آپلود مجدد.
           </DialogDescription>
         </DialogHeader>
 
@@ -643,10 +740,11 @@ export function ImageStudioDialog({
         {step === 'source' && (
           <section className="space-y-4" aria-label="انتخاب تصویر منبع">
             <div className="space-y-1">
-              <p className="text-sm font-medium">۱. انتخاب تصویر منبع</p>
+              <p className="text-sm font-medium">۱. تصویر منبع</p>
               <p className="text-xs text-muted-foreground">
-                یک تصویر از گالری محصول انتخاب کنید یا عکس خام جدیدی آپلود کنید. کیفیت خروجی به
-                کیفیت تصویر منبع بستگی دارد.
+                تصویر اصلی محصول به‌طور خودکار انتخاب شده است. اگر می‌خواهید تصویر دیگری را پردازش
+                کنید، از گالری انتخاب کنید یا عکس جدید آپلود کنید — برای ادامه لازم نیست عکس جدیدی
+                آپلود کنید.
               </p>
             </div>
 
@@ -688,7 +786,7 @@ export function ImageStudioDialog({
               )
             )}
 
-            {/* upload zone */}
+            {/* upload zone (optional — never a gate) */}
             <input
               ref={fileRef}
               type="file"
@@ -708,7 +806,7 @@ export function ImageStudioDialog({
               ) : (
                 <Upload className="size-5" aria-hidden />
               )}
-              {uploading ? 'در حال آپلود…' : 'آپلود عکس خام جدید'}
+              {uploading ? 'در حال آپلود…' : 'آپلود عکس جدید (اختیاری)'}
               <span className="text-xs">JPG، PNG یا WebP — حداکثر ۵ مگابایت</span>
             </button>
 
@@ -723,27 +821,36 @@ export function ImageStudioDialog({
                 <div className="min-w-0">
                   <p className="text-sm font-medium text-emerald-900">تصویر منبع انتخاب شد</p>
                   <p className="text-xs text-emerald-800/80">
-                    برای شروع، پس‌زمینه را با هوش مصنوعی حذف کنید.
+                    برای ادامه، پس‌زمینه و سبک را در مرحلهٔ بعد انتخاب کنید.
                   </p>
                 </div>
               </div>
             )}
 
-            <div className="flex flex-wrap items-center gap-3">
-              <Button onClick={removeBackground} disabled={!rawUrl || disabledByBusy}>
-                {busy === 'remove' ? (
+            <div className="flex flex-col gap-3 sm:flex-row sm:items-center">
+              <Button onClick={() => setStep('subject')} disabled={!rawUrl || disabledByBusy}>
+                <ArrowLeft className="size-4" aria-hidden />
+                ادامه و انتخاب پس‌زمینه
+              </Button>
+              <Button
+                variant="outline"
+                onClick={cutoutBackground}
+                disabled={!rawUrl || disabledByBusy}
+              >
+                {busy === 'cutout' ? (
                   <Loader2 className="size-4 animate-spin" aria-hidden />
                 ) : (
                   <Scissors className="size-4" aria-hidden />
                 )}
-                {busy === 'remove' ? 'در حال پردازش…' : 'حذف پس‌زمینه'}
+                {busy === 'cutout' ? 'در حال پردازش…' : 'برش سوژه با هوش مصنوعی (اختیاری)'}
               </Button>
-              <p className="text-xs text-muted-foreground">
-                سوژه از پس‌زمینه جدا می‌شود (۲۰ تا ۹۰ ثانیه).
-              </p>
             </div>
+            <p className="text-xs text-muted-foreground">
+              «برش سوژه» محصول را کاملاً از پس‌زمینه جدا می‌کند (۲۰ تا ۹۰ ثانیه)؛ معمولاً لازم نیست —
+              ساخت تصویر نهایی مستقیماً از همین عکس انجام می‌شود.
+            </p>
 
-            {busy === 'remove' && (
+            {busy === 'cutout' && (
               <ProgressStatus
                 title="در حال جداسازی سوژه از پس‌زمینه…"
                 hint="این کار تا یک دقیقه طول می‌کشد"
@@ -754,23 +861,23 @@ export function ImageStudioDialog({
             {stepError && (
               <StepErrorAlert
                 message={stepError}
-                onRetry={busy === null ? removeBackground : undefined}
+                onRetry={busy === null ? cutoutBackground : undefined}
                 retryLabel="تلاش مجدد حذف پس‌زمینه"
               />
             )}
           </section>
         )}
 
-        {/* --------------------------- step 2: subject + background library */}
+        {/* --------------------------- step 2: background library + custom */}
         {step === 'subject' && (
           <section className="space-y-4" aria-label="انتخاب پس‌زمینه استودیویی">
             <div className="rounded-xl border p-4">
               <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
                 <div className="flex flex-wrap items-center gap-2">
                   <Badge className="border-transparent bg-emerald-100 text-emerald-800 hover:bg-emerald-100">
-                    سوژه آماده است
+                    {job?.subjectUrl ? 'سوژه آماده است' : 'تصویر منبع انتخاب شد'}
                   </Badge>
-                  <p className="text-sm font-medium">۲. انتخاب پس‌زمینه استودیویی</p>
+                  <p className="text-sm font-medium">۲. انتخاب پس‌زمینه و سبک</p>
                 </div>
                 <Button
                   variant="ghost"
@@ -784,22 +891,26 @@ export function ImageStudioDialog({
                   تغییر تصویر منبع
                 </Button>
               </div>
-              {job?.subjectUrl ? (
-                <img
-                  src={job.subjectUrl}
-                  alt="سوژه بدون پس‌زمینه"
-                  style={CHECKER_STYLE}
-                  className="mx-auto max-h-56 rounded-lg border object-contain"
-                />
-              ) : (
-                <div
-                  className="mx-auto flex h-40 w-full max-w-xs items-center justify-center rounded-lg border bg-muted/40"
-                  style={CHECKER_STYLE}
-                >
-                  <Loader2 className="size-5 animate-spin text-muted-foreground" aria-hidden />
-                </div>
-              )}
+              <img
+                src={job?.subjectUrl ?? rawUrl ?? job?.rawUrl ?? ''}
+                alt="پیش‌نمایش تصویر ورودی"
+                style={job?.subjectUrl ? CHECKER_STYLE : undefined}
+                className="mx-auto max-h-56 rounded-lg border object-contain"
+              />
             </div>
+
+            {/* cutout shortcut — approve the pure-white version directly */}
+            {job?.subjectUrl && !disabledByBusy && (
+              <div className="flex flex-wrap items-center gap-2 rounded-xl border border-sky-200 bg-sky-50/60 p-3">
+                <p className="text-xs text-sky-900">
+                  اگر همین نسخهٔ سفیدِ بدون پس‌زمینه را می‌خواهید، لازم نیست ادامه دهید:
+                </p>
+                <Button variant="outline" size="sm" onClick={approve} disabled={disabledByBusy}>
+                  <Check className="size-3.5" aria-hidden />
+                  تأیید همین نسخهٔ سفید
+                </Button>
+              </div>
+            )}
 
             {studioError ? (
               <StepErrorAlert
@@ -820,18 +931,119 @@ export function ImageStudioDialog({
                     key={bg.key}
                     bg={bg}
                     subjectUrl={job?.subjectUrl ?? null}
-                    selected={backgroundKey === bg.key}
-                    onSelect={() => setBackgroundKey(bg.key)}
+                    selected={backgroundKey === bg.key && !customSelected}
+                    onSelect={() => {
+                      setBackgroundKey(bg.key)
+                      setStepError(null)
+                    }}
                     disabled={disabledByBusy}
                   />
                 ))}
+
+                {/* ─── custom background card ─── */}
+                <div
+                  className={cn(
+                    'col-span-2 rounded-xl border-2 border-dashed p-3 outline-none transition-all md:col-span-4',
+                    customSelected
+                      ? 'border-emerald-500 bg-emerald-50/40 ring-2 ring-emerald-500/30'
+                      : 'border-border hover:border-emerald-300 hover:bg-muted/40',
+                  )}
+                >
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setBackgroundKey(CUSTOM_BG_KEY)
+                      setStepError(null)
+                    }}
+                    disabled={disabledByBusy}
+                    aria-pressed={customSelected}
+                    className="flex w-full items-center gap-2 text-start outline-none"
+                  >
+                    <span className="flex size-9 shrink-0 items-center justify-center rounded-lg bg-gradient-to-br from-fuchsia-100 via-amber-50 to-sky-100 ring-1 ring-black/5">
+                      <ImagePlus className="size-4 text-fuchsia-600" aria-hidden />
+                    </span>
+                    <span className="min-w-0">
+                      <span className="block text-sm font-medium">پس‌زمینه دلخواه</span>
+                      <span className="block text-[11px] leading-4 text-muted-foreground">
+                        خودتان توضیح دهید چه پس‌زمینه‌ای می‌خواهید، یا عکس مرجع بدهید — دلخواه و
+                        اختیاری
+                      </span>
+                    </span>
+                    {customSelected && (
+                      <span className="ms-auto flex size-5 shrink-0 items-center justify-center rounded-full bg-emerald-600 text-white shadow">
+                        <Check className="size-3" aria-hidden />
+                      </span>
+                    )}
+                  </button>
+
+                  {customSelected && (
+                    <div className="mt-3 space-y-2.5">
+                      <Textarea
+                        rows={2}
+                        value={customPrompt}
+                        onChange={(e) => setCustomPrompt(e.target.value)}
+                        disabled={disabledByBusy}
+                        maxLength={500}
+                        placeholder="توضیح پس‌زمینه… مثلاً: روی میز چوب گردو کنار شمع و گل رز، با نور گرم عصر"
+                        aria-label="توضیح پس‌زمینه دلخواه"
+                      />
+                      <div className="flex flex-wrap items-center gap-2">
+                        <input
+                          ref={customBgRef}
+                          type="file"
+                          accept="image/jpeg,image/png,image/webp"
+                          className="sr-only"
+                          onChange={onUploadCustomBg}
+                          aria-label="انتخاب عکس مرجع پس‌زمینه"
+                        />
+                        <Button
+                          type="button"
+                          variant="outline"
+                          size="sm"
+                          onClick={() => customBgRef.current?.click()}
+                          disabled={customUploading || disabledByBusy}
+                        >
+                          {customUploading ? (
+                            <Loader2 className="size-3.5 animate-spin" aria-hidden />
+                          ) : (
+                            <ImagePlus className="size-3.5" aria-hidden />
+                          )}
+                          {customUploading ? 'در حال آپلود…' : 'عکس مرجع پس‌زمینه (اختیاری)'}
+                        </Button>
+                        {customBgUrl && (
+                          <span className="flex items-center gap-1.5 rounded-lg border bg-background p-1 ps-2">
+                            <img
+                              src={customBgUrl}
+                              alt="عکس مرجع پس‌زمینه"
+                              className="size-8 rounded border object-cover"
+                            />
+                            <span className="text-[11px] text-muted-foreground">مرجع انتخاب شد</span>
+                            <button
+                              type="button"
+                              onClick={() => setCustomBgUrl(null)}
+                              disabled={disabledByBusy}
+                              aria-label="حذف عکس مرجع"
+                              className="flex size-6 items-center justify-center rounded text-muted-foreground hover:bg-rose-50 hover:text-destructive outline-none"
+                            >
+                              <X className="size-3.5" aria-hidden />
+                            </button>
+                          </span>
+                        )}
+                      </div>
+                      <p className="text-[11px] text-muted-foreground">
+                        توضیح متنی و عکس مرجع هر دو اختیاری‌اند؛ حداقل یکی را پر کنید. می‌توانید هر
+                        دو را با هم بدهید تا دقیق‌تر ساخته شود.
+                      </p>
+                    </div>
+                  )}
+                </div>
               </div>
             )}
 
             <div className="flex flex-wrap items-center gap-3">
               <Button
                 onClick={generate}
-                disabled={!backgroundKey || disabledByBusy}
+                disabled={!canGenerate}
                 className="bg-emerald-600 text-white hover:bg-emerald-700"
               >
                 {busy === 'generate' ? (
@@ -839,7 +1051,7 @@ export function ImageStudioDialog({
                 ) : (
                   <Sparkles className="size-4" aria-hidden />
                 )}
-                {busy === 'generate' ? 'در حال تولید…' : 'ساخت تصویر حرفه‌ای با هوش مصنوعی'}
+                {busy === 'generate' ? 'در حال ساخت…' : 'ساخت تصویر حرفه‌ای با جمنای'}
               </Button>
               {!backgroundKey && !disabledByBusy && (
                 <p className="text-xs text-muted-foreground">ابتدا یک پس‌زمینه انتخاب کنید.</p>
@@ -848,8 +1060,8 @@ export function ImageStudioDialog({
 
             {busy === 'generate' && (
               <ProgressStatus
-                title="در حال تولید تصویر استودیویی…"
-                hint="تا دو دقیقه"
+                title="جمنای در حال ساخت تصویر است…"
+                hint="معمولاً ۱۵ تا ۶۰ ثانیه؛ تا دو دقیقه"
                 elapsed={elapsed}
               />
             )}
@@ -907,8 +1119,8 @@ export function ImageStudioDialog({
 
             {busy === 'generate' && (
               <ProgressStatus
-                title="در حال تولید مجدد تصویر استودیویی…"
-                hint="تا دو دقیقه"
+                title="جمنای در حال ساخت تصویر جدید…"
+                hint="معمولاً ۱۵ تا ۶۰ ثانیه؛ تا دو دقیقه"
                 elapsed={elapsed}
               />
             )}
@@ -922,8 +1134,9 @@ export function ImageStudioDialog({
             )}
 
             <div className="flex flex-wrap items-center gap-2">
-              <Button variant="outline" size="sm" onClick={generate} disabled={disabledByBusy}>
-                🔄 تولید مجدد با همین پس‌زمینه
+              <Button variant="outline" size="sm" onClick={generate} disabled={disabledByBusy || !canGenerate}>
+                <RefreshCcw className="size-3.5" aria-hidden />
+                تولید مجدد با همین پس‌زمینه
               </Button>
               <Button
                 variant="outline"
@@ -934,18 +1147,18 @@ export function ImageStudioDialog({
                 }}
                 disabled={disabledByBusy}
               >
-                🔄 تغییر پس‌زمینه
+                تغییر پس‌زمینه یا سبک
               </Button>
             </div>
 
             <div className="flex flex-col gap-2 sm:flex-row">
               <Button
                 onClick={approve}
-                disabled={disabledByBusy}
+                disabled={disabledByBusy || !job?.finalUrl}
                 className="flex-1 bg-emerald-600 text-white hover:bg-emerald-700"
               >
                 {busy === 'approve' && <Loader2 className="size-4 animate-spin" aria-hidden />}
-                ✅ تأیید و اتصال به محصول
+                تأیید و اتصال به محصول
               </Button>
               <Button
                 variant="outline"
@@ -954,7 +1167,7 @@ export function ImageStudioDialog({
                 className="text-destructive hover:bg-rose-50 hover:text-destructive"
               >
                 {busy === 'reject' && <Loader2 className="size-4 animate-spin" aria-hidden />}
-                ❌ رد تصویر
+                رد تصویر
               </Button>
             </div>
           </section>
@@ -974,9 +1187,9 @@ export function ImageStudioDialog({
                   می‌شود.
                 </p>
               </div>
-              {job?.finalUrl && (
+              {approvedResultUrl && (
                 <img
-                  src={job.finalUrl}
+                  src={approvedResultUrl}
                   alt="تصویر استودیویی تأییدشده"
                   className="max-h-64 rounded-xl border object-contain"
                 />
@@ -988,6 +1201,8 @@ export function ImageStudioDialog({
                     setStepError(null)
                     setJob(null)
                     setBackgroundKey(null)
+                    setCustomPrompt('')
+                    setCustomBgUrl(null)
                     setStep('source')
                   }}
                   disabled={disabledByBusy}

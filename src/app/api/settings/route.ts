@@ -52,8 +52,10 @@ const patchSchema = z.object({
   // Z.ai seller key (Tier B) — write-only; GET never returns it
   zaiApiKey: z.string().trim().min(20, 'کلید واردشده کوتاه به نظر می‌رسد').max(200).optional(),
   zaiApiKeyClear: z.boolean().optional(),
-  // Gemini key (Tier A — owner-requested default brain) — write-only; GET never returns it
-  geminiApiKey: z.string().trim().min(20, 'کلید واردشده کوتاه به نظر می‌رسد').max(200).optional(),
+  // Gemini key (Tier A — owner-requested default brain) — write-only; GET never returns it.
+  // Accepts MULTIPLE keys separated by commas/newlines: the image studio rotates
+  // them to multiply the free daily image quota of each AI Studio project.
+  geminiApiKey: z.string().trim().min(20, 'کلید واردشده کوتاه به نظر می‌رسد').max(1000).optional(),
   geminiApiKeyClear: z.boolean().optional(),
 })
 

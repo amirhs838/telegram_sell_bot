@@ -2,7 +2,12 @@ import type { NextRequest } from 'next/server'
 import { z } from 'zod'
 import { ApiError, ok, readJson, requireAuth, route } from '@/lib/api'
 import { AiError } from '@/lib/ai/client'
-import { BACKGROUND_LIBRARY, composeStudioImage, removeBackground } from '@/lib/ai/image-studio'
+import {
+  BACKGROUND_LIBRARY,
+  CUSTOM_BACKGROUND_KEY,
+  composeStudioImage,
+  removeBackground,
+} from '@/lib/ai/image-studio'
 import { db } from '@/lib/db'
 import { logEvent } from '@/lib/logger'
 import { syncProductPost } from '@/lib/telegram'
@@ -20,6 +25,8 @@ function serializeJob(j: {
   subjectUrl: string | null
   finalUrl: string | null
   backgroundKey: string | null
+  customPrompt: string | null
+  customBgUrl: string | null
   status: string
   error: string | null
   approvedAt: Date | null
@@ -32,6 +39,8 @@ function serializeJob(j: {
     subjectUrl: j.subjectUrl,
     finalUrl: j.finalUrl,
     backgroundKey: j.backgroundKey,
+    customPrompt: j.customPrompt,
+    customBgUrl: j.customBgUrl,
     status: j.status,
     error: j.error,
     approvedAt: j.approvedAt,
@@ -72,9 +81,18 @@ const actionSchema = z.discriminatedUnion('action', [
   }),
   z.object({
     action: z.literal('generate'),
-    jobId: z.string().min(1),
-    backgroundKey: z.string().min(1, 'پس‌زمینه انتخاب نشده است'),
-  }),
+    // Either continue an existing job (cutout flow) or start a fresh one-shot
+    // compose straight from the raw photo (1 AI call per result).
+    jobId: z.string().min(1).optional(),
+    imageUrl: z.string().min(1).optional(),
+    // Preset library key — or «custom» for a seller-defined background.
+    backgroundKey: z.string().min(1).optional(),
+    customPrompt: z.string().trim().max(500, 'توضیح پس‌زمینه حداکثر ۵۰۰ کاراکتر است').optional(),
+    customBgUrl: z.string().trim().min(1).optional(),
+  }).refine(
+    (v) => Boolean(v.jobId || v.imageUrl),
+    { message: 'شناسه کار یا تصویر ورودی لازم است', path: ['jobId'] },
+  ),
   z.object({ action: z.literal('approve'), jobId: z.string().min(1) }),
   z.object({ action: z.literal('reject'), jobId: z.string().min(1) }),
 ])
@@ -117,17 +135,37 @@ export const POST = route<{ params: Promise<{ id: string }> }>(
       }
     }
 
-    // remaining actions work on an existing job
-    const job = await db.imageStudioJob.findUnique({ where: { id: body.jobId } })
-    if (!job || job.productId !== id) throw new ApiError(404, 'کار پردازش یافت نشد')
-
     if (body.action === 'generate') {
+      // One-shot flow: no jobId → start a fresh job straight from the raw photo.
+      const job = body.jobId
+        ? await db.imageStudioJob.findUnique({ where: { id: body.jobId } })
+        : await db.imageStudioJob.create({
+            data: {
+              productId: id,
+              rawUrl: body.imageUrl ?? '',
+              status: 'raw',
+            },
+          })
+      if (!job || job.productId !== id) throw new ApiError(404, 'کار پردازش یافت نشد')
+      if (!job.rawUrl) throw new ApiError(400, 'تصویر ورودی ارسال نشده است')
+
       const source = job.subjectUrl ?? job.rawUrl
       try {
-        const finalUrl = await composeStudioImage(source, body.backgroundKey)
+        const composed = await composeStudioImage(source, {
+          backgroundKey: body.backgroundKey,
+          customPrompt: body.customPrompt,
+          customBgUrl: body.customBgUrl,
+        })
         const updated = await db.imageStudioJob.update({
           where: { id: job.id },
-          data: { finalUrl, backgroundKey: body.backgroundKey, status: 'generated', error: null },
+          data: {
+            finalUrl: composed.url,
+            backgroundKey: composed.backgroundKey,
+            customPrompt: composed.customPrompt,
+            customBgUrl: composed.customBgUrl,
+            status: 'generated',
+            error: null,
+          },
         })
         return ok({ job: serializeJob(updated) })
       } catch (e) {
@@ -149,6 +187,11 @@ export const POST = route<{ params: Promise<{ id: string }> }>(
       }
     }
 
+    const job = body.jobId
+      ? await db.imageStudioJob.findUnique({ where: { id: body.jobId } })
+      : null
+    if (!job || job.productId !== id) throw new ApiError(404, 'کار پردازش یافت نشد')
+
     if (body.action === 'reject') {
       const updated = await db.imageStudioJob.update({
         where: { id: job.id },
@@ -160,16 +203,17 @@ export const POST = route<{ params: Promise<{ id: string }> }>(
       return ok({ job: serializeJob(updated) })
     }
 
-    // action === 'approve' — attach the composite as the product's PRIMARY image
-    if (!job.finalUrl) {
+    // action === 'approve' — attach the result as the product's PRIMARY image
+    const resultUrl = job.finalUrl ?? job.subjectUrl
+    if (!resultUrl) {
       throw new ApiError(400, 'این کار هنوز تصویر نهایی ندارد')
     }
 
     const existing = await db.productImage.findMany({ where: { productId: id } })
     const gallery = [
-      { url: job.finalUrl, isPrimary: true, sortOrder: 0 },
+      { url: resultUrl, isPrimary: true, sortOrder: 0 },
       ...existing
-        .filter((img) => img.url !== job.finalUrl)
+        .filter((img) => img.url !== resultUrl)
         .sort((a, b) => a.sortOrder - b.sortOrder)
         .map((img) => ({ url: img.url, isPrimary: false, sortOrder: img.sortOrder + 1 })),
     ]
@@ -185,7 +229,7 @@ export const POST = route<{ params: Promise<{ id: string }> }>(
       `تصویر استودیویی «${product.name}» تأیید و به محصول متصل شد`,
       {
         jobId: job.id,
-        finalUrl: job.finalUrl,
+        finalUrl: resultUrl,
         approvedBy: user.email,
       },
     )

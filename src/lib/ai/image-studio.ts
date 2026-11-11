@@ -4,16 +4,19 @@ import { mkdir, readFile, writeFile } from 'node:fs/promises'
 import path from 'node:path'
 import { logEvent } from '@/lib/logger'
 import { AiError } from '@/lib/ai/client'
-import { editImage } from '@/lib/ai/provider'
+import { geminiImageEdit } from '@/lib/ai/provider'
 
 /**
  * AI Image Studio — turns a raw product photo into a professional studio shot.
  *
  * Pipeline (each AI call happens ONLY on an explicit seller click, never
  * automatically on upload — cost control):
- *   1. removeBackground()  → subject isolated from its original background
- *   2. composeStudioImage() → subject placed on a preset studio background
- *                             with jewelry-photography lighting
+ *   • cutout (optional)      removeBackground()   → product on pure white
+ *   • compose (one AI call)  composeStudioImage() → product placed on a preset
+ *                             OR a fully custom seller-described background
+ *
+ * The compose step works straight from the RAW photo (one quota unit per
+ * result); the cutout is optional when the seller wants an isolated subject.
  *
  * ABSOLUTE RULE (Master prompt §3): the AI must NEVER redesign the product.
  * Every prompt includes hard preservation constraints, and the result is only
@@ -107,6 +110,8 @@ export const BACKGROUND_LIBRARY: BackgroundTemplate[] = [
   },
 ]
 
+export const CUSTOM_BACKGROUND_KEY = 'custom'
+
 export function getBackground(key: string): BackgroundTemplate | null {
   return BACKGROUND_LIBRARY.find((b) => b.key === key) ?? null
 }
@@ -115,19 +120,30 @@ export function getBackground(key: string): BackgroundTemplate | null {
 
 const UPLOAD_DIR = path.join(process.cwd(), 'upload')
 const SAFE_NAME_RE = /^[a-zA-Z0-9._-]+$/
-const STUDIO_SIZE = '1024x1024' as const
 const AI_TIMEOUT_MS = 150_000
 
-async function readUploadBuffer(url: string): Promise<Buffer> {
+async function readUploadBuffer(url: string): Promise<{ buf: Buffer; mime: string }> {
   const name = url.replace(/^\/api\/uploads\//, '').trim()
   if (!name || name.includes('/') || name.includes('..') || !SAFE_NAME_RE.test(name)) {
     throw new AiError('آدرس تصویر ورودی معتبر نیست')
   }
   try {
-    return await readFile(path.join(UPLOAD_DIR, name))
+    const buf = await readFile(path.join(UPLOAD_DIR, name))
+    const ext = path.extname(name).toLowerCase()
+    const mime =
+      ext === '.jpg' || ext === '.jpeg'
+        ? 'image/jpeg'
+        : ext === '.webp'
+          ? 'image/webp'
+          : 'image/png'
+    return { buf, mime }
   } catch {
     throw new AiError('فایل تصویر ورودی پیدا نشد — لطفاً دوباره آپلود کنید')
   }
+}
+
+function toDataUrl(buf: Buffer, mime: string): string {
+  return `data:${mime};base64,${buf.toString('base64')}`
 }
 
 async function saveStudioImage(buffer: Buffer, kind: 'subject' | 'final'): Promise<string> {
@@ -172,29 +188,39 @@ No exaggerated glow, no artificial sparkles, no extra decorative props around th
 ${PRESERVE_RULES}`
 }
 
-// ─── AI calls ────────────────────────────────────────────────────────────────
+function customComposePrompt(customPrompt: string | null, hasReference: boolean): string {
+  const bgLine = hasReference
+    ? customPrompt?.trim()
+      ? `Place this exact silver product onto a background that matches BOTH: (1) the environment, surfaces, colors and mood shown in the SECOND image (the seller's background reference), and (2) the seller's written description: "${customPrompt.trim()}".`
+      : `Place this exact silver product onto the exact environment shown in the SECOND image (the seller's background reference photo). Rebuild that scene naturally around the product: same surfaces, same colors, same mood and lighting as the reference.`
+    : `Place this exact silver product onto a custom background the seller described: "${customPrompt?.trim()}". Realize that description as a believable, professionally-lit photographic scene.`
 
-async function callImageEdit(prompt: string, dataUrl: string): Promise<Buffer> {
+  return `${bgLine}
+Integrate the product into the scene with realistic soft shadow and natural perspective; the product must look photographed there, not pasted.
+Professional jewelry studio photography: softbox-quality lighting, controlled subtle reflections, premium commercial look.
+No exaggerated glow, no artificial sparkles, no extra decorative props that hide the product.
+${PRESERVE_RULES}`
+}
+
+// ─── AI call (Gemini ONLY — the seller's own key) ────────────────────────────
+
+async function callImageEdit(prompt: string, dataUrls: string[]): Promise<Buffer> {
   try {
-    // Dual-provider edit: seller's key (when AI_USER_EDIT_PATH is enabled and
-    // the key works) → platform gateway. Both legs are retried/backed-off
-    // inside the provider layer, including 429 handling.
-    const { base64 } = await editImage(prompt, dataUrl, STUDIO_SIZE, AI_TIMEOUT_MS)
+    // Runs on Google Gemini's native image-editing models with the seller's
+    // own key(s). No other image provider is contacted (master directive).
+    const { base64 } = await geminiImageEdit(prompt, dataUrls, AI_TIMEOUT_MS)
     const raw = Buffer.from(base64, 'base64')
     return await normalizeOutput(raw)
   } catch (e) {
-    const msg = e instanceof Error ? e.message : String(e)
-    await logEvent(
-      'studio.ai_error',
-      `خطای سرویس تصویر: ${msg.slice(0, 200)}`,
-      { prompt: prompt.slice(0, 80) },
-      'warn',
-    )
-    if (msg.includes('timeout')) {
-      throw new AiError('پردازش تصویر بیش از حد طول کشید — لطفاً دوباره تلاش کنید')
+    if (e instanceof AiError) {
+      // Precise Persian error (quota / key / safety / timeout) — surface as-is.
+      await logEvent('studio.ai_error', e.message.slice(0, 200), {}, 'warn')
+      throw e
     }
-    if (msg.includes('429') || msg.toLowerCase().includes('too many')) {
-      throw new AiError('سرویس تصویر شلوغ است — چند لحظه بعد دوباره تلاش کنید')
+    const msg = e instanceof Error ? e.message : String(e)
+    await logEvent('studio.ai_error', `خطای سرویس تصویر: ${msg.slice(0, 200)}`, {}, 'warn')
+    if (msg.includes('timeout') || msg.includes('aborted')) {
+      throw new AiError('پردازش تصویر بیش از حد طول کشید — لطفاً دوباره تلاش کنید')
     }
     throw new AiError('تولید تصویر ناموفق بود — لطفاً کمی بعد دوباره تلاش کنید')
   }
@@ -202,32 +228,76 @@ async function callImageEdit(prompt: string, dataUrl: string): Promise<Buffer> {
 
 // ─── Public API ──────────────────────────────────────────────────────────────
 
-/** Step 1: isolate the product from its original background. */
+export type ComposeOptions = {
+  backgroundKey?: string | null
+  customPrompt?: string | null
+  customBgUrl?: string | null
+}
+
+/** Optional step: isolate the product on a pure white background. */
 export async function removeBackground(imageUrl: string): Promise<string> {
-  const buf = await readUploadBuffer(imageUrl)
-  const mime = 'image/png'
-  const dataUrl = `data:${mime};base64,${buf.toString('base64')}`
-  const out = await callImageEdit(REMOVE_BG_PROMPT, dataUrl)
+  const { buf, mime } = await readUploadBuffer(imageUrl)
+  const out = await callImageEdit(REMOVE_BG_PROMPT, [toDataUrl(buf, mime)])
   const url = await saveStudioImage(out, 'subject')
   await logEvent('studio.subject', 'سوژه محصول از پس‌زمینه جدا شد', { imageUrl, url })
   return url
 }
 
-/** Step 2: place the (isolated) subject on a preset studio background. */
+/**
+ * ONE AI call: place the product (raw photo or cutout) on the chosen
+ * background — a preset from the library, or a fully custom seller-defined
+ * background (free-text description and/or a reference photo upload).
+ */
 export async function composeStudioImage(
   sourceUrl: string,
-  backgroundKey: string,
-): Promise<string> {
-  const bg = getBackground(backgroundKey)
+  opts: ComposeOptions,
+): Promise<{ url: string; backgroundKey: string | null; customPrompt: string | null; customBgUrl: string | null }> {
+  const isCustom =
+    !opts.backgroundKey ||
+    opts.backgroundKey === CUSTOM_BACKGROUND_KEY ||
+    Boolean(opts.customPrompt?.trim()) ||
+    Boolean(opts.customBgUrl?.trim())
+
+  const customPrompt = opts.customPrompt?.trim() || null
+  const customBgUrl = opts.customBgUrl?.trim() || null
+
+  const dataUrls: string[] = []
+  let backgroundKey: string | null
+
+  if (isCustom) {
+    if (!customPrompt && !customBgUrl) {
+      throw new AiError(
+        'برای پس‌زمینه دلخواه، یک توضیح بنویسید یا یک عکس مرجع پس‌زمینه انتخاب کنید',
+      )
+    }
+    backgroundKey = CUSTOM_BACKGROUND_KEY
+    const { buf, mime } = await readUploadBuffer(sourceUrl)
+    dataUrls.push(toDataUrl(buf, mime))
+    if (customBgUrl) {
+      const ref = await readUploadBuffer(customBgUrl)
+      dataUrls.push(toDataUrl(ref.buf, ref.mime))
+    }
+    await logEvent(
+      'studio.compose_custom',
+      `پس‌زمینه دلخواه: ${customPrompt ? 'توضیح متنی' : ''}${customPrompt && customBgUrl ? ' + ' : ''}${customBgUrl ? 'عکس مرجع' : ''}`,
+      { sourceUrl },
+    )
+    const out = await callImageEdit(customComposePrompt(customPrompt, Boolean(customBgUrl)), dataUrls)
+    const url = await saveStudioImage(out, 'final')
+    return { url, backgroundKey, customPrompt, customBgUrl }
+  }
+
+  const bg = getBackground(opts.backgroundKey ?? '')
   if (!bg) throw new AiError('پس‌زمینه انتخاب‌شده معتبر نیست')
-  const buf = await readUploadBuffer(sourceUrl)
-  const dataUrl = `data:image/png;base64,${buf.toString('base64')}`
-  const out = await callImageEdit(composePrompt(bg), dataUrl)
+  backgroundKey = bg.key
+  const { buf, mime } = await readUploadBuffer(sourceUrl)
+  dataUrls.push(toDataUrl(buf, mime))
+  const out = await callImageEdit(composePrompt(bg), dataUrls)
   const url = await saveStudioImage(out, 'final')
   await logEvent('studio.composed', `تصویر استودیویی با پس‌زمینه «${bg.name}» ساخته شد`, {
     sourceUrl,
     backgroundKey,
     url,
   })
-  return url
+  return { url, backgroundKey, customPrompt: null, customBgUrl: null }
 }

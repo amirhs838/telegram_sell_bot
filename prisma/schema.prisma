@@ -254,7 +254,9 @@ model ImageStudioJob {
   rawUrl        String // original upload (/api/uploads/<name>)
   subjectUrl    String? // background removed (/api/uploads/<name>)
   finalUrl      String? // studio composite (/api/uploads/<name>)
-  backgroundKey String? // BACKGROUND_LIBRARY key used for the composite
+  backgroundKey String? // BACKGROUND_LIBRARY key used for the composite (or «custom»)
+  customPrompt  String? // seller's free-text description for a custom background
+  customBgUrl   String? // seller's uploaded reference photo for a custom background
   status        String    @default("raw") // raw | subject_ready | generated | approved | rejected | failed
   error         String? // last Persian error message (if any)
   approvedAt    DateTime?

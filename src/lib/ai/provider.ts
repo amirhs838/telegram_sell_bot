@@ -107,8 +107,27 @@ async function geminiSettingKey(): Promise<string> {
 
 export async function resolveGeminiKey(): Promise<string> {
   const env = geminiEnvKey()
-  if (env) return env
-  return geminiSettingKey()
+  if (env) return splitGeminiKeys(env)[0] ?? ''
+  return splitGeminiKeys(await geminiSettingKey())[0] ?? ''
+}
+
+/**
+ * Accepts one OR several Gemini API keys (comma / semicolon / newline /
+ * Persian-comma separated). Multiple keys rotate the image quota: each AI
+ * Studio project has its own tiny free daily image allowance, so 2–3 keys
+ * multiply the number of studio renders per day.
+ */
+export function splitGeminiKeys(raw: string): string[] {
+  return raw
+    .split(/[\s,;،]+/)
+    .map((k) => k.trim())
+    .filter((k) => k.length >= 20)
+}
+
+/** Every Gemini key available for IMAGE work: .env first, then the panel. */
+async function resolveGeminiImageKeys(): Promise<string[]> {
+  const keys = [...splitGeminiKeys(geminiEnvKey()), ...splitGeminiKeys(await geminiSettingKey())]
+  return [...new Set(keys)]
 }
 
 // ─── Gemini health cache (survives HMR via globalThis) ───────────────────────
@@ -291,10 +310,6 @@ export function chatModel(): string {
   return (process.env.AI_CHAT_MODEL ?? 'glm-4.5-flash').trim()
 }
 
-export function imageModel(): string {
-  return (process.env.AI_IMAGE_MODEL ?? 'cogview-4').trim()
-}
-
 export function providerStatus(): {
   userKeyConfigured: boolean
   geminiKeyConfigured: boolean
@@ -311,7 +326,7 @@ export function providerStatus(): {
     geminiKeyConfigured: geminiEnvKey() !== '',
     geminiModel: geminiModel(),
     chatModel: chatModel(),
-    imageModel: imageModel(),
+    imageModel: geminiImageModel(),
     userKeyHealthy: health.usable,
     geminiHealthy: geminiHealth.usable,
     lastUserKeyError: health.lastError,
@@ -680,123 +695,284 @@ export async function chatComplete(
   throw new AiError('هیچ سرویس هوش مصنوعی در دسترس نیست')
 }
 
-export type ImageResult = { base64: string; via: 'user-key' | 'platform' }
+// ─── Gemini image pipeline (native REST API — the seller's OWN key ONLY) ─────
+//
+// Master directive: EVERYTHING image-related (studio cutout, background
+// composition, custom backgrounds) runs on Google Gemini directly and NEVER
+// falls back to another image provider. Gemini's native generateContent API
+// supports both text→image and image editing ("nano banana" models) with the
+// same key used for chat.
+//
+// Quota reality: the free tier allows only a handful of image renders per
+// project per day (resets ~08:00 UK / midnight US Pacific). The panel therefore
+// accepts MULTIPLE keys (comma-separated) and this layer rotates them
+// automatically: when one key's daily image quota is exhausted the next key is
+// tried, so pasting 2–3 keys multiplies the daily renders.
 
-/** Sizes accepted by the image gateway (SDK type union). */
-export type AiImageSize = '1024x1024' | '768x1344' | '864x1152' | '1344x768' | '1152x864' | '1440x720' | '720x1440'
+const GEMINI_NATIVE_BASE = 'https://generativelanguage.googleapis.com/v1beta'
 
-/** Text → image. Seller key (cogview-4) first, platform gateway fallback. */
-export async function generateImage(
-  prompt: string,
-  size: AiImageSize = '1024x1024',
-  timeoutMs = 150_000,
-): Promise<ImageResult> {
-  if (!userKeyBlocked()) {
-    try {
-      const data = (await publicFetch(
-        '/images/generations',
-        { model: imageModel(), prompt, size },
-        { timeoutMs, retries: 2 },
-      )) as { data?: Array<{ url?: string; b64_json?: string }> }
-      const item = data.data?.[0]
-      let base64 = item?.b64_json
-      if (!base64 && item?.url) {
-        const ctrl = new AbortController()
-        const timer = setTimeout(() => ctrl.abort(), timeoutMs)
-        try {
-          const res = await fetch(item.url, { signal: ctrl.signal })
-          if (res.ok) {
-            base64 = Buffer.from(await res.arrayBuffer()).toString('base64')
-          }
-        } finally {
-          clearTimeout(timer)
-        }
-      }
-      if (base64 && base64.length > 100) {
-        return { base64, via: 'user-key' }
-      }
-      throw new Error('پاسخ خالی از سرویس تصویر')
-    } catch (e) {
-      if (e instanceof AuthError) markAuthFailure(e.message)
-      else console.warn('[ai:provider] user-key image-gen failed → platform:', (e as Error).message?.slice(0, 160))
-    }
+/** Owner-overridable image model (fast, image+text native, free-tier friendly). */
+export function geminiImageModel(): string {
+  return (process.env.GEMINI_IMAGE_MODEL ?? 'gemini-2.5-flash-image').trim()
+}
+
+/** Tried in order when the configured model is not available for a key. */
+const GEMINI_IMAGE_MODEL_FALLBACKS = [
+  'gemini-2.5-flash-image',
+  'gemini-3.1-flash-image',
+  'gemini-nano-banana-2.1',
+]
+
+export type GeminiImageResult = { base64: string; mimeType: string; via: string }
+
+type GeminiPart = { text?: string; inlineData?: { mimeType: string; data: string } }
+type GeminiGenerateResponse = {
+  candidates?: Array<{ content?: { parts?: GeminiPart[] }; finishReason?: string }>
+  promptFeedback?: { blockReason?: string }
+}
+
+// Per-key image cooldown (survives HMR via globalThis). When a key hits its
+// daily image quota or auth fails, it is parked until retryDelay / cooldown so
+// the next request goes straight to a healthy key instead of burning seconds.
+type ImageKeyState = { blockedUntil: number; reason: string }
+const globalForImageKeys = globalThis as unknown as {
+  __aiGeminiImageKeyState?: Map<string, ImageKeyState>
+}
+const imageKeyState: Map<string, ImageKeyState> =
+  globalForImageKeys.__aiGeminiImageKeyState ??= new Map()
+
+function keyFingerprint(key: string): string {
+  return `${key.slice(0, 10)}…${key.slice(-4)}`
+}
+
+function parkImageKey(key: string, untilMs: number, reason: string) {
+  imageKeyState.set(keyFingerprint(key), {
+    blockedUntil: Date.now() + untilMs,
+    reason: reason.slice(0, 300),
+  })
+}
+
+function imageKeyPark(key: string): ImageKeyState | null {
+  const st = imageKeyState.get(keyFingerprint(key)) ?? null
+  return st && Date.now() < st.blockedUntil ? st : null
+}
+
+/** Extract "message" from a Google error JSON body (best-effort). */
+function googleErrorMessage(body: string): string {
+  try {
+    const j = JSON.parse(body) as { error?: { message?: string } }
+    return j.error?.message ?? body.slice(0, 300)
+  } catch {
+    return body.slice(0, 300)
   }
+}
 
-  const sdk = await getSdk()
-  const res = (await withBackoff(
-    () => sdk.images.generations.create({ prompt, size }) as Promise<{ data?: Array<{ base64?: string }> }>,
-    2,
-    timeoutMs,
-  )) as { data?: Array<{ base64?: string }> }
-  const base64 = res?.data?.[0]?.base64
-  if (typeof base64 !== 'string' || base64.length < 100) {
-    throw new AiError('تولید تصویر ناموفق بود — لطفاً کمی بعد دوباره تلاش کنید')
+/** Parse Google's RetryInfo delay ("43773s") from a 429 error body. */
+function parseRetryDelaySeconds(body: string): number | null {
+  const m = body.match(/"retryDelay"\s*:\s*"(\d+)s"/)
+  if (m) {
+    const n = Number(m[1])
+    if (Number.isFinite(n) && n > 0) return n
   }
-  return { base64, via: 'platform' }
+  return null
 }
 
 /**
- * Image edit (background isolation / studio composition).
- * The public API exposes no universal edit endpoint, so this leg runs on the
- * platform gateway `images.generations.edit` with an optional model override
- * from AI_IMAGE_MODEL. If the seller's key ever gains an edit endpoint, set
- * AI_USER_EDIT_PATH to enable it.
+ * One generateContent call against a specific key + model.
+ * Throws AuthError (bad key), RateError (quota), MarkerError (model/policy /
+ * modality issues — retryable with a different model or modality set), or
+ * plain Error for transient HTTP problems.
  */
-export async function editImage(
-  prompt: string,
-  dataUrl: string,
-  size: AiImageSize = '1024x1024',
-  timeoutMs = 150_000,
-): Promise<ImageResult> {
-  const userEditPath = (process.env.AI_USER_EDIT_PATH ?? '').trim()
+class MarkerError extends Error {}
 
-  if (userEditPath && !userKeyBlocked()) {
-    try {
-      const data = (await publicFetch(
-        userEditPath,
-        { model: imageModel(), prompt, image: dataUrl, images: [{ url: dataUrl }], size },
-        { timeoutMs, retries: 2 },
-      )) as { data?: Array<{ b64_json?: string; base64?: string; url?: string }> }
-      const item = data.data?.[0]
-      let base64 = item?.b64_json ?? item?.base64
-      if (!base64 && item?.url) {
-        base64 = Buffer.from(await (await fetch(item.url)).arrayBuffer()).toString('base64')
+async function geminiImageRequestOnce(
+  key: string,
+  model: string,
+  parts: GeminiPart[],
+  timeoutMs: number,
+  modalities: string[] = ['IMAGE'],
+): Promise<{ base64: string; mimeType: string }> {
+  const controller = new AbortController()
+  const timer = setTimeout(() => controller.abort(), timeoutMs)
+  try {
+    const res = await fetch(
+      `${GEMINI_NATIVE_BASE}/models/${encodeURIComponent(model)}:generateContent`,
+      {
+        method: 'POST',
+        headers: { 'x-goog-api-key': key, 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          contents: [{ parts }],
+          generationConfig: { responseModalities: modalities },
+        }),
+        signal: controller.signal,
+      },
+    )
+    const text = await res.text()
+
+    if (res.ok) {
+      const data = JSON.parse(text) as GeminiGenerateResponse
+      const cand = data.candidates?.[0]
+      const out = cand?.content?.parts?.find((p) => p.inlineData?.data)
+      if (out?.inlineData?.data) {
+        return { base64: out.inlineData.data, mimeType: out.inlineData.mimeType || 'image/png' }
       }
-      if (base64 && base64.length > 100) {
-        return { base64, via: 'user-key' }
+      const block = data.promptFeedback?.blockReason ?? cand?.finishReason
+      if (block && block !== 'STOP') {
+        throw new MarkerError(`BLOCKED:${block}`)
       }
-      throw new Error('پاسخ خالی از سرویس تصویر')
-    } catch (e) {
-      if (e instanceof AuthError) markAuthFailure(e.message)
-      else console.warn('[ai:provider] user-key image-edit failed → platform:', (e as Error).message?.slice(0, 160))
+      throw new MarkerError('NO_IMAGE')
+    }
+
+    const msg = googleErrorMessage(text)
+    if (res.status === 429) throw new RateError(text)
+    if (res.status === 401 || res.status === 403) throw new AuthError(msg)
+    if (res.status === 400) {
+      // Malformed/invalid keys surface as 400 INVALID_ARGUMENT — treat as auth.
+      if (/api[_ ]?key/i.test(msg)) throw new AuthError(msg)
+      throw new MarkerError(`BAD_REQUEST:${msg}`)
+    }
+    if (res.status === 404) throw new MarkerError(`MODEL_404:${model}`)
+    throw new Error(`HTTP ${res.status}: ${msg}`)
+  } finally {
+    clearTimeout(timer)
+  }
+}
+
+/**
+ * Shared runner: rotates ALL configured Gemini keys (env + panel) and, per
+ * key, the configured model plus known-good fallbacks. NO non-Gemini image
+ * provider is ever contacted — the studio is Gemini-only by design.
+ */
+async function runGeminiImage(
+  parts: GeminiPart[],
+  timeoutMs: number,
+): Promise<GeminiImageResult> {
+  const keys = await resolveGeminiImageKeys()
+  if (keys.length === 0) {
+    throw new AiError(
+      'کلید جمنای تنظیم نشده است — از پنل، بخش تنظیمات، کلید گوگل جمنای را وارد کنید',
+    )
+  }
+
+  const primary = geminiImageModel()
+  const models = [primary, ...GEMINI_IMAGE_MODEL_FALLBACKS.filter((m) => m !== primary)]
+
+  let sawQuota = false
+  let sawAuth = false
+  let sawBlock = ''
+  let lastDetail = ''
+
+  for (const key of keys) {
+    const parked = imageKeyPark(key)
+    if (parked) {
+      sawQuota = true // parked keys are parked for quota or auth
+      lastDetail = parked.reason
+      continue
+    }
+    for (const model of models) {
+      try {
+        const r = await geminiImageRequestOnce(key, model, parts, timeoutMs)
+        imageKeyState.delete(keyFingerprint(key))
+        console.log(`[ai:provider] gemini image OK via ${model}`)
+        return { base64: r.base64, mimeType: r.mimeType, via: `gemini:${model}` }
+      } catch (e) {
+        const msg = e instanceof Error ? e.message : String(e)
+        lastDetail = msg.slice(0, 300)
+
+        if (e instanceof RateError) {
+          // Daily/minute quota exhausted for this key's project — park it and
+          // rotate to the next key. Google tells us the exact reset delay.
+          const secs = parseRetryDelaySeconds(msg) ?? 300
+          const wait = Math.min(Math.max(secs, 60), 26 * 3600) * 1000
+          parkImageKey(key, wait, msg)
+          sawQuota = true
+          console.warn(
+            `[ai:provider] gemini image quota exhausted on ${keyFingerprint(key)} — parked ${(wait / 3600000).toFixed(1)}h, trying next key`,
+          )
+          break
+        }
+        if (e instanceof AuthError) {
+          parkImageKey(key, AUTH_COOLDOWN_MS, msg)
+          sawAuth = true
+          console.warn(
+            `[ai:provider] gemini key rejected for images (${keyFingerprint(key)}) — parked 10 min`,
+          )
+          break
+        }
+        if (msg.startsWith('BLOCKED:')) {
+          sawBlock = msg.slice('BLOCKED:'.length, 60)
+          break // safety-blocked → other models won't help
+        }
+        if (msg.startsWith('MODEL_404:') || msg.startsWith('BAD_REQUEST:')) {
+          if (msg.startsWith('BAD_REQUEST:') && /modalit/i.test(msg)) {
+            // Model rejects IMAGE-only modality — retry once with TEXT+IMAGE.
+            try {
+              const r = await geminiImageRequestOnce(key, model, parts, timeoutMs, ['TEXT', 'IMAGE'])
+              return { base64: r.base64, mimeType: r.mimeType, via: `gemini:${model}` }
+            } catch (e2) {
+              const msg2 = e2 instanceof Error ? e2.message : String(e2)
+              lastDetail = msg2.slice(0, 300)
+              if (e2 instanceof RateError) {
+                const secs = parseRetryDelaySeconds(msg2) ?? 300
+                parkImageKey(key, Math.min(Math.max(secs, 60), 26 * 3600) * 1000, msg2)
+                sawQuota = true
+                break
+              }
+              continue // next model
+            }
+          }
+          continue // next model
+        }
+        // Transient HTTP / network error → next model, then next key.
+        continue
+      }
     }
   }
 
-  const sdk = await getSdk()
-  const body: Record<string, unknown> = {
-    prompt,
-    image: dataUrl,
-    images: [{ url: dataUrl }],
-    size,
+  if (sawQuota) {
+    throw new AiError(
+      'سهمیهٔ رایگان تصویر جمنای برای امروز تمام شده است — صبح فردا (حدود ۸ صبح) دوباره امتحان کنید، یا کلید جمنای دیگری در تنظیمات اضافه کنید (چند کلید را با کاما جدا کنید تا سهمیه‌ها جمع شوند)',
+    )
   }
-  const model = process.env.AI_IMAGE_MODEL
-  if (model) body.model = model
-
-  const res = (await withBackoff(
-    () =>
-      sdk.images.generations.edit(
-        body as unknown as Parameters<typeof sdk.images.generations.edit>[0],
-      ) as Promise<{ base64?: string; data?: Array<{ base64?: string }> }>,
-    2,
-    timeoutMs,
-  )) as { base64?: string; data?: Array<{ base64?: string }> }
-
-  const base64 =
-    typeof res?.base64 === 'string' ? res.base64 : res?.data?.[0]?.base64
-  if (typeof base64 !== 'string' || base64.length < 100) {
-    throw new AiError('پردازش تصویر ناموفق بود — لطفاً کمی بعد دوباره تلاش کنید')
+  if (sawAuth) {
+    throw new AiError('کلید جمنای برای تصویر پذیرفته نشد — کلید را در تنظیمات پنل بررسی کنید')
   }
-  return { base64, via: 'platform' }
+  if (sawBlock) {
+    throw new AiError(
+      'جمنای این درخواست را به دلایل سیاست محتوا رد کرد — تصویر یا توضیح را کمی تغییر دهید و دوباره امتحان کنید',
+    )
+  }
+  if (lastDetail.includes('aborted') || lastDetail.includes('timeout')) {
+    throw new AiError('پردازش تصویر بیش از حد طول کشید — لطفاً دوباره تلاش کنید')
+  }
+  throw new AiError('تولید تصویر ناموفق بود — لطفاً کمی بعد دوباره تلاش کنید')
+}
+
+/** Text → image on the seller's own Gemini. */
+export async function geminiImageGenerate(
+  prompt: string,
+  timeoutMs = 150_000,
+): Promise<GeminiImageResult> {
+  return runGeminiImage([{ text: prompt }], timeoutMs)
+}
+
+/**
+ * Image editing (studio cutout / background composition) on the seller's own
+ * Gemini. `dataUrls` holds 1–3 data URLs: the first is always the PRODUCT
+ * photo; optional extra images (custom background reference) follow.
+ */
+export async function geminiImageEdit(
+  prompt: string,
+  dataUrls: string[],
+  timeoutMs = 150_000,
+): Promise<GeminiImageResult> {
+  const parts: GeminiPart[] = [{ text: prompt }]
+  for (const dataUrl of dataUrls.slice(0, 3)) {
+    const m = dataUrl.match(/^data:([^;]+);base64,([\s\S]+)$/)
+    if (!m) throw new AiError('قالب تصویر ورودی معتبر نیست')
+    parts.push({ inlineData: { mimeType: m[1], data: m[2] } })
+  }
+  return runGeminiImage(parts, timeoutMs)
 }
 
 // ─── Shared retry with 429-aware backoff (provider B leg) ────────────────────
