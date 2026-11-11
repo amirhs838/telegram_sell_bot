@@ -14,10 +14,19 @@ const ALLOWED_MIME: Record<string, string> = {
   'image/gif': 'gif',
 }
 
-const MAX_SIZE = 5 * 1024 * 1024 // 5MB
+// 12MB — generous headroom: phone photos arrive over slow, unstable mobile
+// links and the browser pre-shrinks them anyway (src/lib/image-compress.ts).
+const MAX_SIZE = 12 * 1024 * 1024
 
 export const POST = route(async (req: NextRequest) => {
   await requireAuth()
+
+  // Fail fast BEFORE buffering the body: a slow mobile link must not spend
+  // minutes pushing bytes we are going to reject anyway.
+  const declared = Number(req.headers.get('content-length') ?? '0')
+  if (Number.isFinite(declared) && declared > MAX_SIZE + 64 * 1024) {
+    throw new ApiError(413, 'حجم فایل نباید بیشتر از ۱۲ مگابایت باشد')
+  }
 
   const form = await req.formData().catch(() => {
     throw new ApiError(400, 'فرم ارسالی معتبر نیست')
@@ -33,7 +42,7 @@ export const POST = route(async (req: NextRequest) => {
     throw new ApiError(400, 'فرمت فایل مجاز نیست. فرمت‌های مجاز: JPG، PNG، WebP، GIF')
   }
   if (file.size > MAX_SIZE) {
-    throw new ApiError(400, 'حجم فایل نباید بیشتر از ۵ مگابایت باشد')
+    throw new ApiError(400, 'حجم فایل نباید بیشتر از ۱۲ مگابایت باشد')
   }
   if (file.size === 0) {
     throw new ApiError(400, 'فایل خالی است')

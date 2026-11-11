@@ -68,12 +68,13 @@ import {
   type StudioState,
 } from '@/lib/client'
 import { cn } from '@/lib/utils'
+import { compressImageFile, uploadImageWithProgress } from '@/lib/image-compress'
 
 // ---------------------------------------------------------------------------
 // Constants & helpers
 // ---------------------------------------------------------------------------
 
-const MAX_UPLOAD_BYTES = 5 * 1024 * 1024 // 5MB (mirrors POST /api/uploads limit)
+const MAX_UPLOAD_BYTES = 12 * 1024 * 1024 // 12MB (mirrors POST /api/uploads limit)
 const ACCEPTED_MIME = ['image/jpeg', 'image/png', 'image/webp']
 const CUSTOM_BG_KEY = 'custom'
 
@@ -413,6 +414,7 @@ export function ImageStudioDialog({
   const [rawUrl, setRawUrl] = useState<string | null>(null)
   const [uploadedUrl, setUploadedUrl] = useState<string | null>(null)
   const [uploading, setUploading] = useState(false)
+  const [uploadPct, setUploadPct] = useState('')
   const [job, setJob] = useState<StudioJob | null>(null)
   const [backgroundKey, setBackgroundKey] = useState<string | null>(null)
   const [historyOpen, setHistoryOpen] = useState(false)
@@ -421,6 +423,7 @@ export function ImageStudioDialog({
   const [customPrompt, setCustomPrompt] = useState('')
   const [customBgUrl, setCustomBgUrl] = useState<string | null>(null)
   const [customUploading, setCustomUploading] = useState(false)
+  const [customPct, setCustomPct] = useState('')
 
   const fileRef = useRef<HTMLInputElement>(null)
   const customBgRef = useRef<HTMLInputElement>(null)
@@ -647,17 +650,18 @@ export function ImageStudioDialog({
       return
     }
     if (file.size > MAX_UPLOAD_BYTES) {
-      toast.error('حجم فایل نباید بیشتر از ۵ مگابایت باشد.')
+      toast.error('حجم فایل نباید بیشتر از ۱۲ مگابایت باشد.')
       return
     }
     setUploading(true)
+    setUploadPct('')
     try {
-      const fd = new FormData()
-      fd.append('file', file)
-      const res = await api<{ url: string; name: string }>('/api/uploads', {
-        method: 'POST',
-        body: fd,
-      })
+      // Shrink big photos in the browser first — multi-MB originals die
+      // mid-transfer on slow mobile links before they ever reach the AI.
+      const work = await compressImageFile(file)
+      const res = await uploadImageWithProgress(work, (pct) =>
+        setUploadPct(`${pct.toLocaleString('fa-IR')}٪`),
+      )
       setUploadedUrl(res.url)
       setRawUrl(res.url)
       setStepError(null)
@@ -666,6 +670,7 @@ export function ImageStudioDialog({
       toast.error(`آپلود ناموفق بود: ${(err as Error).message}`)
     } finally {
       setUploading(false)
+      setUploadPct('')
     }
   }
 
@@ -678,23 +683,23 @@ export function ImageStudioDialog({
       return
     }
     if (file.size > MAX_UPLOAD_BYTES) {
-      toast.error('حجم فایل نباید بیشتر از ۵ مگابایت باشد.')
+      toast.error('حجم فایل نباید بیشتر از ۱۲ مگابایت باشد.')
       return
     }
     setCustomUploading(true)
+    setCustomPct('')
     try {
-      const fd = new FormData()
-      fd.append('file', file)
-      const res = await api<{ url: string; name: string }>('/api/uploads', {
-        method: 'POST',
-        body: fd,
-      })
+      const work = await compressImageFile(file)
+      const res = await uploadImageWithProgress(work, (pct) =>
+        setCustomPct(`${pct.toLocaleString('fa-IR')}٪`),
+      )
       setCustomBgUrl(res.url)
       toast.success('عکس مرجع پس‌زمینه ذخیره شد')
     } catch (err) {
       toast.error(`آپلود ناموفق بود: ${(err as Error).message}`)
     } finally {
       setCustomUploading(false)
+      setCustomPct('')
     }
   }
 
@@ -806,8 +811,10 @@ export function ImageStudioDialog({
               ) : (
                 <Upload className="size-5" aria-hidden />
               )}
-              {uploading ? 'در حال آپلود…' : 'آپلود عکس جدید (اختیاری)'}
-              <span className="text-xs">JPG، PNG یا WebP — حداکثر ۵ مگابایت</span>
+              {uploading
+                ? `در حال آپلود…${uploadPct ? ` (${uploadPct})` : ''}`
+                : 'آپلود عکس جدید (اختیاری)'}
+              <span className="text-xs">JPG، PNG یا WebP — حداکثر ۱۲ مگابایت</span>
             </button>
 
             {/* selected source summary */}
@@ -1008,7 +1015,9 @@ export function ImageStudioDialog({
                           ) : (
                             <ImagePlus className="size-3.5" aria-hidden />
                           )}
-                          {customUploading ? 'در حال آپلود…' : 'عکس مرجع پس‌زمینه (اختیاری)'}
+                          {customUploading
+                            ? `در حال آپلود…${customPct ? ` (${customPct})` : ''}`
+                            : 'عکس مرجع پس‌زمینه (اختیاری)'}
                         </Button>
                         {customBgUrl && (
                           <span className="flex items-center gap-1.5 rounded-lg border bg-background p-1 ps-2">

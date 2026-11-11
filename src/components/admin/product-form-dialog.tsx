@@ -29,6 +29,7 @@ import {
   CollapsibleTrigger,
 } from '@/components/ui/collapsible'
 import { AiSuggestionList } from '@/components/admin/ai-suggestion'
+import { compressImageFile, uploadImageWithProgress } from '@/lib/image-compress'
 import {
   Loader2,
   Sparkles,
@@ -165,6 +166,7 @@ export function ProductFormDialog({
   const [generating, setGenerating] = useState(false)
   const [suggestion, setSuggestion] = useState<AiSuggestion | null>(null)
   const [uploading, setUploading] = useState(false)
+  const [uploadProgress, setUploadProgress] = useState('')
   const [previewUrl, setPreviewUrl] = useState<string | null>(null)
   const fileRef = useRef<HTMLInputElement>(null)
   const isEdit = Boolean(product)
@@ -231,25 +233,31 @@ export function ProductFormDialog({
     let ok = 0
     try {
       for (let i = 0; i < files.length; i++) {
-        const fd = new FormData()
-        fd.append('file', files[i])
+        const step =
+          files.length > 1
+            ? `${(i + 1).toLocaleString('fa-IR')} از ${files.length.toLocaleString('fa-IR')} — `
+            : ''
+        setUploadProgress(step)
         try {
-          const res = await api<{ url: string; name: string; size: number }>('/api/uploads', {
-            method: 'POST',
-            body: fd,
-          })
+          // Shrink big photos in the browser first: multi-MB phone shots die
+          // mid-transfer on slow links; ~300 KB JPEGs survive the trip.
+          const work = await compressImageFile(files[i])
+          const res = await uploadImageWithProgress(work, (pct) =>
+            setUploadProgress(`${step}${pct.toLocaleString('fa-IR')}٪`),
+          )
           setImages((prev) => {
             const next = [...prev, { url: res.url, isPrimary: prev.length === 0, sortOrder: prev.length }]
             return next
           })
           ok++
         } catch (err) {
-          toast.error(`آپلود فایل ${i + 1} ناموفق بود: ${(err as Error).message}`)
+          toast.error(`آپلود فایل ${(i + 1).toLocaleString('fa-IR')} ناموفق بود: ${(err as Error).message}`)
         }
       }
-      if (ok > 0) toast.success(`${ok} تصویر آپلود شد`)
+      if (ok > 0) toast.success(`${ok.toLocaleString('fa-IR')} تصویر آپلود شد`)
     } finally {
       setUploading(false)
+      setUploadProgress('')
     }
   }
 
@@ -598,7 +606,9 @@ export function ProductFormDialog({
                   ) : (
                     <ImagePlus className="size-4" aria-hidden />
                   )}
-                  {uploading ? 'در حال آپلود…' : 'افزودن تصاویر'}
+                  {uploading
+                    ? `در حال آپلود…${uploadProgress ? ` (${uploadProgress})` : ''}`
+                    : 'افزودن تصاویر'}
                 </Button>
               </div>
 
@@ -614,8 +624,10 @@ export function ProductFormDialog({
                   ) : (
                     <Upload className="size-5" aria-hidden />
                   )}
-                  {uploading ? 'در حال آپلود تصاویر…' : 'برای افزودن تصویر کلیک کنید (چندتایی پشتیبانی می‌شود)'}
-                  <span className="text-xs">JPG، PNG، WebP یا GIF — حداکثر ۵ مگابایت</span>
+                  {uploading
+                    ? `در حال آپلود تصاویر…${uploadProgress ? ` (${uploadProgress})` : ''}`
+                    : 'برای افزودن تصویر کلیک کنید (چندتایی پشتیبانی می‌شود)'}
+                  <span className="text-xs">JPG، PNG، WebP یا GIF — حداکثر ۱۲ مگابایت (عکس‌های بزرگ خودکار کوچک می‌شوند)</span>
                 </button>
               ) : (
                 <ul className="grid grid-cols-3 gap-2 sm:grid-cols-4 md:grid-cols-5">
