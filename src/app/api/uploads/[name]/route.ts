@@ -2,8 +2,9 @@ import { readFile } from 'node:fs/promises'
 import path from 'node:path'
 import type { NextRequest } from 'next/server'
 import { ApiError, route } from '@/lib/api'
+import { uploadDir } from '@/lib/upload-dir'
 
-const UPLOAD_DIR = path.join(process.cwd(), 'upload')
+const UPLOAD_DIR = uploadDir()
 
 const NAME_RE = /^[a-zA-Z0-9._-]+$/
 

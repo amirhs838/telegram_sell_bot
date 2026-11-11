@@ -4,6 +4,7 @@ import { readFile } from 'node:fs/promises'
 import path from 'node:path'
 import { db } from '@/lib/db'
 import { logEvent } from '@/lib/logger'
+import { uploadDir } from '@/lib/upload-dir'
 import {
   renderProductPost,
   hashContent,
@@ -528,8 +529,8 @@ const UPLOAD_FILE_RE = /^[a-zA-Z0-9._-]+$/
 /**
  * Resolves a product image for a channel post:
  *  a) absolute http(s) URL  → sent by reference
- *  b) relative /api/uploads/<name> → read from <cwd>/upload/<name> and uploaded
- *     as multipart (Telegram servers cannot reach local URLs)
+ *  b) relative /api/uploads/<name> → read from the stable upload dir and
+ *     uploaded as multipart (Telegram servers cannot reach local URLs)
  * Returns null (→ text-only post) when there is no image or the file is missing.
  */
 async function resolveProductImage(url?: string | null): Promise<ResolvedProductImage | null> {
@@ -539,7 +540,7 @@ async function resolveProductImage(url?: string | null): Promise<ResolvedProduct
   const name = url.replace(/^\/api\/uploads\//, '')
   if (name && !name.includes('/') && !name.includes('..') && UPLOAD_FILE_RE.test(name)) {
     try {
-      const buffer = await readFile(path.join(process.cwd(), 'upload', name))
+      const buffer = await readFile(uploadDir(name))
       return { kind: 'buffer', buffer, filename: name }
     } catch {
       return null // file missing → graceful text-only fallback

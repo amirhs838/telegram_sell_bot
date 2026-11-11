@@ -5,6 +5,7 @@ import path from 'node:path'
 import { logEvent } from '@/lib/logger'
 import { AiError } from '@/lib/ai/client'
 import { geminiImageEdit } from '@/lib/ai/provider'
+import { uploadDir } from '@/lib/upload-dir'
 
 /**
  * AI Image Studio — turns a raw product photo into a professional studio shot.
@@ -118,7 +119,7 @@ export function getBackground(key: string): BackgroundTemplate | null {
 
 // ─── File helpers (upload dir — same storage as /api/uploads) ────────────────
 
-const UPLOAD_DIR = path.join(process.cwd(), 'upload')
+const UPLOAD_DIR = uploadDir()
 const SAFE_NAME_RE = /^[a-zA-Z0-9._-]+$/
 const AI_TIMEOUT_MS = 150_000
 

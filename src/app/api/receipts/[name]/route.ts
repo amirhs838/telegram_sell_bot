@@ -2,12 +2,13 @@ import { readFile } from 'node:fs/promises'
 import path from 'node:path'
 import type { NextRequest } from 'next/server'
 import { ApiError, route, requireAuth } from '@/lib/api'
+import { uploadDir } from '@/lib/upload-dir'
 
 // PRIVATE receipt files (card-to-card payment proofs).
 // Every request requires an authenticated admin session (Bearer token or
 // cookie). Receipts are never publicly accessible and must not be cached.
 
-const RECEIPT_DIR = path.join(process.cwd(), 'upload', 'receipts')
+const RECEIPT_DIR = uploadDir('receipts')
 
 const NAME_RE = /^[a-zA-Z0-9._-]+$/
 

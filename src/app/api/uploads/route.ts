@@ -3,8 +3,9 @@ import { mkdir, writeFile } from 'node:fs/promises'
 import path from 'node:path'
 import type { NextRequest } from 'next/server'
 import { ApiError, ok, requireAuth, route } from '@/lib/api'
+import { uploadDir } from '@/lib/upload-dir'
 
-const UPLOAD_DIR = path.join(process.cwd(), 'upload')
+const UPLOAD_DIR = uploadDir()
 
 const ALLOWED_MIME: Record<string, string> = {
   'image/jpeg': 'jpg',

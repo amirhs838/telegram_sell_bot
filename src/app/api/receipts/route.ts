@@ -3,12 +3,13 @@ import { mkdir, writeFile } from 'node:fs/promises'
 import path from 'node:path'
 import type { NextRequest } from 'next/server'
 import { ApiError, ok, requireAuth, route } from '@/lib/api'
+import { uploadDir } from '@/lib/upload-dir'
 
 // Receipts are PRIVATE documents (card-to-card payment proofs). Unlike public
 // product uploads they live in their own directory and are only served through
 // the auth-guarded /api/receipts/[name] route — never publicly.
 
-const RECEIPT_DIR = path.join(process.cwd(), 'upload', 'receipts')
+const RECEIPT_DIR = uploadDir('receipts')
 
 const ALLOWED_MIME: Record<string, string> = {
   'image/jpeg': 'jpg',

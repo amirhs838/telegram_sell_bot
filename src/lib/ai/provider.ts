@@ -861,6 +861,8 @@ async function runGeminiImage(
   let sawAuth = false
   let sawBlock = ''
   let lastDetail = ''
+  /** Earliest moment any parked key is expected to become usable again. */
+  let quotaResetAt = 0
 
   for (const key of keys) {
     const parked = imageKeyPark(key)
@@ -886,6 +888,8 @@ async function runGeminiImage(
           const wait = Math.min(Math.max(secs, 60), 26 * 3600) * 1000
           parkImageKey(key, wait, msg)
           sawQuota = true
+          const resetHere = Date.now() + wait
+          quotaResetAt = quotaResetAt === 0 ? resetHere : Math.min(quotaResetAt, resetHere)
           console.warn(
             `[ai:provider] gemini image quota exhausted on ${keyFingerprint(key)} — parked ${(wait / 3600000).toFixed(1)}h, trying next key`,
           )
@@ -914,8 +918,11 @@ async function runGeminiImage(
               lastDetail = msg2.slice(0, 300)
               if (e2 instanceof RateError) {
                 const secs = parseRetryDelaySeconds(msg2) ?? 300
-                parkImageKey(key, Math.min(Math.max(secs, 60), 26 * 3600) * 1000, msg2)
+                const wait = Math.min(Math.max(secs, 60), 26 * 3600) * 1000
+                parkImageKey(key, wait, msg2)
                 sawQuota = true
+                const resetHere = Date.now() + wait
+                quotaResetAt = quotaResetAt === 0 ? resetHere : Math.min(quotaResetAt, resetHere)
                 break
               }
               continue // next model
@@ -930,8 +937,25 @@ async function runGeminiImage(
   }
 
   if (sawQuota) {
+    // Tell the seller EXACTLY when the quota resets (Google's own retry delay),
+    // formatted in Iran local time — not a vague "tomorrow morning".
+    let when = ''
+    try {
+      if (quotaResetAt > Date.now()) {
+        when = new Intl.DateTimeFormat('fa-IR', {
+          timeZone: 'Asia/Tehran',
+          hour: '2-digit',
+          minute: '2-digit',
+        }).format(new Date(quotaResetAt))
+      }
+    } catch {
+      when = ''
+    }
+    const resetLine = when
+      ? `حدود ساعت ${when} به وقت ایران دوباره امتحان کنید`
+      : 'کمی بعد دوباره امتحان کنید (سهمیهٔ روزانه شبانه بازنشانی می‌شود)'
     throw new AiError(
-      'سهمیهٔ رایگان تصویر جمنای برای امروز تمام شده است — صبح فردا (حدود ۸ صبح) دوباره امتحان کنید، یا کلید جمنای دیگری در تنظیمات اضافه کنید (چند کلید را با کاما جدا کنید تا سهمیه‌ها جمع شوند)',
+      `سهمیهٔ رایگان تصویر جمنای برای امروز تمام شده است — ${resetLine}، یا کلید جمنای دیگری در تنظیمات اضافه کنید (چند کلید را با کاما جدا کنید تا سهمیه‌ها جمع شوند)`,
     )
   }
   if (sawAuth) {
