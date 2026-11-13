@@ -943,6 +943,8 @@ async function runGeminiImage(
 
   let sawQuota = false
   let sawAuth = false
+  /** At least one key+model returned a free-tier 429 whose limit is literally 0. */
+  let sawZeroFreeTier = false
   let sawBlock = ''
   let lastDetail = ''
   /** Earliest moment any parked key is expected to become usable again. */
@@ -979,6 +981,11 @@ async function runGeminiImage(
           // Quota exhausted for THIS key+model — Google counts the free image
           // quota per project per model, so park the pair (not the whole key)
           // and try the next model: another model may still have allowance.
+          // NOTE: Google has been zeroing the API free tier for image models on
+          // some projects — the 429 body then literally says limit: 0, and no
+          // daily reset will ever bring that model back. Detect it so the seller
+          // gets the truth instead of a forever-recurring "retry tomorrow".
+          if (/limit:\s*0\b/.test(msg) && /free_tier/i.test(msg)) sawZeroFreeTier = true
           const secs = parseRetryDelaySeconds(msg) ?? 300
           const wait = Math.min(Math.max(secs, 60), 26 * 3600) * 1000
           parkImageModel(key, model, wait, msg)
@@ -1031,6 +1038,11 @@ async function runGeminiImage(
     }
   }
 
+  if (sawZeroFreeTier) {
+    throw new AiError(
+      'گوگل سهمیهٔ رایگان API ساخت تصویر را روی این پروژه صفر کرده است (limit: 0) — منتظر ریست روزانه ماندن فایده ندارد. راه‌حل: با یک حساب گوگل دیگر وارد aistudio.google.com شوید، پروژهٔ تازه بسازید و کلید آن را در پنل ذخیره کنید، یا صورت‌حساب همان پروژه را فعال کنید',
+    )
+  }
   if (sawQuota) {
     // Tell the seller EXACTLY when the quota resets (Google's own retry delay),
     // formatted in Iran local time — not a vague "tomorrow morning".
