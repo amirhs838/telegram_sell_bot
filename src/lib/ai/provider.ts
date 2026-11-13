@@ -804,7 +804,7 @@ function keyFingerprint(key: string): string {
 function parkImageKey(key: string, untilMs: number, reason: string) {
   imageKeyState.set(keyFingerprint(key), {
     blockedUntil: Date.now() + untilMs,
-    reason: reason.slice(0, 300),
+    reason: reason.slice(0, 1000),
   })
 }
 
@@ -827,7 +827,7 @@ function modelParkId(key: string, model: string): string {
 function parkImageModel(key: string, model: string, untilMs: number, reason: string) {
   imageModelState.set(modelParkId(key, model), {
     blockedUntil: Date.now() + untilMs,
-    reason: reason.slice(0, 300),
+    reason: reason.slice(0, 1000),
   })
 }
 
