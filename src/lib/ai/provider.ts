@@ -955,6 +955,7 @@ async function runGeminiImage(
     if (parked) {
       sawQuota = true // parked keys are parked for quota or auth
       lastDetail = parked.reason
+      if (/limit:\s*0\b/.test(parked.reason) && /free_tier/i.test(parked.reason)) sawZeroFreeTier = true
       quotaResetAt = quotaResetAt === 0 ? parked.blockedUntil : Math.min(quotaResetAt, parked.blockedUntil)
       continue
     }
@@ -965,6 +966,7 @@ async function runGeminiImage(
       if (mPark) {
         sawQuota = true
         lastDetail = mPark.reason
+        if (/limit:\s*0\b/.test(mPark.reason) && /free_tier/i.test(mPark.reason)) sawZeroFreeTier = true
         quotaResetAt = quotaResetAt === 0 ? mPark.blockedUntil : Math.min(quotaResetAt, mPark.blockedUntil)
         continue
       }
