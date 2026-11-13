@@ -1,5 +1,6 @@
 // AI client layer — dual-provider (seller's Z.ai key + platform gateway),
-// with JSON-mode helpers. Backend only!
+// with JSON-mode helpers. Chat text goes through the OpenRouter-first chain
+// in '@/lib/ai/provider'. Backend only!
 import type ZAI from 'z-ai-web-dev-sdk'
 import type { ZodType } from 'zod'
 import { AiError, chatComplete, getSdk, type ChatMsg } from '@/lib/ai/provider'
@@ -12,15 +13,15 @@ type ChatMessage = { role: 'assistant' | 'user'; content: string }
 /**
  * Platform-gateway SDK singleton (survives HMR via globalThis).
  * Kept for SDK-only features (e.g. embeddings); chat/image go through
- * the dual-provider layer in '@/lib/ai/provider'.
+ * the OpenRouter-first provider chain in '@/lib/ai/provider'.
  */
 export function getZai(): Promise<ZAI> {
   return getSdk()
 }
 
 async function complete(messages: ChatMessage[]): Promise<string> {
-  // 2000: Gemini 3.x thinking models burn hidden reasoning tokens from the
-  // same budget — 900 starved the visible reply (empty content, finish "length").
+  // 2000: reasoning-style models burn hidden reasoning tokens from the same
+  // budget — 900 starved the visible reply (empty content, finish "length").
   const { content } = await chatComplete(messages, { maxTokens: 2000 })
   return content
 }

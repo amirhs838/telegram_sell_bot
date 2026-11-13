@@ -2,23 +2,23 @@
 
 /**
  * AI Image Studio (استودیوی تصویر) — wizard dialog that turns a raw product
- * photo into a professional studio image, powered by the seller's own Google
- * Gemini key (native image-editing models):
+ * photo into a professional studio image, powered by the seller's own
+ * OpenRouter key (image-output models, billed per render):
  *
  *   1. source image  → the product's MAIN image is pre-selected automatically;
  *                      no upload is required to continue (upload is optional)
  *   2. background    → 8 preset studio templates + «پس‌زمینه دلخواه»:
  *                      the seller describes a custom background in Persian
  *                      and/or uploads a reference photo (both optional)
- *   3. result        → ONE Gemini edit call places the product on the chosen
- *                      background (1 quota unit per render); optional cutout
- *                      step for a pure-white catalog shot
+ *   3. result        → ONE image-model call places the product on the chosen
+ *                      background (one billed render per result); optional
+ *                      cutout step for a pure-white catalog shot
  *   4. approve       → attach as the product's primary image
  *
  * The old hard gate is gone: «ادامه» no longer requires a fresh upload or any
  * AI call — the seller can go straight from the main image to background
  * selection. All slow endpoints lock the buttons while in flight, with an
- * elapsed-seconds counter; quota errors surface with precise Persian copy.
+ * elapsed-seconds counter; quota/credit errors surface with precise Persian copy.
  */
 
 import { useCallback, useEffect, useRef, useState, type ChangeEvent } from 'react'
@@ -734,7 +734,7 @@ export function ImageStudioDialog({
             استودیوی تصویر
           </DialogTitle>
           <DialogDescription>
-            تبدیل عکس «{productName}» به تصویر استودیویی حرفه‌ای با جمنای — انتخاب پس‌زمینهٔ آماده یا
+            تبدیل عکس «{productName}» به تصویر استودیویی حرفه‌ای با هوش مصنوعی — انتخاب پس‌زمینهٔ آماده یا
             دلخواه، بدون نیاز به آپلود مجدد.
           </DialogDescription>
         </DialogHeader>
@@ -1060,7 +1060,7 @@ export function ImageStudioDialog({
                 ) : (
                   <Sparkles className="size-4" aria-hidden />
                 )}
-                {busy === 'generate' ? 'در حال ساخت…' : 'ساخت تصویر حرفه‌ای با جمنای'}
+                {busy === 'generate' ? 'در حال ساخت…' : 'ساخت تصویر حرفه‌ای با هوش مصنوعی'}
               </Button>
               {!backgroundKey && !disabledByBusy && (
                 <p className="text-xs text-muted-foreground">ابتدا یک پس‌زمینه انتخاب کنید.</p>
@@ -1069,7 +1069,7 @@ export function ImageStudioDialog({
 
             {busy === 'generate' && (
               <ProgressStatus
-                title="جمنای در حال ساخت تصویر است…"
+                title="هوش مصنوعی در حال ساخت تصویر است…"
                 hint="معمولاً ۱۵ تا ۶۰ ثانیه؛ تا دو دقیقه"
                 elapsed={elapsed}
               />
@@ -1128,7 +1128,7 @@ export function ImageStudioDialog({
 
             {busy === 'generate' && (
               <ProgressStatus
-                title="جمنای در حال ساخت تصویر جدید…"
+                title="هوش مصنوعی در حال ساخت تصویر جدید…"
                 hint="معمولاً ۱۵ تا ۶۰ ثانیه؛ تا دو دقیقه"
                 elapsed={elapsed}
               />

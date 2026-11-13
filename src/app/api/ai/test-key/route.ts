@@ -1,19 +1,19 @@
 // Admin-only AI connectivity probe. Two checks in one call:
-//  1. Gemini probe (Tier A, owner-requested default) — targeted, NEVER falls
-//     back, so a broken key is reported as broken instead of silently passing
-//     via a lower tier.
+//  1. OpenRouter probe (Tier A, owner-requested primary) — targeted, NEVER
+//     falls back, so a broken key/model is reported as broken instead of
+//     silently passing via a lower tier.
 //  2. The full provider chain — reports which tier served the request overall
-//     (gemini → user-key → platform → free).
+//     (openrouter → user-key → platform → free).
 // Used by the panel's «تست اتصال» button — no more silent AI death.
 import { ok, requireAuth, route } from '@/lib/api'
-import { chatComplete, probeGemini } from '@/lib/ai/provider'
+import { chatComplete, probeOpenRouter } from '@/lib/ai/provider'
 
 export const POST = route(async () => {
   await requireAuth()
   const t0 = Date.now()
 
-  // 1) targeted Gemini probe (always runs; reports "no key" when unset)
-  const gemini = await probeGemini()
+  // 1) targeted OpenRouter probe (always runs; reports "no key" when unset)
+  const openrouter = await probeOpenRouter()
 
   // 2) the whole chain as the bot actually experiences it
   let chain: { ok: boolean; via?: string; latencyMs?: number; error?: string; sample?: string }
@@ -36,6 +36,6 @@ export const POST = route(async () => {
     latencyMs: chain.latencyMs,
     error: chain.error,
     sample: chain.sample,
-    gemini,
+    openrouter,
   })
 })

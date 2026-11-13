@@ -6,44 +6,38 @@ import ZAI from 'z-ai-web-dev-sdk'
 import { db } from '@/lib/db'
 
 /**
- * Four-tier AI layer — designed to keep the bot ALIVE on a bare VPS where
- * neither the seller's key nor the platform gateway exists (root cause of the
- * "bot answers the same menu for every message" production bug):
+ * Four-tier AI layer — owner-requested primary provider: OPENROUTER.
  *
- *  Tier A (best, owner-requested default) — GOOGLE GEMINI.
- *    Sources, in order:
- *    1. `GEMINI_API_KEY` in .env (deploy-time)
- *    2. Setting row «geminiApiKey» — pasted from the admin panel (no SSH needed)
- *    Called on Google's OpenAI-compatible endpoint
- *    (generativelanguage.googleapis.com/v1beta/openai) with model gemini-2.0-flash
- *    (fast, excellent Persian, generous free tier).
+ * OpenRouter (openrouter.ai) fronts hundreds of models behind ONE API key
+ * billed per use from the seller's own credit balance — no more Google
+ * free-tier daily quota roulette. The seller configures everything from the
+ * admin panel (no SSH needed):
+ *   • the API key     → Setting row «openRouterApiKey»  (env: OPENROUTER_API_KEY)
+ *   • the TEXT model  → Setting row «aiTextModel»       (env: OPENROUTER_TEXT_MODEL)
+ *                       — brain of the sales assistant + the RAG answerer
+ *   • the IMAGE model → Setting row «aiImageModel»      (env: OPENROUTER_IMAGE_MODEL)
+ *                       — engine of the AI Image Studio (cutout + composite)
  *
- *  Tier B — the seller's OWN Z.ai key. Sources, in order:
- *    1. `ZAI_API_KEY` in .env (deploy-time)
- *    2. Setting row «zaiApiKey» — pasted from the admin panel (no SSH needed)
- *    Called on the public OpenAI-compatible endpoint (api.z.ai/api/paas/v4).
- *
- *  Tier C (sandbox/dev) — the platform-managed z-ai-web-dev-sdk gateway.
- *    Only attempted when a .z-ai-config file actually exists (project/home/etc);
- *    on a customer VPS it never does, and every blind attempt wasted ~seconds
- *    before dying with "Configuration file not found".
- *
+ *  Tier A (primary) — OPENROUTER on its OpenAI-compatible endpoint
+ *    (openrouter.ai/api/v1).
+ *  Tier B — the seller's OWN Z.ai key (env ZAI_API_KEY / Setting «zaiApiKey»).
+ *  Tier C (sandbox/dev) — the platform-managed z-ai-web-dev-sdk gateway,
+ *    only attempted when a .z-ai-config file actually exists.
  *  Tier D (zero-config safety net) — a keyless OpenAI-compatible free
- *    gateway (text.pollinations.ai/openai, env-overridable). Keeps the sales
- *    assistant responsive out-of-the-box until the owner pastes their own key.
+ *    gateway (text.pollinations.ai/openai, env-overridable).
  *
- * Gemini/Z.ai health: an auth failure (401) is cached for a cooldown window so
- * every request doesn't pay the extra latency; re-probed after the cooldown.
- * 429 responses retry with real backoff (Retry-After aware) on all tiers.
+ * Health: an OpenRouter auth/credit failure is cached for a cooldown window
+ * on the TEXT tier (no per-message latency tax); IMAGE failures park the key
+ * with a kind (quota | auth | credits | model) and a clear Persian message.
  * EVERY leg failure is logged loudly — silent AI death must never happen again.
  */
 
 // ─── Configuration ───────────────────────────────────────────────────────────
 
-const PUBLIC_API_BASE = 'https://api.z.ai/api/paas/v4'
+/** OpenRouter — single OpenAI-compatible surface for text AND image models. */
+const OPENROUTER_API_BASE = 'https://openrouter.ai/api/v1'
 
-/** Google Gemini — OpenAI-compatible surface (same request/response shapes). */
-const GEMINI_API_BASE = 'https://generativelanguage.googleapis.com/v1beta/openai'
+const PUBLIC_API_BASE = 'https://api.z.ai/api/paas/v4'
 
 /** Keyless safety-net gateway (OpenAI-compatible POST endpoint). */
 const FREE_API_BASE = (process.env.FREE_TEXT_API_BASE ?? 'https://text.pollinations.ai/openai').trim()
@@ -76,157 +70,155 @@ export async function resolveSellerKey(): Promise<string> {
   return settingSellerKey()
 }
 
-// ─── Gemini key sources (env first, then the panel-pasted Setting copy) ─────
+// ─── OpenRouter key sources (env first, then the panel-pasted Setting copy) ──
 
-export function geminiEnvKey(): string {
-  return (process.env.GEMINI_API_KEY ?? '').trim()
+export function openRouterEnvKey(): string {
+  return (process.env.OPENROUTER_API_KEY ?? '').trim()
 }
 
-/** Called when the panel saves/clears the Gemini key so the next call reads fresh. */
-export function invalidateGeminiSettingCache() {
-  geminiSettingKeyCache = null
-}
-
-/** Owner-selectable Gemini model (default: fast + great Persian + free tier).
- *  NOTE: Gemini 3.x models are "thinking" models — hidden reasoning tokens
- *  consume the max_tokens budget, so the Gemini leg always raises the token
- *  ceiling and runs with reasoning_effort "low" for snappy sales replies. */
-export function geminiModel(): string {
-  return (process.env.GEMINI_TEXT_MODEL ?? 'gemini-3.5-flash').trim()
-}
-
-let geminiSettingKeyCache: { value: string; at: number } | null = null
-async function geminiSettingKey(): Promise<string> {
+let openRouterSettingKeyCache: { value: string; at: number } | null = null
+async function openRouterSettingKey(): Promise<string> {
   const now = Date.now()
-  if (geminiSettingKeyCache && now - geminiSettingKeyCache.at < 30_000) return geminiSettingKeyCache.value
+  if (openRouterSettingKeyCache && now - openRouterSettingKeyCache.at < 30_000)
+    return openRouterSettingKeyCache.value
   let value = ''
   try {
-    const row = await db.setting.findUnique({ where: { key: 'geminiApiKey' } })
+    const row = await db.setting.findUnique({ where: { key: 'openRouterApiKey' } })
     value = row?.value?.trim() ?? ''
   } catch {
     value = '' // DB hiccup must not break the AI
   }
-  geminiSettingKeyCache = { value, at: now }
+  openRouterSettingKeyCache = { value, at: now }
   return value
 }
 
-export async function resolveGeminiKey(): Promise<string> {
-  const env = geminiEnvKey()
-  if (env) return splitGeminiKeys(env)[0] ?? ''
-  return splitGeminiKeys(await geminiSettingKey())[0] ?? ''
+/** Called when the panel saves/clears the OpenRouter key so the next call reads fresh. */
+export function invalidateOpenRouterSettingCache() {
+  openRouterSettingKeyCache = null
 }
+
+export async function resolveOpenRouterKey(): Promise<string> {
+  const env = openRouterEnvKey()
+  if (env) return env
+  return openRouterSettingKey()
+}
+
+export function keyFingerprint(key: string): string {
+  return `${key.slice(0, 12)}…${key.slice(-4)}`
+}
+
+// ─── Model configuration (panel Setting row → env → sensible default) ────────
+
+export const DEFAULT_TEXT_MODEL = (process.env.OPENROUTER_TEXT_MODEL ?? 'openai/gpt-4o-mini').trim()
+export const DEFAULT_IMAGE_MODEL = (process.env.OPENROUTER_IMAGE_MODEL ?? 'google/gemini-nano-banana-2.1').trim()
+
+/** Tried in order when the configured image model is not available for the key. */
+const IMAGE_MODEL_FALLBACKS = [
+  'google/gemini-3.1-flash-image',
+  'bytedance-seed/seedream-5-0-flash',
+  'openai/gpt-image-2.5-flare',
+]
+
+let modelCache: { text: string; image: string; at: number } | null = null
 
 /**
- * Accepts one OR several Gemini API keys (comma / semicolon / newline /
- * Persian-comma separated). Multiple keys rotate the image quota: each AI
- * Studio project has its own tiny free daily image allowance, so 2–3 keys
- * multiply the number of studio renders per day.
+ * Resolve BOTH configured models in one DB read (panel values win; env and
+ * defaults are the fallback). Cached 30 s per process.
  */
-export function splitGeminiKeys(raw: string): string[] {
-  return raw
-    .split(/[\s,;،]+/)
-    .map((k) => k.trim())
-    .filter((k) => k.length >= 20)
+export async function resolveAiModels(): Promise<{ text: string; image: string }> {
+  const now = Date.now()
+  if (modelCache && now - modelCache.at < 30_000) return { text: modelCache.text, image: modelCache.image }
+  let text = ''
+  let image = ''
+  try {
+    const rows = await db.setting.findMany({
+      where: { key: { in: ['aiTextModel', 'aiImageModel'] } },
+      select: { key: true, value: true },
+    })
+    text = (rows.find((r) => r.key === 'aiTextModel')?.value ?? '').trim()
+    image = (rows.find((r) => r.key === 'aiImageModel')?.value ?? '').trim()
+  } catch {
+    // DB hiccup → fall through to env/defaults
+  }
+  const resolved = { text: text || DEFAULT_TEXT_MODEL, image: image || DEFAULT_IMAGE_MODEL }
+  modelCache = { ...resolved, at: now }
+  return resolved
 }
 
-/** Every Gemini key available for IMAGE work: .env first, then the panel. */
-async function resolveGeminiImageKeys(): Promise<string[]> {
-  const keys = [...splitGeminiKeys(geminiEnvKey()), ...splitGeminiKeys(await geminiSettingKey())]
-  return [...new Set(keys)]
+export function invalidateAiModelCache() {
+  modelCache = null
 }
 
-export type GeminiKeyStatus = {
-  /** masked preview, e.g. «AQ.Ab8RN6L…Bx9g» — the full key NEVER leaves the server */
-  fingerprint: string
-  source: 'env' | 'panel' | 'env+panel'
-  /** non-null while the key is cooling down (image quota exhausted / rejected) */
-  parkedUntil: number | null
-  /** 'quota' | 'auth' classification of the park reason */
-  parkKind: 'quota' | 'auth' | null
+// ─── OpenRouter TEXT-tier health cache (survives HMR via globalThis) ─────────
+
+const AUTH_COOLDOWN_MS = 10 * 60 * 1000 // auth/credit-failed key probed again after 10 min
+
+type Health = {
+  usable: boolean | null
+  lastError?: string
+  nextProbeAt: number
+  lastProbeAt: number
 }
 
-/**
- * Live per-key status for the panel's self-service Gemini key manager:
- * masked fingerprints + which keys are currently parked for image quota/auth.
- */
-export async function geminiImageKeyStatuses(): Promise<GeminiKeyStatus[]> {
-  const envKeys = splitGeminiKeys(geminiEnvKey())
-  const panelKeys = splitGeminiKeys(await geminiSettingKey())
-  const all = [...new Set([...envKeys, ...panelKeys])]
-  const modelList = imageModelCandidates()
-  return all.map((key) => {
-    const authPark = imageKeyPark(key)
-    // Quota is per PROJECT per MODEL: the key is only truly stuck when every
-    // image model it can serve is parked. «Until» = the earliest moment any of
-    // its models becomes usable again.
-    const modelParks = modelList
-      .map((m) => imageModelPark(key, m))
-      .filter((p): p is ImageKeyState => p !== null)
-    let parkedUntil: number | null = null
-    let parkKind: 'quota' | 'auth' | null = null
-    if (authPark) {
-      parkedUntil = authPark.blockedUntil
-      parkKind = 'auth'
-    } else if (modelParks.length >= modelList.length) {
-      parkedUntil = Math.min(...modelParks.map((p) => p.blockedUntil))
-      parkKind = 'quota'
-    }
-    return {
-      fingerprint: keyFingerprint(key),
-      source: envKeys.includes(key) && panelKeys.includes(key)
-        ? 'env+panel'
-        : envKeys.includes(key)
-          ? 'env'
-          : 'panel',
-      parkedUntil,
-      parkKind,
-    }
-  })
-}
-
-// ─── Gemini health cache (survives HMR via globalThis) ───────────────────────
-
-const globalForGeminiHealth = globalThis as unknown as { __aiGeminiHealth?: Health }
-const geminiHealth: Health = (globalForGeminiHealth.__aiGeminiHealth ??= {
+const globalForOpenRouterHealth = globalThis as unknown as { __aiOpenRouterHealth?: Health }
+const openRouterHealth: Health = (globalForOpenRouterHealth.__aiOpenRouterHealth ??= {
   usable: null,
   nextProbeAt: 0,
   lastProbeAt: 0,
 })
 
-function geminiMarkAuthFailure(error: string) {
-  geminiHealth.usable = false
-  geminiHealth.lastError = error.slice(0, 300)
-  geminiHealth.lastProbeAt = Date.now()
-  geminiHealth.nextProbeAt = Date.now() + AUTH_COOLDOWN_MS
+function openRouterMarkAuthFailure(error: string) {
+  openRouterHealth.usable = false
+  openRouterHealth.lastError = error.slice(0, 300)
+  openRouterHealth.lastProbeAt = Date.now()
+  openRouterHealth.nextProbeAt = Date.now() + AUTH_COOLDOWN_MS
   console.error(
-    `[ai:provider] Gemini key rejected by Google (${error.slice(0, 120)}) — skipping the Gemini tier for the next ${AUTH_COOLDOWN_MS / 60000} min`,
+    `[ai:provider] OpenRouter key rejected (${error.slice(0, 120)}) — skipping the OpenRouter tier for the next ${AUTH_COOLDOWN_MS / 60000} min`,
   )
 }
 
-function geminiMarkUsable() {
-  geminiHealth.usable = true
-  geminiHealth.lastError = undefined
-  geminiHealth.lastProbeAt = Date.now()
-  geminiHealth.nextProbeAt = Date.now()
+function openRouterMarkUsable() {
+  openRouterHealth.usable = true
+  openRouterHealth.lastError = undefined
+  openRouterHealth.lastProbeAt = Date.now()
+  openRouterHealth.nextProbeAt = Date.now()
 }
 
-function geminiBlocked(): boolean {
-  return geminiHealth.usable === false && Date.now() < geminiHealth.nextProbeAt
+function openRouterBlocked(): boolean {
+  return openRouterHealth.usable === false && Date.now() < openRouterHealth.nextProbeAt
 }
+
+// ─── Shared error types ──────────────────────────────────────────────────────
+
+export class AiError extends Error {
+  constructor(message: string) {
+    super(message)
+    this.name = 'AiError'
+  }
+}
+
+class AuthError extends Error {}
+class RateError extends Error {}
+/** HTTP 402 — the OpenRouter credit balance is empty. */
+class CreditsError extends Error {}
+/** Model/policy/modality problems — retryable with a different model. */
+class MarkerError extends Error {}
+
+// ─── OpenRouter chat (TEXT tier A) ───────────────────────────────────────────
 
 /**
- * Gemini chat completion on the OpenAI-compatible endpoint. Same contract as
- * the Z.ai publicFetch leg: auth errors throw AuthError (→ cooldown), 429
- * backs off with Retry-After, 5xx retries, empty content throws.
+ * OpenRouter chat completion on the OpenAI-compatible endpoint. Auth/credit
+ * errors throw AuthError/CreditsError (→ cooldown), 429 backs off with
+ * Retry-After, 5xx retries, empty content throws.
  */
-async function geminiChatFetch(
+async function openRouterChatFetch(
   messages: ChatMsg[],
   model: string,
   maxTokens: number,
   opts: FetchOpts,
 ): Promise<unknown> {
-  const key = await resolveGeminiKey()
-  if (!key) throw new Error('کلید جمنای تنظیم نشده است')
+  const key = await resolveOpenRouterKey()
+  if (!key) throw new Error('کلید OpenRouter تنظیم نشده است')
   let lastStatus = 0
   let lastBody = ''
 
@@ -234,29 +226,25 @@ async function geminiChatFetch(
     const controller = new AbortController()
     const timer = setTimeout(() => controller.abort(), opts.timeoutMs)
     try {
-      const res = await fetch(`${GEMINI_API_BASE}/chat/completions`, {
+      const res = await fetch(`${OPENROUTER_API_BASE}/chat/completions`, {
         method: 'POST',
         headers: {
           Authorization: `Bearer ${key}`,
           'Content-Type': 'application/json',
+          'X-Title': 'Silver Love Shop',
         },
         body: JSON.stringify({
           model,
           messages,
           max_tokens: maxTokens,
           temperature: 0.6,
-          // Gemini 3.x is a thinking model — keep reasoning minimal for
-          // conversational latency; without this + a raised token ceiling the
-          // model returns EMPTY content (finish_reason "length") because the
-          // budget was eaten by hidden reasoning tokens.
-          reasoning_effort: 'low',
         }),
         signal: controller.signal,
       })
       const text = await res.text()
 
       if (res.ok) {
-        geminiMarkUsable()
+        openRouterMarkUsable()
         return JSON.parse(text) as unknown
       }
 
@@ -266,11 +254,8 @@ async function geminiChatFetch(
       if (res.status === 401 || res.status === 403) {
         throw new AuthError(`HTTP ${res.status}: ${lastBody}`)
       }
-      // Google reports malformed/invalid keys as 400 INVALID_ARGUMENT —
-      // treat it as an auth failure so the cooldown applies (no per-message
-      // retry tax for a dead key).
-      if (res.status === 400 && lastBody.includes('API key')) {
-        throw new AuthError(`HTTP 400: ${lastBody}`)
+      if (res.status === 402) {
+        throw new CreditsError(`HTTP 402: ${lastBody}`)
       }
 
       if (res.status === 429) {
@@ -279,7 +264,7 @@ async function geminiChatFetch(
           ? Math.min(retryAfter * 1000, 30_000)
           : Math.min(2000 * 2 ** (attempt - 1), 20_000)
         if (attempt < opts.retries) {
-          console.warn(`[ai:provider] Gemini 429 — backing off ${waitMs}ms (attempt ${attempt}/${opts.retries})`)
+          console.warn(`[ai:provider] OpenRouter 429 — backing off ${waitMs}ms (attempt ${attempt}/${opts.retries})`)
           await sleep(waitMs)
           continue
         }
@@ -296,7 +281,7 @@ async function geminiChatFetch(
       }
       throw new Error(`HTTP ${res.status}: ${lastBody}`)
     } catch (e) {
-      if (e instanceof AuthError || e instanceof RateError) throw e
+      if (e instanceof AuthError || e instanceof RateError || e instanceof CreditsError) throw e
       if (attempt < opts.retries) {
         await sleep(1500 * attempt)
         continue
@@ -310,26 +295,27 @@ async function geminiChatFetch(
 }
 
 /**
- * Targeted Gemini probe for the panel's «تست اتصال» button — NEVER falls back
- * to another tier, so a broken key is reported as broken instead of silently
- * passing via the free gateway.
+ * Targeted OpenRouter probe for the panel's «تست اتصال» button — NEVER falls
+ * back to another tier, so a broken key/model is reported as broken instead
+ * of silently passing via a lower tier.
  */
-export async function probeGemini(): Promise<{
+export async function probeOpenRouter(): Promise<{
   ok: boolean
   error?: string
   latencyMs: number
   sample?: string
 }> {
   const t0 = Date.now()
-  const key = await resolveGeminiKey()
-  if (!key) return { ok: false, error: 'کلید جمنای تنظیم نشده است', latencyMs: 0 }
+  const key = await resolveOpenRouterKey()
+  if (!key) return { ok: false, error: 'کلید OpenRouter تنظیم نشده است', latencyMs: 0 }
+  const { text: model } = await resolveAiModels()
   try {
-    const data = (await geminiChatFetch(
+    const data = (await openRouterChatFetch(
       [
         { role: 'assistant', content: 'فقط یک واژه فارسی برگردان.' },
         { role: 'user', content: 'سلام' },
       ],
-      geminiModel(),
+      model,
       30,
       { timeoutMs: 30_000, retries: 2 },
     )) as { choices?: Array<{ message?: { content?: string } }> }
@@ -337,7 +323,7 @@ export async function probeGemini(): Promise<{
     if (typeof content === 'string' && content.trim() !== '') {
       return { ok: true, latencyMs: Date.now() - t0, sample: content.trim().slice(0, 60) }
     }
-    return { ok: false, error: 'پاسخ خالی از جمنای', latencyMs: Date.now() - t0 }
+    return { ok: false, error: 'پاسخ خالی از OpenRouter', latencyMs: Date.now() - t0 }
   } catch (e) {
     return { ok: false, error: (e as Error).message.slice(0, 300), latencyMs: Date.now() - t0 }
   }
@@ -366,41 +352,30 @@ export function chatModel(): string {
 
 export function providerStatus(): {
   userKeyConfigured: boolean
-  geminiKeyConfigured: boolean
-  geminiModel: string
+  openRouterKeyConfigured: boolean
   chatModel: string
-  imageModel: string
   userKeyHealthy: boolean | null // null = not probed yet
-  geminiHealthy: boolean | null // null = not probed yet
+  openRouterHealthy: boolean | null // null = not probed yet
   lastUserKeyError?: string
-  lastGeminiError?: string
+  lastOpenRouterError?: string
 } {
   return {
     userKeyConfigured: userApiKey() !== '',
-    geminiKeyConfigured: geminiEnvKey() !== '',
-    geminiModel: geminiModel(),
+    openRouterKeyConfigured: openRouterEnvKey() !== '',
     chatModel: chatModel(),
-    imageModel: geminiImageModel(),
     userKeyHealthy: health.usable,
-    geminiHealthy: geminiHealth.usable,
+    openRouterHealthy: openRouterHealth.usable,
     lastUserKeyError: health.lastError,
-    lastGeminiError: geminiHealth.lastError,
+    lastOpenRouterError: openRouterHealth.lastError,
   }
 }
 
-// ─── Provider-A health cache (survives HMR via globalThis) ───────────────────
+// ─── Provider-B health cache (survives HMR via globalThis) ───────────────────
 
-const AUTH_COOLDOWN_MS = 10 * 60 * 1000 // auth-failed key probed again after 10 min
+type HealthB = Health
 
-type Health = {
-  usable: boolean | null
-  lastError?: string
-  nextProbeAt: number
-  lastProbeAt: number
-}
-
-const globalForHealth = globalThis as unknown as { __aiProviderHealth?: Health }
-const health: Health = (globalForHealth.__aiProviderHealth ??= {
+const globalForHealth = globalThis as unknown as { __aiProviderHealth?: HealthB }
+const health: HealthB = (globalForHealth.__aiProviderHealth ??= {
   usable: null,
   nextProbeAt: 0,
   lastProbeAt: 0,
@@ -421,10 +396,6 @@ function markUsable() {
   health.lastError = undefined
   health.lastProbeAt = Date.now()
   health.nextProbeAt = Date.now()
-}
-
-function userKeyBlocked(): boolean {
-  return userApiKey() === '' || (health.usable === false && Date.now() < health.nextProbeAt)
 }
 
 // ─── Low-level fetch helpers ─────────────────────────────────────────────────
@@ -509,18 +480,6 @@ async function publicFetch(
   throw new Error(`HTTP ${lastStatus || 0}: ${lastBody || 'no response'}`)
 }
 
-// ─── Shared error type ───────────────────────────────────────────────────────
-
-export class AiError extends Error {
-  constructor(message: string) {
-    super(message)
-    this.name = 'AiError'
-  }
-}
-
-class AuthError extends Error {}
-class RateError extends Error {}
-
 // ─── SDK (provider B) singleton ──────────────────────────────────────────────
 
 const globalForSdk = globalThis as unknown as { __zaiSdkPromise?: Promise<ZAI> }
@@ -541,10 +500,10 @@ export type ChatMsg = { role: 'system' | 'assistant' | 'user'; content: string }
 
 export type ChatResult = {
   content: string
-  via: 'gemini' | 'user-key' | 'platform' | 'free'
+  via: 'openrouter' | 'user-key' | 'platform' | 'free'
 }
 
-// ─── Tier C cooldown (survives HMR via globalThis) ──────────────────────────
+// ─── Tier D cooldown (survives HMR via globalThis) ──────────────────────────
 
 /**
  * The free gateway enforces hard per-IP quotas (observed: HTTP 402 FREE_LIMIT,
@@ -567,7 +526,7 @@ function blockFreeTier(reason: string): void {
 }
 
 /**
- * Tier C — keyless OpenAI-compatible gateway. No auth header at all; keeps
+ * Tier D — keyless OpenAI-compatible gateway. No auth header at all; keeps
  * the bot useful on a bare VPS with zero configuration. Env-overridable via
  * FREE_TEXT_API_BASE / FREE_TEXT_MODEL. Quota (402/429) failures arm the
  * cooldown instead of retrying — retrying cannot win against a per-IP quota.
@@ -630,7 +589,7 @@ async function freeFetch(
 }
 
 /**
- * Chat completion — four-tier chain: Gemini (owner-requested default) →
+ * Chat completion — four-tier chain: OpenRouter (owner-requested primary) →
  * seller Z.ai key → platform gateway → keyless free gateway. Every leg
  * failure is LOGGED; only when all four fail does the caller see an AiError
  * (route → 502 → bot deterministic fallback).
@@ -642,37 +601,36 @@ export async function chatComplete(
   const maxTokens = opts.maxTokens ?? 2000
   const timeoutMs = opts.timeoutMs ?? 60_000
 
-  // ── Tier A: Google Gemini (env or panel-pasted key) ──
-  const geminiKey = await resolveGeminiKey()
-  if (geminiKey && !geminiBlocked()) {
+  // ── Tier A: OpenRouter (env or panel-pasted key, configured text model) ──
+  const orKey = await resolveOpenRouterKey()
+  if (orKey && !openRouterBlocked()) {
+    const { text: model } = await resolveAiModels()
     try {
-      const data = (await geminiChatFetch(
-        messages,
-        geminiModel(),
-        // thinking models burn hidden reasoning tokens from the same budget —
-        // give the leg extra headroom so visible content never starves
-        Math.max(maxTokens, 1600),
-        { timeoutMs, retries: 3 },
-      )) as { choices?: Array<{ message?: { content?: string } }> }
+      const data = (await openRouterChatFetch(messages, model, maxTokens, {
+        timeoutMs,
+        retries: 3,
+      })) as { choices?: Array<{ message?: { content?: string } }> }
       const content = data.choices?.[0]?.message?.content
       if (typeof content === 'string' && content.trim() !== '') {
-        return { content, via: 'gemini' }
+        return { content, via: 'openrouter' }
       }
-      throw new Error('پاسخ خالی از جمنای')
+      throw new Error('پاسخ خالی از OpenRouter')
     } catch (e) {
       if (e instanceof AuthError) {
-        geminiMarkAuthFailure(e.message)
+        openRouterMarkAuthFailure(e.message)
+      } else if (e instanceof CreditsError) {
+        openRouterMarkAuthFailure(`اعتبار OpenRouter تمام شده: ${e.message}`)
       } else if (!(e instanceof RateError)) {
-        console.warn('[ai:provider] Gemini chat failed → next tier:', (e as Error).message?.slice(0, 160))
+        console.warn('[ai:provider] OpenRouter chat failed → next tier:', (e as Error).message?.slice(0, 160))
       } else {
-        console.warn('[ai:provider] Gemini rate-limited → next tier')
+        console.warn('[ai:provider] OpenRouter rate-limited → next tier')
       }
     }
-  } else if (geminiKey && geminiBlocked()) {
-    console.warn(`[ai:provider] Gemini key on auth cooldown (${geminiHealth.lastError?.slice(0, 80)}) → next tier`)
+  } else if (orKey && openRouterBlocked()) {
+    console.warn(`[ai:provider] OpenRouter key on cooldown (${openRouterHealth.lastError?.slice(0, 80)}) → next tier`)
   }
 
-  // ── Tier B: seller's own key (env or panel-pasted) ──
+  // ── Tier B: seller's own Z.ai key (env or panel-pasted) ──
   const sellerKey = await resolveSellerKey()
   const keyOnCooldown = health.usable === false && Date.now() < health.nextProbeAt
   if (sellerKey && !keyOnCooldown) {
@@ -705,7 +663,7 @@ export async function chatComplete(
     console.warn(`[ai:provider] user key on auth cooldown (${health.lastError?.slice(0, 80)}) → next tier`)
   }
 
-  // ── Tier B: platform gateway (only when its config file exists) ──
+  // ── Tier C: platform gateway (only when its config file exists) ──
   if (platformConfigAvailable()) {
     try {
       const sdk = await getSdk()
@@ -732,7 +690,7 @@ export async function chatComplete(
     }
   }
 
-  // ── Tier C: keyless free gateway (bare-VPS safety net) ──
+  // ── Tier D: keyless free gateway (bare-VPS safety net) ──
   if (!freeTierBlocked()) {
     try {
       const content = await freeFetch(messages, maxTokens, timeoutMs)
@@ -749,101 +707,78 @@ export async function chatComplete(
   throw new AiError('هیچ سرویس هوش مصنوعی در دسترس نیست')
 }
 
-// ─── Gemini image pipeline (native REST API — the seller's OWN key ONLY) ─────
+// ─── OpenRouter image pipeline (the seller's OWN key ONLY) ───────────────────
 //
 // Master directive: EVERYTHING image-related (studio cutout, background
-// composition, custom backgrounds) runs on Google Gemini directly and NEVER
-// falls back to another image provider. Gemini's native generateContent API
-// supports both text→image and image editing ("nano banana" models) with the
-// same key used for chat.
+// composition, custom backgrounds) runs on OpenRouter with the seller's own
+// credit balance and NEVER falls back to another image provider.
 //
-// Quota reality: the free tier allows only a handful of image renders per
-// project per day (resets ~08:00 UK / midnight US Pacific). The panel therefore
-// accepts MULTIPLE keys (comma-separated) and this layer rotates them
-// automatically: when one key's daily image quota is exhausted the next key is
-// tried, so pasting 2–3 keys multiplies the daily renders.
+// OpenRouter exposes a DEDICATED Image API:
+//   POST /api/v1/images  { model, prompt, input_references?: [{type:'image_url', image_url:{url}}] }
+//   → { data: [{ b64_json, media_type? }], usage? }
+// Reference images may be HTTP(S) URLs or base64 data URLs — the studio sends
+// the product photo (and an optional custom-background reference) as data URLs.
+//
+// Billing reality: image renders are billed per use from the OpenRouter
+// credit balance (no daily zero-quota). Rate limits (429) park the key with
+// OpenRouter's own Retry-After so the studio reports an honest wait time.
 
-const GEMINI_NATIVE_BASE = 'https://generativelanguage.googleapis.com/v1beta'
+export type OpenRouterImageResult = { base64: string; mimeType: string; via: string }
 
-/** Owner-overridable image model (fast, image+text native, free-tier friendly). */
-export function geminiImageModel(): string {
-  return (process.env.GEMINI_IMAGE_MODEL ?? 'gemini-2.5-flash-image').trim()
+type OpenRouterImageResponse = {
+  data?: Array<{ b64_json?: string; media_type?: string }>
+  error?: { code?: number | string; message?: string }
 }
 
-/** Tried in order when the configured model is not available for a key. */
-const GEMINI_IMAGE_MODEL_FALLBACKS = [
-  'gemini-2.5-flash-image',
-  'gemini-3.1-flash-image',
-  'gemini-nano-banana-2.1',
-]
-
-export type GeminiImageResult = { base64: string; mimeType: string; via: string }
-
-type GeminiPart = { text?: string; inlineData?: { mimeType: string; data: string } }
-type GeminiGenerateResponse = {
-  candidates?: Array<{ content?: { parts?: GeminiPart[] }; finishReason?: string }>
-  promptFeedback?: { blockReason?: string }
+// Image parks (survive HMR via globalThis). Quota (429) parks the key until
+// OpenRouter's Retry-After; auth parks 10 min; credits parks 15 min so the
+// panel can warn the seller instead of hammering a dead balance.
+type ImagePark = { blockedUntil: number; reason: string; kind: 'quota' | 'auth' | 'credits' | 'model' }
+const globalForImageParks = globalThis as unknown as {
+  __aiOpenRouterImageParks?: Map<string, ImagePark>
 }
+const imageParks: Map<string, ImagePark> = (globalForImageParks.__aiOpenRouterImageParks ??= new Map())
 
-// Image cooldowns (survive HMR via globalThis). Auth failures park the whole
-// key; quota (429) parks the KEY+MODEL pair — Google counts the free daily
-// image quota per PROJECT per MODEL, so one exhausted model must not blind us
-// to the other models the same key can still serve. Parking until Google's own
-// retryDelay means the next request goes straight to a healthy pair.
-type ImageKeyState = { blockedUntil: number; reason: string }
-const globalForImageKeys = globalThis as unknown as {
-  __aiGeminiImageKeyState?: Map<string, ImageKeyState>
-}
-const imageKeyState: Map<string, ImageKeyState> =
-  globalForImageKeys.__aiGeminiImageKeyState ??= new Map()
-
-function keyFingerprint(key: string): string {
-  return `${key.slice(0, 10)}…${key.slice(-4)}`
-}
-
-function parkImageKey(key: string, untilMs: number, reason: string) {
-  imageKeyState.set(keyFingerprint(key), {
+function parkImageKey(
+  key: string,
+  untilMs: number,
+  reason: string,
+  kind: ImagePark['kind'],
+) {
+  imageParks.set(keyFingerprint(key), {
     blockedUntil: Date.now() + untilMs,
     reason: reason.slice(0, 1000),
+    kind,
   })
 }
 
-function imageKeyPark(key: string): ImageKeyState | null {
-  const st = imageKeyState.get(keyFingerprint(key)) ?? null
+function imageKeyPark(key: string): ImagePark | null {
+  const st = imageParks.get(keyFingerprint(key)) ?? null
   return st && Date.now() < st.blockedUntil ? st : null
 }
 
-// Per KEY+MODEL quota parks: a 429 is scoped to one model's daily window.
-const globalForImageModels = globalThis as unknown as {
-  __aiGeminiImageModelState?: Map<string, ImageKeyState>
-}
-const imageModelState: Map<string, ImageKeyState> =
-  globalForImageModels.__aiGeminiImageModelState ??= new Map()
-
-function modelParkId(key: string, model: string): string {
-  return `${keyFingerprint(key)}|${model}`
-}
-
-function parkImageModel(key: string, model: string, untilMs: number, reason: string) {
-  imageModelState.set(modelParkId(key, model), {
-    blockedUntil: Date.now() + untilMs,
-    reason: reason.slice(0, 1000),
-  })
-}
-
-function imageModelPark(key: string, model: string): ImageKeyState | null {
-  const st = imageModelState.get(modelParkId(key, model)) ?? null
-  return st && Date.now() < st.blockedUntil ? st : null
+function clearImagePark(key: string) {
+  imageParks.delete(keyFingerprint(key))
 }
 
 /** The image model chain: configured primary first, then known-good fallbacks. */
-function imageModelCandidates(): string[] {
-  const primary = geminiImageModel()
-  return [primary, ...GEMINI_IMAGE_MODEL_FALLBACKS.filter((m) => m !== primary)]
+async function imageModelCandidates(): Promise<string[]> {
+  const { image: primary } = await resolveAiModels()
+  return [primary, ...IMAGE_MODEL_FALLBACKS.filter((m) => m !== primary)]
 }
 
-/** Extract "message" from a Google error JSON body (best-effort). */
-function googleErrorMessage(body: string): string {
+/** Parse Retry-After seconds from a 429 response (JSON body, best-effort). */
+function parseRetryAfterSeconds(body: string): number | null {
+  const m = body.match(/"retry-after"\s*:\s*(\d+)/i)
+  if (m) {
+    const n = Number(m[1])
+    if (Number.isFinite(n) && n > 0) return n
+  }
+  return null
+}
+
+/** Extract "message" from an OpenRouter error JSON body (best-effort). */
+function openRouterErrorMessage(body: string): string {
   try {
     const j = JSON.parse(body) as { error?: { message?: string } }
     return j.error?.message ?? body.slice(0, 300)
@@ -852,71 +787,59 @@ function googleErrorMessage(body: string): string {
   }
 }
 
-/** Parse Google's RetryInfo delay ("43773s") from a 429 error body. */
-function parseRetryDelaySeconds(body: string): number | null {
-  const m = body.match(/"retryDelay"\s*:\s*"(\d+)s"/)
-  if (m) {
-    const n = Number(m[1])
-    if (Number.isFinite(n) && n > 0) return n
-  }
-  return null
-}
-
 /**
- * One generateContent call against a specific key + model.
- * Throws AuthError (bad key), RateError (quota), MarkerError (model/policy /
- * modality issues — retryable with a different model or modality set), or
+ * One POST /api/v1/images call against a specific image model.
+ * Throws AuthError (bad key), RateError (rate limit), CreditsError (402),
+ * MarkerError (model/policy issues — retryable with a different model), or
  * plain Error for transient HTTP problems.
  */
-class MarkerError extends Error {}
-
-async function geminiImageRequestOnce(
+async function openRouterImageRequestOnce(
   key: string,
   model: string,
-  parts: GeminiPart[],
+  prompt: string,
+  referenceDataUrls: string[],
   timeoutMs: number,
-  modalities: string[] = ['IMAGE'],
 ): Promise<{ base64: string; mimeType: string }> {
   const controller = new AbortController()
   const timer = setTimeout(() => controller.abort(), timeoutMs)
   try {
-    const res = await fetch(
-      `${GEMINI_NATIVE_BASE}/models/${encodeURIComponent(model)}:generateContent`,
-      {
-        method: 'POST',
-        headers: { 'x-goog-api-key': key, 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          contents: [{ parts }],
-          generationConfig: { responseModalities: modalities },
-        }),
-        signal: controller.signal,
+    const body: Record<string, unknown> = { model, prompt }
+    if (referenceDataUrls.length > 0) {
+      body.input_references = referenceDataUrls.map((url) => ({
+        type: 'image_url',
+        image_url: { url },
+      }))
+    }
+    const res = await fetch(`${OPENROUTER_API_BASE}/images`, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${key}`,
+        'Content-Type': 'application/json',
+        'X-Title': 'Silver Love Shop',
       },
-    )
+      body: JSON.stringify(body),
+      signal: controller.signal,
+    })
     const text = await res.text()
 
     if (res.ok) {
-      const data = JSON.parse(text) as GeminiGenerateResponse
-      const cand = data.candidates?.[0]
-      const out = cand?.content?.parts?.find((p) => p.inlineData?.data)
-      if (out?.inlineData?.data) {
-        return { base64: out.inlineData.data, mimeType: out.inlineData.mimeType || 'image/png' }
+      const data = JSON.parse(text) as OpenRouterImageResponse
+      // OpenRouter surfaces provider-side failures inside a 200 response too.
+      const inlineErr = data.error?.message
+      const item = data.data?.find((i) => i.b64_json)
+      if (item?.b64_json) {
+        return { base64: item.b64_json, mimeType: item.media_type || 'image/png' }
       }
-      const block = data.promptFeedback?.blockReason ?? cand?.finishReason
-      if (block && block !== 'STOP') {
-        throw new MarkerError(`BLOCKED:${block}`)
-      }
+      if (inlineErr) throw new MarkerError(`PROVIDER_ERROR:${inlineErr.slice(0, 200)}`)
       throw new MarkerError('NO_IMAGE')
     }
 
-    const msg = googleErrorMessage(text)
-    if (res.status === 429) throw new RateError(text)
+    const msg = openRouterErrorMessage(text)
+    if (res.status === 429) throw new RateError(msg || text.slice(0, 300))
     if (res.status === 401 || res.status === 403) throw new AuthError(msg)
-    if (res.status === 400) {
-      // Malformed/invalid keys surface as 400 INVALID_ARGUMENT — treat as auth.
-      if (/api[_ ]?key/i.test(msg)) throw new AuthError(msg)
-      throw new MarkerError(`BAD_REQUEST:${msg}`)
-    }
+    if (res.status === 402) throw new CreditsError(msg)
     if (res.status === 404) throw new MarkerError(`MODEL_404:${model}`)
+    if (res.status === 400) throw new MarkerError(`BAD_REQUEST:${msg}`)
     throw new Error(`HTTP ${res.status}: ${msg}`)
   } finally {
     clearTimeout(timer)
@@ -924,155 +847,127 @@ async function geminiImageRequestOnce(
 }
 
 /**
- * Shared runner: rotates ALL configured Gemini keys (env + panel) and, per
- * key, the configured model plus known-good fallbacks. NO non-Gemini image
- * provider is ever contacted — the studio is Gemini-only by design.
+ * Shared runner: the configured OpenRouter image model first, then known-good
+ * fallbacks. NO non-OpenRouter image provider is ever contacted — the studio
+ * is OpenRouter-only by design.
  */
-async function runGeminiImage(
-  parts: GeminiPart[],
+async function runOpenRouterImage(
+  prompt: string,
+  referenceDataUrls: string[],
   timeoutMs: number,
-): Promise<GeminiImageResult> {
-  const keys = await resolveGeminiImageKeys()
-  if (keys.length === 0) {
+): Promise<OpenRouterImageResult> {
+  const key = await resolveOpenRouterKey()
+  if (!key) {
     throw new AiError(
-      'کلید جمنای تنظیم نشده است — از پنل، بخش تنظیمات، کلید گوگل جمنای را وارد کنید',
+      'کلید OpenRouter تنظیم نشده است — از پنل، بخش تنظیمات، کلید OpenRouter را وارد کنید',
     )
   }
 
-  const models = imageModelCandidates()
+  const parked = imageKeyPark(key)
+  if (parked) {
+    const when = formatTehranClock(parked.blockedUntil)
+    if (parked.kind === 'auth') {
+      throw new AiError('کلید OpenRouter برای تصویر پذیرفته نشد — درست بودن کلید را در تنظیمات بررسی کنید')
+    }
+    if (parked.kind === 'credits') {
+      throw new AiError(
+        'اعتبار حساب OpenRouter تمام شده است — از openrouter.ai/credits حساب را شارژ کنید و دوباره امتحان کنید',
+      )
+    }
+    if (parked.kind === 'model') {
+      throw new AiError('مدل تصویر در OpenRouter در دسترس نیست — نام مدل را در تنظیمات پنل بررسی کنید')
+    }
+    throw new AiError(
+      when
+        ? `سهمیهٔ مدل تصویر فعلاً پر است — حدود ساعت ${when} به وقت ایران دوباره امتحان کنید`
+        : 'سهمیهٔ مدل تصویر فعلاً پر است — کمی بعد دوباره امتحان کنید',
+    )
+  }
 
+  const models = await imageModelCandidates()
   let sawQuota = false
   let sawAuth = false
-  /** At least one key+model returned a free-tier 429 whose limit is literally 0. */
-  let sawZeroFreeTier = false
+  let sawCredits = false
+  let sawModel404 = false
   let sawBlock = ''
   let lastDetail = ''
-  /** Earliest moment any parked key is expected to become usable again. */
   let quotaResetAt = 0
 
-  for (const key of keys) {
-    const parked = imageKeyPark(key)
-    if (parked) {
-      sawQuota = true // parked keys are parked for quota or auth
-      lastDetail = parked.reason
-      if (/limit:\s*0\b/.test(parked.reason) && /free_tier/i.test(parked.reason)) sawZeroFreeTier = true
-      quotaResetAt = quotaResetAt === 0 ? parked.blockedUntil : Math.min(quotaResetAt, parked.blockedUntil)
-      continue
-    }
-    for (const model of models) {
-      // A 429 is scoped to key+model — skip only that pair, keep the key's
-      // other models usable.
-      const mPark = imageModelPark(key, model)
-      if (mPark) {
+  for (const model of models) {
+    try {
+      const r = await openRouterImageRequestOnce(key, model, prompt, referenceDataUrls, timeoutMs)
+      clearImagePark(key)
+      console.log(`[ai:provider] openrouter image OK via ${model}`)
+      return { base64: r.base64, mimeType: r.mimeType, via: `openrouter:${model}` }
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e)
+      lastDetail = msg.slice(0, 300)
+
+      if (e instanceof RateError) {
+        // OpenRouter 429 bodies rarely carry a retry hint; park 30 min by
+        // default (free-tier daily caps are the usual cause).
+        const secs = parseRetryAfterSeconds(msg) ?? 1800
+        const wait = Math.min(Math.max(secs * 1000, 60_000), 26 * 3600 * 1000)
+        parkImageKey(key, wait, msg, 'quota')
         sawQuota = true
-        lastDetail = mPark.reason
-        if (/limit:\s*0\b/.test(mPark.reason) && /free_tier/i.test(mPark.reason)) sawZeroFreeTier = true
-        quotaResetAt = quotaResetAt === 0 ? mPark.blockedUntil : Math.min(quotaResetAt, mPark.blockedUntil)
+        const resetHere = Date.now() + wait
+        quotaResetAt = quotaResetAt === 0 ? resetHere : Math.min(quotaResetAt, resetHere)
+        console.warn(
+          `[ai:provider] openrouter image rate-limited via ${model} — parked ${(wait / 60000).toFixed(0)} min`,
+        )
         continue
       }
-      try {
-        const r = await geminiImageRequestOnce(key, model, parts, timeoutMs)
-        imageModelState.delete(modelParkId(key, model))
-        console.log(`[ai:provider] gemini image OK via ${model}`)
-        return { base64: r.base64, mimeType: r.mimeType, via: `gemini:${model}` }
-      } catch (e) {
-        const msg = e instanceof Error ? e.message : String(e)
-        lastDetail = msg.slice(0, 300)
-
-        if (e instanceof RateError) {
-          // Quota exhausted for THIS key+model — Google counts the free image
-          // quota per project per model, so park the pair (not the whole key)
-          // and try the next model: another model may still have allowance.
-          // NOTE: Google has been zeroing the API free tier for image models on
-          // some projects — the 429 body then literally says limit: 0, and no
-          // daily reset will ever bring that model back. Detect it so the seller
-          // gets the truth instead of a forever-recurring "retry tomorrow".
-          if (/limit:\s*0\b/.test(msg) && /free_tier/i.test(msg)) sawZeroFreeTier = true
-          const secs = parseRetryDelaySeconds(msg) ?? 300
-          const wait = Math.min(Math.max(secs, 60), 26 * 3600) * 1000
-          parkImageModel(key, model, wait, msg)
-          sawQuota = true
-          const resetHere = Date.now() + wait
-          quotaResetAt = quotaResetAt === 0 ? resetHere : Math.min(quotaResetAt, resetHere)
-          console.warn(
-            `[ai:provider] gemini image quota exhausted on ${keyFingerprint(key)} via ${model} — parked ${(wait / 3600000).toFixed(1)}h, trying next model/key`,
-          )
-          continue
-        }
-        if (e instanceof AuthError) {
-          parkImageKey(key, AUTH_COOLDOWN_MS, msg)
-          sawAuth = true
-          console.warn(
-            `[ai:provider] gemini key rejected for images (${keyFingerprint(key)}) — parked 10 min`,
-          )
+      if (e instanceof AuthError) {
+        parkImageKey(key, AUTH_COOLDOWN_MS, msg, 'auth')
+        sawAuth = true
+        break
+      }
+      if (e instanceof CreditsError) {
+        parkImageKey(key, 15 * 60 * 1000, msg, 'credits')
+        sawCredits = true
+        break
+      }
+      if (e instanceof MarkerError && msg.startsWith('MODEL_404:')) {
+        sawModel404 = true
+        continue // next fallback model
+      }
+      if (e instanceof MarkerError && (msg.startsWith('PROVIDER_ERROR:') || msg.startsWith('NO_IMAGE'))) {
+        if (msg.startsWith('PROVIDER_ERROR:') && /safety|blocked|policy/i.test(msg)) {
+          sawBlock = msg.replace('PROVIDER_ERROR:', '').slice(0, 60)
           break
         }
-        if (msg.startsWith('BLOCKED:')) {
-          sawBlock = msg.slice('BLOCKED:'.length, 60)
-          break // safety-blocked → other models won't help
-        }
-        if (msg.startsWith('MODEL_404:') || msg.startsWith('BAD_REQUEST:')) {
-          if (msg.startsWith('BAD_REQUEST:') && /modalit/i.test(msg)) {
-            // Model rejects IMAGE-only modality — retry once with TEXT+IMAGE.
-            try {
-              const r = await geminiImageRequestOnce(key, model, parts, timeoutMs, ['TEXT', 'IMAGE'])
-              return { base64: r.base64, mimeType: r.mimeType, via: `gemini:${model}` }
-            } catch (e2) {
-              const msg2 = e2 instanceof Error ? e2.message : String(e2)
-              lastDetail = msg2.slice(0, 300)
-              if (e2 instanceof RateError) {
-                const secs = parseRetryDelaySeconds(msg2) ?? 300
-                const wait = Math.min(Math.max(secs, 60), 26 * 3600) * 1000
-                parkImageModel(key, model, wait, msg2)
-                sawQuota = true
-                const resetHere = Date.now() + wait
-                quotaResetAt = quotaResetAt === 0 ? resetHere : Math.min(quotaResetAt, resetHere)
-                continue
-              }
-              continue // next model
-            }
-          }
-          continue // next model
-        }
-        // Transient HTTP / network error → next model, then next key.
-        continue
+        sawBlock = msg.slice(0, 80)
+        continue // next fallback model
       }
+      // Transient HTTP / network error → next fallback model.
+      continue
     }
   }
 
-  if (sawZeroFreeTier) {
+  if (sawCredits) {
     throw new AiError(
-      'گوگل سهمیهٔ رایگان API ساخت تصویر را روی این پروژه صفر کرده است (limit: 0) — منتظر ریست روزانه ماندن فایده ندارد. راه‌حل: با یک حساب گوگل دیگر وارد aistudio.google.com شوید، پروژهٔ تازه بسازید و کلید آن را در پنل ذخیره کنید، یا صورت‌حساب همان پروژه را فعال کنید',
-    )
-  }
-  if (sawQuota) {
-    // Tell the seller EXACTLY when the quota resets (Google's own retry delay),
-    // formatted in Iran local time — not a vague "tomorrow morning".
-    let when = ''
-    try {
-      if (quotaResetAt > Date.now()) {
-        when = new Intl.DateTimeFormat('fa-IR', {
-          timeZone: 'Asia/Tehran',
-          hour: '2-digit',
-          minute: '2-digit',
-        }).format(new Date(quotaResetAt))
-      }
-    } catch {
-      when = ''
-    }
-    const resetLine = when
-      ? `حدود ساعت ${when} به وقت ایران دوباره امتحان کنید`
-      : 'کمی بعد دوباره امتحان کنید (سهمیهٔ روزانه شبانه بازنشانی می‌شود)'
-    throw new AiError(
-      `سهمیهٔ رایگان تصویر جمنای برای امروز تمام شده است — ${resetLine}، یا در پنل کلید جمنای دیگری اضافه کنید (سهمیه به ازای هر پروژهٔ گوگل جداگانه است؛ کلید تازه باید از پروژهٔ دیگری ساخته شود نه همان پروژه قبلی)`,
+      'اعتبار حساب OpenRouter تمام شده است — از openrouter.ai/credits حساب را شارژ کنید (تصویرسازی بر اساس مصرف از اعتبار کم می‌شود، دیگر سهمیهٔ صفر روزانه وجود ندارد)',
     )
   }
   if (sawAuth) {
-    throw new AiError('کلید جمنای برای تصویر پذیرفته نشد — کلید را در تنظیمات پنل بررسی کنید')
+    throw new AiError('کلید OpenRouter برای تصویر پذیرفته نشد — درست بودن کلید را در تنظیمات پنل بررسی کنید')
+  }
+  if (sawQuota) {
+    const when = quotaResetAt > Date.now() ? formatTehranClock(quotaResetAt) : ''
+    throw new AiError(
+      when
+        ? `نرخ مدل تصویر فعلاً محدود شده است — حدود ساعت ${when} به وقت ایران دوباره امتحان کنید، یا مدل تصویر دیگری در تنظیمات پنل بگذارید`
+        : 'نرخ مدل تصویر فعلاً محدود شده است — کمی بعد دوباره امتحان کنید، یا مدل تصویر دیگری در تنظیمات پنل بگذارید',
+    )
+  }
+  if (sawModel404) {
+    throw new AiError(
+      'مدل تصویر در OpenRouter پیدا نشد — نام مدل را در تنظیمات پنل بررسی کنید (مثال درست: google/gemini-nano-banana-2.1)',
+    )
   }
   if (sawBlock) {
     throw new AiError(
-      'جمنای این درخواست را به دلایل سیاست محتوا رد کرد — تصویر یا توضیح را کمی تغییر دهید و دوباره امتحان کنید',
+      'مدل تصویری برنگرداند — توضیح پس‌زمینه یا عکس ورودی را کمی تغییر دهید و دوباره امتحان کنید',
     )
   }
   if (lastDetail.includes('aborted') || lastDetail.includes('timeout')) {
@@ -1081,31 +976,122 @@ async function runGeminiImage(
   throw new AiError('تولید تصویر ناموفق بود — لطفاً کمی بعد دوباره تلاش کنید')
 }
 
-/** Text → image on the seller's own Gemini. */
-export async function geminiImageGenerate(
+function formatTehranClock(ms: number): string {
+  try {
+    return new Intl.DateTimeFormat('fa-IR', {
+      timeZone: 'Asia/Tehran',
+      hour: '2-digit',
+      minute: '2-digit',
+    }).format(new Date(ms))
+  } catch {
+    return ''
+  }
+}
+
+/** Text → image on the seller's own OpenRouter credit balance. */
+export async function openRouterImageGenerate(
   prompt: string,
   timeoutMs = 150_000,
-): Promise<GeminiImageResult> {
-  return runGeminiImage([{ text: prompt }], timeoutMs)
+): Promise<OpenRouterImageResult> {
+  return runOpenRouterImage(prompt, [], timeoutMs)
 }
 
 /**
  * Image editing (studio cutout / background composition) on the seller's own
- * Gemini. `dataUrls` holds 1–3 data URLs: the first is always the PRODUCT
+ * OpenRouter. `dataUrls` holds 1–3 data URLs: the first is always the PRODUCT
  * photo; optional extra images (custom background reference) follow.
  */
-export async function geminiImageEdit(
+export async function openRouterImageEdit(
   prompt: string,
   dataUrls: string[],
   timeoutMs = 150_000,
-): Promise<GeminiImageResult> {
-  const parts: GeminiPart[] = [{ text: prompt }]
+): Promise<OpenRouterImageResult> {
+  const refs: string[] = []
   for (const dataUrl of dataUrls.slice(0, 3)) {
-    const m = dataUrl.match(/^data:([^;]+);base64,([\s\S]+)$/)
-    if (!m) throw new AiError('قالب تصویر ورودی معتبر نیست')
-    parts.push({ inlineData: { mimeType: m[1], data: m[2] } })
+    if (!/^data:[^;]+;base64,[\s\S]+$/.test(dataUrl)) {
+      throw new AiError('قالب تصویر ورودی معتبر نیست')
+    }
+    refs.push(dataUrl)
   }
-  return runGeminiImage(parts, timeoutMs)
+  return runOpenRouterImage(prompt, refs, timeoutMs)
+}
+
+// ─── Panel status (admin «وضعیت OpenRouter» box) ─────────────────────────────
+
+export type OpenRouterAccount = {
+  label: string | null
+  isFreeTier: boolean
+  usage: number | null
+  limit: number | null
+  limitRemaining: number | null
+}
+
+export type OpenRouterKeyStatus = {
+  keyConfigured: boolean
+  source: 'env' | 'panel' | 'none'
+  fingerprint: string | null
+  parkedUntil: number | null
+  parkKind: 'quota' | 'auth' | 'credits' | 'model' | null
+  parkReason: string | null
+  textModel: string
+  imageModel: string
+}
+
+/**
+ * Live status for the panel's self-service OpenRouter manager: masked key
+ * fingerprint + whether the image pipeline is currently parked (and why).
+ */
+export async function openRouterKeyStatus(): Promise<OpenRouterKeyStatus> {
+  const env = openRouterEnvKey()
+  const panel = await openRouterSettingKey()
+  const key = env || panel
+  const { text, image } = await resolveAiModels()
+  const park = key ? imageKeyPark(key) : null
+  return {
+    keyConfigured: Boolean(key),
+    source: env ? 'env' : panel ? 'panel' : 'none',
+    fingerprint: key ? keyFingerprint(key) : null,
+    parkedUntil: park && Date.now() < park.blockedUntil ? park.blockedUntil : null,
+    parkKind: park ? park.kind : null,
+    parkReason: park ? park.reason.slice(0, 200) : null,
+    textModel: text,
+    imageModel: image,
+  }
+}
+
+/**
+ * Best-effort credit balance lookup (GET /api/v1/key). Never throws — the
+ * panel degrades to "وضعیت حساب در دسترس نیست" when OpenRouter is unreachable.
+ */
+export async function openRouterAccountInfo(): Promise<OpenRouterAccount | null> {
+  const key = await resolveOpenRouterKey()
+  if (!key) return null
+  try {
+    const res = await fetch(`${OPENROUTER_API_BASE}/key`, {
+      headers: { Authorization: `Bearer ${key}` },
+      signal: AbortSignal.timeout(8000),
+    })
+    if (!res.ok) return null
+    const j = (await res.json()) as {
+      data?: {
+        label?: string
+        limit?: number | null
+        usage?: number
+        limit_remaining?: number | null
+        is_free_tier?: boolean
+      }
+    }
+    if (!j.data) return null
+    return {
+      label: j.data.label ?? null,
+      isFreeTier: Boolean(j.data.is_free_tier),
+      usage: typeof j.data.usage === 'number' ? j.data.usage : null,
+      limit: j.data.limit ?? null,
+      limitRemaining: j.data.limit_remaining ?? null,
+    }
+  } catch {
+    return null
+  }
 }
 
 // ─── Shared retry with 429-aware backoff (provider B leg) ────────────────────

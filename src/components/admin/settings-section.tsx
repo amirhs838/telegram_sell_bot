@@ -53,15 +53,32 @@ import {
   renderWelcomeTemplate,
 } from '@/lib/bot-templates'
 
-type AiKeyStatus = { keySource: 'env' | 'panel' | 'none'; geminiKeySource: 'env' | 'panel' | 'none' }
+type AiKeyStatus = {
+  keySource: 'env' | 'panel' | 'none'
+  openRouterKeySource: 'env' | 'panel' | 'none'
+  textModel: string
+  imageModel: string
+}
 
-/** One masked Gemini key + its live image-tier state (from /api/ai/gemini-keys). */
-type GeminiKeyRow = {
-  fingerprint: string
-  source: 'env' | 'panel' | 'env+panel'
-  parked: boolean
-  parkKind: 'quota' | 'auth' | null
+/** Live OpenRouter status from /api/ai/openrouter-status. */
+type OpenRouterStatus = {
+  keyConfigured: boolean
+  source: 'env' | 'panel' | 'none'
+  fingerprint: string | null
+  parkedUntil: number | null
+  parkKind: 'quota' | 'auth' | 'credits' | 'model' | null
+  parkReason: string | null
+  textModel: string
+  imageModel: string
+  ready: boolean
   parkedUntilTehran: string | null
+  account: {
+    label: string | null
+    isFreeTier: boolean
+    usage: number | null
+    limit: number | null
+    limitRemaining: number | null
+  } | null
 }
 type SettingsResp = { settings: Settings; telegram: TelegramInfo; ai: AiKeyStatus }
 
@@ -653,8 +670,10 @@ function PaymentDestinationsCard() {
 }
 
 // ---------------------------------------------------------------------------
-// 3) AI sales assistant
+// 3) AI sales assistant — OpenRouter (owner-requested primary provider)
 // ---------------------------------------------------------------------------
+
+const MODEL_SLUG_RE = /^[a-zA-Z0-9._/-]+(:[a-zA-Z0-9._-]+)?$/
 
 function AiAssistantCard({
   settings,
@@ -667,48 +686,63 @@ function AiAssistantCard({
 }) {
   const [aiEnabled, setAiEnabled] = useState(Boolean(settings.aiEnabled))
   const [aiTone, setAiTone] = useState(settings.aiTone ?? '')
-  const [apiKey, setApiKey] = useState('')
-  const [geminiKey, setGeminiKey] = useState('')
+  const [orKey, setOrKey] = useState('')
+  const [zaiKey, setZaiKey] = useState('')
+  const [textModel, setTextModel] = useState(ai.textModel)
+  const [imageModel, setImageModel] = useState(ai.imageModel)
   const [testing, setTesting] = useState(false)
   const [saving, setSaving] = useState(false)
 
-  // Live per-key status for the self-service Gemini key manager (masked).
-  const [keyRows, setKeyRows] = useState<GeminiKeyRow[] | null>(null)
-  const [loadingKeys, setLoadingKeys] = useState(false)
+  // Live OpenRouter status (masked key fingerprint + credit balance + park state).
+  const [orStatus, setOrStatus] = useState<OpenRouterStatus | null>(null)
+  const [loadingStatus, setLoadingStatus] = useState(false)
 
-  const loadKeyStatus = useCallback(async () => {
-    setLoadingKeys(true)
+  const loadStatus = useCallback(async () => {
+    setLoadingStatus(true)
     try {
-      const res = await api<{ count: number; keys: GeminiKeyRow[] }>('/api/ai/gemini-keys')
-      setKeyRows(res.keys)
+      const res = await api<OpenRouterStatus>('/api/ai/openrouter-status')
+      setOrStatus(res)
     } catch {
-      setKeyRows(null)
+      setOrStatus(null)
     } finally {
-      setLoadingKeys(false)
+      setLoadingStatus(false)
     }
   }, [])
 
   useEffect(() => {
-    void loadKeyStatus()
-  }, [loadKeyStatus])
+    void loadStatus()
+  }, [loadStatus])
 
   // re-sync when settings reload from the server
   useEffect(() => {
     setAiEnabled(Boolean(settings.aiEnabled))
     setAiTone(settings.aiTone ?? '')
-  }, [settings])
+    setTextModel(ai.textModel)
+    setImageModel(ai.imageModel)
+  }, [settings, ai])
 
-  async function save(clearKey = false, clearGemini = false) {
+  function validateModel(label: string, value: string): boolean {
+    const t = value.trim()
+    if (t && !MODEL_SLUG_RE.test(t)) {
+      toast.error(`${label}: قالب نام مدل درست نیست — مثال: vendor/model-name`)
+      return false
+    }
+    return true
+  }
+
+  async function save(opts: { clearZai?: boolean; clearOpenRouter?: boolean } = {}) {
+    const { clearZai, clearOpenRouter } = opts
     if (aiTone.length > 1000) {
       toast.error('متن لحن دستیار حداکثر ۱۰۰۰ کاراکتر است')
       return
     }
-    if (!clearKey && apiKey.trim() && apiKey.trim().length < 20) {
-      toast.error('کلید واردشده کوتاه به نظر می‌رسد')
+    if (!validateModel('مدل متن', textModel) || !validateModel('مدل تصویر', imageModel)) return
+    if (orKey.trim() && orKey.trim().length < 20) {
+      toast.error('کلید OpenRouter واردشده کوتاه به نظر می‌رسد')
       return
     }
-    if (!clearGemini && geminiKey.trim() && geminiKey.trim().length < 20) {
-      toast.error('کلید جمنای واردشده کوتاه به نظر می‌رسد')
+    if (zaiKey.trim() && zaiKey.trim().length < 20) {
+      toast.error('کلید Z.ai واردشده کوتاه به نظر می‌رسد')
       return
     }
     setSaving(true)
@@ -718,17 +752,19 @@ function AiAssistantCard({
         body: JSON.stringify({
           aiEnabled,
           aiTone: aiTone.trim() || undefined,
-          ...(apiKey.trim() ? { zaiApiKey: apiKey.trim() } : {}),
-          ...(clearKey ? { zaiApiKeyClear: true } : {}),
-          ...(geminiKey.trim() ? { geminiApiKey: geminiKey.trim() } : {}),
-          ...(clearGemini ? { geminiApiKeyClear: true } : {}),
+          aiTextModel: textModel.trim(),
+          aiImageModel: imageModel.trim(),
+          ...(orKey.trim() ? { openRouterApiKey: orKey.trim() } : {}),
+          ...(clearOpenRouter ? { openRouterApiKeyClear: true } : {}),
+          ...(zaiKey.trim() ? { zaiApiKey: zaiKey.trim() } : {}),
+          ...(clearZai ? { zaiApiKeyClear: true } : {}),
         }),
       })
-      toast.success(clearKey || clearGemini ? 'کلید حذف شد' : 'تنظیمات دستیار ذخیره شد')
-      if (!clearKey) setApiKey('')
-      if (!clearGemini) setGeminiKey('')
+      toast.success(clearZai || clearOpenRouter ? 'کلید حذف شد' : 'تنظیمات دستیار ذخیره شد')
+      if (!clearOpenRouter) setOrKey('')
+      if (!clearZai) setZaiKey('')
       onSaved()
-      if (clearKey || clearGemini || geminiKey.trim()) void loadKeyStatus()
+      void loadStatus()
     } catch (err) {
       toast.error((err as Error).message)
     } finally {
@@ -744,20 +780,20 @@ function AiAssistantCard({
         via?: string
         latencyMs?: number
         error?: string
-        gemini?: { ok: boolean; error?: string; latencyMs?: number }
+        openrouter?: { ok: boolean; error?: string; latencyMs?: number }
       }>('/api/ai/test-key', { method: 'POST' })
-      // Gemini-specific result first — a broken Gemini key must never hide
+      // OpenRouter-specific result first — a broken key/model must never hide
       // behind a lower-tier success.
-      if (res.gemini && !res.gemini.ok) {
-        if (res.gemini.error === 'کلید جمنای تنظیم نشده است') {
-          toast.warning('کلید جمنای ثبت نشده است — دستیار با گزینه‌های جایگزین کار می‌کند.')
+      if (res.openrouter && !res.openrouter.ok) {
+        if (res.openrouter.error === 'کلید OpenRouter تنظیم نشده است') {
+          toast.warning('کلید OpenRouter ثبت نشده است — دستیار با گزینه‌های جایگزین کار می‌کند.')
         } else {
-          toast.error(`کلید جمنای کار نمی‌کند: ${res.gemini.error ?? 'خطای نامشخص'}`)
+          toast.error(`OpenRouter کار نمی‌کند: ${res.openrouter.error ?? 'خطای نامشخص'}`)
         }
       } else if (res.ok) {
         const viaLabel =
-          res.via === 'gemini'
-            ? 'گوگل جمنای'
+          res.via === 'openrouter'
+            ? 'OpenRouter'
             : res.via === 'user-key'
               ? 'کلید اختصاصی Z.ai'
               : res.via === 'platform'
@@ -776,10 +812,10 @@ function AiAssistantCard({
     }
   }
 
-  const keyBadge =
-    ai.keySource === 'env' ? (
+  const orBadge =
+    ai.openRouterKeySource === 'env' ? (
       <Badge className="bg-emerald-100 text-emerald-800 hover:bg-emerald-100">کلید از فایل سرور</Badge>
-    ) : ai.keySource === 'panel' ? (
+    ) : ai.openRouterKeySource === 'panel' ? (
       <Badge className="bg-emerald-100 text-emerald-800 hover:bg-emerald-100">کلید متصل است</Badge>
     ) : (
       <Badge variant="outline" className="border-amber-300 text-amber-700">
@@ -787,14 +823,14 @@ function AiAssistantCard({
       </Badge>
     )
 
-  const geminiBadge =
-    ai.geminiKeySource === 'env' ? (
+  const zaiBadge =
+    ai.keySource === 'env' ? (
       <Badge className="bg-emerald-100 text-emerald-800 hover:bg-emerald-100">کلید از فایل سرور</Badge>
-    ) : ai.geminiKeySource === 'panel' ? (
+    ) : ai.keySource === 'panel' ? (
       <Badge className="bg-emerald-100 text-emerald-800 hover:bg-emerald-100">کلید متصل است</Badge>
     ) : (
       <Badge variant="outline" className="border-amber-300 text-amber-700">
-        بدون کلید
+        بدون کلید — حالت محدود
       </Badge>
     )
 
@@ -807,54 +843,57 @@ function AiAssistantCard({
         </CardTitle>
       </CardHeader>
       <CardContent className="space-y-4">
-        {/* Gemini key — Tier A: the owner-requested default brain of the sales assistant
-            + the engine of the image studio. Self-service: the owner pastes/rotates keys here. */}
+        {/* OpenRouter — owner-requested primary provider: ONE key + TWO models.
+            Self-service: the owner pastes the key and sets model names here. */}
         <div className="space-y-2 rounded-xl border-2 border-emerald-200 bg-emerald-50/40 p-3">
           <div className="flex items-center justify-between gap-2">
-            <Label htmlFor="gemini-key" className="text-sm font-medium">
-              کلید جمنای (Gemini) — دستیار فروش و استودیوی تصویر
+            <Label htmlFor="or-key" className="text-sm font-medium">
+              کلید OpenRouter — دستیار فروش و استودیوی تصویر
             </Label>
-            {geminiBadge}
+            {orBadge}
           </div>
           <p className="text-xs leading-5 text-muted-foreground">
-            کلید رایگان از{' '}
+            از{' '}
             <a
-              href="https://aistudio.google.com/apikey"
+              href="https://openrouter.ai/settings/keys"
               target="_blank"
               rel="noopener noreferrer"
               className="font-medium text-emerald-700 underline underline-offset-2"
               dir="ltr"
             >
-              aistudio.google.com/apikey
+              openrouter.ai/settings/keys
             </a>{' '}
-            بگیرید: روی «Create API key» بزنید، کلید را کپی کنید و همین‌جا بچسبانید و «ذخیره» را
-            بزنید. هر وقت خواستید عوضش کنید، کلید جدید را بچسبانید و ذخیره کنید — بدون نیاز به
-            هیچ کار فنی دیگر.
+            یک کلید بسازید (دکمهٔ «Create Key»)، کپی کنید، همین‌جا بچسبانید و «ذخیره» را بزنید.
+            برای کارکرد پایدار، اعتبار حساب را در{' '}
+            <a
+              href="https://openrouter.ai/credits"
+              target="_blank"
+              rel="noopener noreferrer"
+              className="font-medium text-emerald-700 underline underline-offset-2"
+              dir="ltr"
+            >
+              openrouter.ai/credits
+            </a>{' '}
+            شارژ کنید — هزینه بر اساس مصرف محاسبه می‌شود و دیگر خبری از سهمیهٔ صفر روزانهٔ گوگل
+            نیست.
           </p>
-          <p className="rounded-lg bg-emerald-100/60 px-2.5 py-1.5 text-xs leading-5 text-emerald-900">
-            برای سهمیهٔ بیشتر: سهمیهٔ رایگان به ازای هر «پروژهٔ گوگل» است، نه هر کلید. اگر کلید
-            جدید را در همان پروژهٔ قبلی بسازید سهمیه اضافه نمی‌شود — باید با حساب گوگل دیگری
-            پروژهٔ تازه بسازید و کلید آن را همین‌جا اضافه کنید (هر کلید در یک خط جدید یا با کاما؛
-            سیستم خودکار بین‌شان می‌چرخد). استفاده از تصویرساز داخل خود سایت AI Studio هم از همین
-            سهمیه مصرف می‌کند. سهمیهٔ روزانه هم حدود ساعت ۱۱:۳۰ صبح به وقت ایران ریست می‌شود.
-          </p>
-          <Textarea
-            id="gemini-key"
+          <Input
+            id="or-key"
+            type="password"
             dir="ltr"
-            rows={3}
+            className="text-left font-mono text-xs"
             autoComplete="off"
             spellCheck={false}
-            className="min-h-[76px] font-mono text-xs"
-            value={geminiKey}
-            onChange={(e) => setGeminiKey(e.target.value)}
+            value={orKey}
+            onChange={(e) => setOrKey(e.target.value)}
             placeholder={
-              ai.geminiKeySource === 'none'
-                ? 'AQ.Ab8RN6...\n(هر خط یک کلید — چند کلید = چند برابر سهمیه)'
+              ai.openRouterKeySource === 'none'
+                ? 'sk-or-v1-…'
                 : '•••••••• (برای تغییر، کلید جدید را اینجا بچسبانید و ذخیره بزنید)'
             }
           />
           <div className="flex flex-col gap-2 sm:flex-row">
-            <Button onClick={() => save(false, false)} disabled={saving} className="sm:w-auto">
+            <Button onClick={() => save()} disabled={saving} className="sm:w-auto">
               {saving && <Loader2 className="size-4 animate-spin" aria-hidden />}
               ذخیره
             </Button>
@@ -863,34 +902,34 @@ function AiAssistantCard({
               تست اتصال
             </Button>
           </div>
-          {ai.geminiKeySource === 'panel' && (
+          {ai.openRouterKeySource === 'panel' && (
             <Button
               variant="ghost"
               size="sm"
               className="h-8 text-destructive hover:text-destructive"
-              onClick={() => save(false, true)}
+              onClick={() => save({ clearOpenRouter: true })}
               disabled={saving}
             >
               <Trash2 className="size-3.5" aria-hidden />
-              حذف کلیدهای پنل
+              حذف کلید پنل
             </Button>
           )}
 
-          {/* live key status — self-service diagnostics (owner request) */}
+          {/* live status — self-service diagnostics (owner request) */}
           <div className="rounded-lg border bg-white/60 p-2.5">
             <div className="mb-1.5 flex items-center justify-between gap-2">
               <span className="flex items-center gap-1.5 text-xs font-medium text-muted-foreground">
                 <KeyRound className="size-3.5" aria-hidden />
-                وضعیت کلیدها برای ساخت تصویر
+                وضعیت اتصال و اعتبار حساب
               </span>
               <Button
                 variant="ghost"
                 size="sm"
                 className="h-7 px-2 text-xs"
-                onClick={() => void loadKeyStatus()}
-                disabled={loadingKeys}
+                onClick={() => void loadStatus()}
+                disabled={loadingStatus}
               >
-                {loadingKeys ? (
+                {loadingStatus ? (
                   <Loader2 className="size-3.5 animate-spin" aria-hidden />
                 ) : (
                   <RotateCcw className="size-3.5" aria-hidden />
@@ -898,57 +937,136 @@ function AiAssistantCard({
                 به‌روزرسانی
               </Button>
             </div>
-            {!keyRows && (
-              <p className="text-xs text-muted-foreground">وضعیت کلیدها در دسترس نیست.</p>
+            {!orStatus && (
+              <p className="text-xs text-muted-foreground">وضعیت در دسترس نیست.</p>
             )}
-            {keyRows && keyRows.length === 0 && (
+            {orStatus && !orStatus.keyConfigured && (
               <p className="text-xs text-muted-foreground">
-                هنوز کلیدی ثبت نشده است — یک کلید بچسبانید و ذخیره کنید تا همین‌جا دیده شود.
+                هنوز کلیدی ثبت نشده است — کلید را بچسبانید و ذخیره کنید تا همین‌جا دیده شود.
               </p>
             )}
-            {keyRows && keyRows.length > 0 && (
+            {orStatus && orStatus.keyConfigured && (
               <ul className="space-y-1.5">
-                {keyRows.map((k) => (
-                  <li key={k.fingerprint} className="flex flex-wrap items-center gap-1.5 text-xs">
-                    <code dir="ltr" className="rounded bg-muted px-1.5 py-0.5 font-mono text-[11px]">
-                      {k.fingerprint}
-                    </code>
-                    <Badge variant="outline" className="h-5 px-1.5 text-[10px]">
-                      {k.source === 'env' ? 'فایل سرور' : k.source === 'env+panel' ? 'سرور + پنل' : 'پنل'}
+                <li className="flex flex-wrap items-center gap-1.5 text-xs">
+                  <code dir="ltr" className="rounded bg-muted px-1.5 py-0.5 font-mono text-[11px]">
+                    {orStatus.fingerprint}
+                  </code>
+                  <Badge variant="outline" className="h-5 px-1.5 text-[10px]">
+                    {orStatus.source === 'env' ? 'فایل سرور' : 'پنل'}
+                  </Badge>
+                  {orStatus.parkKind === 'auth' && orStatus.parkedUntil ? (
+                    <Badge className="h-5 bg-red-100 text-red-800 hover:bg-red-100">
+                      کلید پذیرفته نشد — درست بودن کلید را چک کنید
                     </Badge>
-                    {k.parked && k.parkKind === 'auth' ? (
-                      <Badge className="h-5 bg-red-100 text-red-800 hover:bg-red-100">
-                        کلید پذیرفته نشد — درست بودن کلید را چک کنید
+                  ) : orStatus.parkKind === 'credits' && orStatus.parkedUntil ? (
+                    <Badge className="h-5 bg-amber-100 text-amber-900 hover:bg-amber-100">
+                      اعتبار حساب تمام شده — از openrouter.ai/credits شارژ کنید
+                    </Badge>
+                  ) : orStatus.parkKind === 'model' && orStatus.parkedUntil ? (
+                    <Badge className="h-5 bg-amber-100 text-amber-900 hover:bg-amber-100">
+                      مدل تصویر در دسترس نیست — نام مدل را در تنظیمات چک کنید
+                    </Badge>
+                  ) : orStatus.parkedUntil ? (
+                    <Badge className="h-5 bg-amber-100 text-amber-900 hover:bg-amber-100">
+                      نرخ مدل تصویر موقتاً محدود شده
+                      {orStatus.parkedUntilTehran
+                        ? ` — حدود ساعت ${orStatus.parkedUntilTehran} دوباره آماده می‌شود`
+                        : ''}
+                    </Badge>
+                  ) : (
+                    <Badge className="h-5 bg-emerald-100 text-emerald-800 hover:bg-emerald-100">آماده</Badge>
+                  )}
+                </li>
+                <li className="text-xs">
+                  {orStatus.account ? (
+                    <span className="flex flex-wrap items-center gap-1.5">
+                      <span className="text-muted-foreground">اعتبار حساب:</span>
+                      <Badge variant="outline" className="h-5 px-1.5 font-mono text-[10px]" dir="ltr">
+                        {orStatus.account.usage !== null
+                          ? `$${orStatus.account.usage.toFixed(2)} used`
+                          : '—'}
+                        {orStatus.account.limit !== null
+                          ? ` / $${orStatus.account.limit.toFixed(2)}`
+                          : ' / no limit'}
                       </Badge>
-                    ) : k.parked ? (
-                      <Badge className="h-5 bg-amber-100 text-amber-900 hover:bg-amber-100">
-                        سهمیهٔ تصویر پر است
-                        {k.parkedUntilTehran ? ` — حدود ساعت ${k.parkedUntilTehran} دوباره آماده می‌شود` : ''}
-                      </Badge>
-                    ) : (
-                      <Badge className="h-5 bg-emerald-100 text-emerald-800 hover:bg-emerald-100">آماده</Badge>
-                    )}
-                  </li>
-                ))}
-                <li className="pt-0.5 text-[11px] leading-4 text-muted-foreground">
-                  {fmtNumber(keyRows.filter((k) => !k.parked).length)} کلید آماده — سهمیهٔ روزانهٔ تصویر، جمعِ همهٔ کلیدهای آماده است.
+                      {orStatus.account.isFreeTier && (
+                        <Badge variant="outline" className="h-5 px-1.5 text-[10px]">
+                          حساب رایگان
+                        </Badge>
+                      )}
+                    </span>
+                  ) : (
+                    <span className="text-[11px] leading-4 text-muted-foreground">
+                      وضعیت حساب از OpenRouter در دسترس نیست — بعد از ذخیرهٔ کلید دوباره امتحان کنید.
+                    </span>
+                  )}
                 </li>
               </ul>
             )}
           </div>
         </div>
 
-        {/* Z.ai key — Tier B alternative when no Gemini key is configured */}
+        {/* Two configurable models — text (sales assistant + RAG) and image (studio). */}
+        <div className="space-y-3 rounded-xl border bg-muted/30 p-3">
+          <div className="space-y-1.5">
+            <Label htmlFor="ai-text-model" className="text-sm font-medium">
+              مدل متن — پاسخ‌گویی دستیار فروش و جست‌وجوی هوشمند
+            </Label>
+            <Input
+              id="ai-text-model"
+              dir="ltr"
+              className="text-left font-mono text-xs"
+              autoComplete="off"
+              spellCheck={false}
+              value={textModel}
+              onChange={(e) => setTextModel(e.target.value)}
+              placeholder="openai/gpt-4o-mini"
+            />
+            <p className="text-xs leading-5 text-muted-foreground">
+              هر مدلی از OpenRouter را می‌توانید بگذارید؛ مثال:{' '}
+              <code dir="ltr" className="font-mono">openai/gpt-4o-mini</code>،{' '}
+              <code dir="ltr" className="font-mono">google/gemini-2.5-flash</code>،{' '}
+              <code dir="ltr" className="font-mono">deepseek/deepseek-chat-v3-0324:free</code>{' '}
+              (رایگان). خالی بگذارید = پیش‌فرض.
+            </p>
+          </div>
+          <div className="space-y-1.5">
+            <Label htmlFor="ai-image-model" className="text-sm font-medium">
+              مدل تصویر — استودیوی عکس محصول (جداسازی سوژه و پس‌زمینهٔ استودیویی)
+            </Label>
+            <Input
+              id="ai-image-model"
+              dir="ltr"
+              className="text-left font-mono text-xs"
+              autoComplete="off"
+              spellCheck={false}
+              value={imageModel}
+              onChange={(e) => setImageModel(e.target.value)}
+              placeholder="google/gemini-nano-banana-2.1"
+            />
+            <p className="text-xs leading-5 text-muted-foreground">
+              برای ویرایش عکس، مدل باید خروجی تصویر بدهد؛ مثال:{' '}
+              <code dir="ltr" className="font-mono">google/gemini-nano-banana-2.1</code>{' '}
+              (کیفیت ویرایش بالا)،{' '}
+              <code dir="ltr" className="font-mono">google/gemini-3.1-flash-image</code>{' '}
+              (اقتصادی‌تر)،{' '}
+              <code dir="ltr" className="font-mono">bytedance-seed/seedream-5-0-flash</code>. هر
+              رندر از اعتبار حساب شما کم می‌شود — بدون سقف روزانه.
+            </p>
+          </div>
+        </div>
+
+        {/* Z.ai key — Tier B fallback when OpenRouter is not configured */}
         <div className="space-y-2 rounded-xl border bg-muted/30 p-3">
           <div className="flex items-center justify-between gap-2">
             <Label htmlFor="ai-key" className="text-sm font-medium">
               کلید جایگزین Z.ai (اختیاری)
             </Label>
-            {keyBadge}
+            {zaiBadge}
           </div>
           <p className="text-xs leading-5 text-muted-foreground">
-            اگر کلید جمنای نداشته باشید، دستیار از این کلید استفاده می‌کند؛ بدون هیچ‌کدام، حالت
-            محدود (گیت‌وی رایگان) فعال می‌شود.
+            اگر کلید OpenRouter ثبت نشده باشد یا موقتاً کار نکند، دستیار از این کلید استفاده
+            می‌کند؛ بدون هیچ‌کدام، حالت محدود (گیت‌وی رایگان) فعال می‌شود.
           </p>
           <div className="flex flex-col gap-2 sm:flex-row">
             <Input
@@ -956,8 +1074,8 @@ function AiAssistantCard({
               type="password"
               dir="ltr"
               autoComplete="off"
-              value={apiKey}
-              onChange={(e) => setApiKey(e.target.value)}
+              value={zaiKey}
+              onChange={(e) => setZaiKey(e.target.value)}
               placeholder={
                 ai.keySource === 'none'
                   ? 'کلید Z.ai خود را اینجا بچسبانید'
@@ -965,7 +1083,7 @@ function AiAssistantCard({
               }
             />
             <div className="flex gap-2">
-              <Button onClick={() => save(false, false)} disabled={saving} className="sm:w-auto">
+              <Button onClick={() => save()} disabled={saving} className="sm:w-auto">
                 {saving && <Loader2 className="size-4 animate-spin" aria-hidden />}
                 ذخیره
               </Button>
@@ -976,7 +1094,7 @@ function AiAssistantCard({
               variant="ghost"
               size="sm"
               className="h-8 text-destructive hover:text-destructive"
-              onClick={() => save(true, false)}
+              onClick={() => save({ clearZai: true })}
               disabled={saving}
             >
               <Trash2 className="size-3.5" aria-hidden />
@@ -1022,7 +1140,7 @@ function AiAssistantCard({
           قواعد قطعی قیمت‌گذاری و تأیید پرداخت قابل تغییر نیستند.
         </p>
 
-        <Button onClick={() => save(false, false)} disabled={saving}>
+        <Button onClick={() => save()} disabled={saving}>
           {saving && <Loader2 className="size-4 animate-spin" aria-hidden />}
           ذخیره تنظیمات دستیار
         </Button>

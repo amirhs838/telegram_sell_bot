@@ -4,7 +4,7 @@ import { mkdir, readFile, writeFile } from 'node:fs/promises'
 import path from 'node:path'
 import { logEvent } from '@/lib/logger'
 import { AiError } from '@/lib/ai/client'
-import { geminiImageEdit } from '@/lib/ai/provider'
+import { openRouterImageEdit } from '@/lib/ai/provider'
 import { uploadDir } from '@/lib/upload-dir'
 
 /**
@@ -16,7 +16,7 @@ import { uploadDir } from '@/lib/upload-dir'
  *   • compose (one AI call)  composeStudioImage() → product placed on a preset
  *                             OR a fully custom seller-described background
  *
- * The compose step works straight from the RAW photo (one quota unit per
+ * The compose step works straight from the RAW photo (one billed render per
  * result); the cutout is optional when the seller wants an isolated subject.
  *
  * ABSOLUTE RULE (Master prompt §3): the AI must NEVER redesign the product.
@@ -203,13 +203,13 @@ No exaggerated glow, no artificial sparkles, no extra decorative props that hide
 ${PRESERVE_RULES}`
 }
 
-// ─── AI call (Gemini ONLY — the seller's own key) ────────────────────────────
+// ─── AI call (OpenRouter ONLY — the seller's own key + credit balance) ─────
 
 async function callImageEdit(prompt: string, dataUrls: string[]): Promise<Buffer> {
   try {
-    // Runs on Google Gemini's native image-editing models with the seller's
-    // own key(s). No other image provider is contacted (master directive).
-    const { base64 } = await geminiImageEdit(prompt, dataUrls, AI_TIMEOUT_MS)
+    // Runs on OpenRouter's image-output models with the seller's own key —
+    // billed per render from the credit balance, no daily free-quota roulette.
+    const { base64 } = await openRouterImageEdit(prompt, dataUrls, AI_TIMEOUT_MS)
     const raw = Buffer.from(base64, 'base64')
     return await normalizeOutput(raw)
   } catch (e) {
