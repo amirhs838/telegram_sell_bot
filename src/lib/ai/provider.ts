@@ -153,14 +153,24 @@ export async function geminiImageKeyStatuses(): Promise<GeminiKeyStatus[]> {
   const envKeys = splitGeminiKeys(geminiEnvKey())
   const panelKeys = splitGeminiKeys(await geminiSettingKey())
   const all = [...new Set([...envKeys, ...panelKeys])]
+  const modelList = imageModelCandidates()
   return all.map((key) => {
-    const park = imageKeyState.get(keyFingerprint(key)) ?? null
-    const active = park && Date.now() < park.blockedUntil ? park : null
-    const parkKind = active
-      ? /quota|resource_exhausted|rate|429/i.test(active.reason)
-        ? ('quota' as const)
-        : ('auth' as const)
-      : null
+    const authPark = imageKeyPark(key)
+    // Quota is per PROJECT per MODEL: the key is only truly stuck when every
+    // image model it can serve is parked. «Until» = the earliest moment any of
+    // its models becomes usable again.
+    const modelParks = modelList
+      .map((m) => imageModelPark(key, m))
+      .filter((p): p is ImageKeyState => p !== null)
+    let parkedUntil: number | null = null
+    let parkKind: 'quota' | 'auth' | null = null
+    if (authPark) {
+      parkedUntil = authPark.blockedUntil
+      parkKind = 'auth'
+    } else if (modelParks.length >= modelList.length) {
+      parkedUntil = Math.min(...modelParks.map((p) => p.blockedUntil))
+      parkKind = 'quota'
+    }
     return {
       fingerprint: keyFingerprint(key),
       source: envKeys.includes(key) && panelKeys.includes(key)
@@ -168,7 +178,7 @@ export async function geminiImageKeyStatuses(): Promise<GeminiKeyStatus[]> {
         : envKeys.includes(key)
           ? 'env'
           : 'panel',
-      parkedUntil: active ? active.blockedUntil : null,
+      parkedUntil,
       parkKind,
     }
   })
@@ -775,9 +785,11 @@ type GeminiGenerateResponse = {
   promptFeedback?: { blockReason?: string }
 }
 
-// Per-key image cooldown (survives HMR via globalThis). When a key hits its
-// daily image quota or auth fails, it is parked until retryDelay / cooldown so
-// the next request goes straight to a healthy key instead of burning seconds.
+// Image cooldowns (survive HMR via globalThis). Auth failures park the whole
+// key; quota (429) parks the KEY+MODEL pair — Google counts the free daily
+// image quota per PROJECT per MODEL, so one exhausted model must not blind us
+// to the other models the same key can still serve. Parking until Google's own
+// retryDelay means the next request goes straight to a healthy pair.
 type ImageKeyState = { blockedUntil: number; reason: string }
 const globalForImageKeys = globalThis as unknown as {
   __aiGeminiImageKeyState?: Map<string, ImageKeyState>
@@ -799,6 +811,35 @@ function parkImageKey(key: string, untilMs: number, reason: string) {
 function imageKeyPark(key: string): ImageKeyState | null {
   const st = imageKeyState.get(keyFingerprint(key)) ?? null
   return st && Date.now() < st.blockedUntil ? st : null
+}
+
+// Per KEY+MODEL quota parks: a 429 is scoped to one model's daily window.
+const globalForImageModels = globalThis as unknown as {
+  __aiGeminiImageModelState?: Map<string, ImageKeyState>
+}
+const imageModelState: Map<string, ImageKeyState> =
+  globalForImageModels.__aiGeminiImageModelState ??= new Map()
+
+function modelParkId(key: string, model: string): string {
+  return `${keyFingerprint(key)}|${model}`
+}
+
+function parkImageModel(key: string, model: string, untilMs: number, reason: string) {
+  imageModelState.set(modelParkId(key, model), {
+    blockedUntil: Date.now() + untilMs,
+    reason: reason.slice(0, 300),
+  })
+}
+
+function imageModelPark(key: string, model: string): ImageKeyState | null {
+  const st = imageModelState.get(modelParkId(key, model)) ?? null
+  return st && Date.now() < st.blockedUntil ? st : null
+}
+
+/** The image model chain: configured primary first, then known-good fallbacks. */
+function imageModelCandidates(): string[] {
+  const primary = geminiImageModel()
+  return [primary, ...GEMINI_IMAGE_MODEL_FALLBACKS.filter((m) => m !== primary)]
 }
 
 /** Extract "message" from a Google error JSON body (best-effort). */
@@ -898,8 +939,7 @@ async function runGeminiImage(
     )
   }
 
-  const primary = geminiImageModel()
-  const models = [primary, ...GEMINI_IMAGE_MODEL_FALLBACKS.filter((m) => m !== primary)]
+  const models = imageModelCandidates()
 
   let sawQuota = false
   let sawAuth = false
@@ -913,12 +953,22 @@ async function runGeminiImage(
     if (parked) {
       sawQuota = true // parked keys are parked for quota or auth
       lastDetail = parked.reason
+      quotaResetAt = quotaResetAt === 0 ? parked.blockedUntil : Math.min(quotaResetAt, parked.blockedUntil)
       continue
     }
     for (const model of models) {
+      // A 429 is scoped to key+model — skip only that pair, keep the key's
+      // other models usable.
+      const mPark = imageModelPark(key, model)
+      if (mPark) {
+        sawQuota = true
+        lastDetail = mPark.reason
+        quotaResetAt = quotaResetAt === 0 ? mPark.blockedUntil : Math.min(quotaResetAt, mPark.blockedUntil)
+        continue
+      }
       try {
         const r = await geminiImageRequestOnce(key, model, parts, timeoutMs)
-        imageKeyState.delete(keyFingerprint(key))
+        imageModelState.delete(modelParkId(key, model))
         console.log(`[ai:provider] gemini image OK via ${model}`)
         return { base64: r.base64, mimeType: r.mimeType, via: `gemini:${model}` }
       } catch (e) {
@@ -926,18 +976,19 @@ async function runGeminiImage(
         lastDetail = msg.slice(0, 300)
 
         if (e instanceof RateError) {
-          // Daily/minute quota exhausted for this key's project — park it and
-          // rotate to the next key. Google tells us the exact reset delay.
+          // Quota exhausted for THIS key+model — Google counts the free image
+          // quota per project per model, so park the pair (not the whole key)
+          // and try the next model: another model may still have allowance.
           const secs = parseRetryDelaySeconds(msg) ?? 300
           const wait = Math.min(Math.max(secs, 60), 26 * 3600) * 1000
-          parkImageKey(key, wait, msg)
+          parkImageModel(key, model, wait, msg)
           sawQuota = true
           const resetHere = Date.now() + wait
           quotaResetAt = quotaResetAt === 0 ? resetHere : Math.min(quotaResetAt, resetHere)
           console.warn(
-            `[ai:provider] gemini image quota exhausted on ${keyFingerprint(key)} — parked ${(wait / 3600000).toFixed(1)}h, trying next key`,
+            `[ai:provider] gemini image quota exhausted on ${keyFingerprint(key)} via ${model} — parked ${(wait / 3600000).toFixed(1)}h, trying next model/key`,
           )
-          break
+          continue
         }
         if (e instanceof AuthError) {
           parkImageKey(key, AUTH_COOLDOWN_MS, msg)
@@ -963,11 +1014,11 @@ async function runGeminiImage(
               if (e2 instanceof RateError) {
                 const secs = parseRetryDelaySeconds(msg2) ?? 300
                 const wait = Math.min(Math.max(secs, 60), 26 * 3600) * 1000
-                parkImageKey(key, wait, msg2)
+                parkImageModel(key, model, wait, msg2)
                 sawQuota = true
                 const resetHere = Date.now() + wait
                 quotaResetAt = quotaResetAt === 0 ? resetHere : Math.min(quotaResetAt, resetHere)
-                break
+                continue
               }
               continue // next model
             }
@@ -999,7 +1050,7 @@ async function runGeminiImage(
       ? `حدود ساعت ${when} به وقت ایران دوباره امتحان کنید`
       : 'کمی بعد دوباره امتحان کنید (سهمیهٔ روزانه شبانه بازنشانی می‌شود)'
     throw new AiError(
-      `سهمیهٔ رایگان تصویر جمنای برای امروز تمام شده است — ${resetLine}، یا کلید جمنای دیگری در تنظیمات اضافه کنید (چند کلید را با کاما جدا کنید تا سهمیه‌ها جمع شوند)`,
+      `سهمیهٔ رایگان تصویر جمنای برای امروز تمام شده است — ${resetLine}، یا در پنل کلید جمنای دیگری اضافه کنید (سهمیه به ازای هر پروژهٔ گوگل جداگانه است؛ کلید تازه باید از پروژهٔ دیگری ساخته شود نه همان پروژه قبلی)`,
     )
   }
   if (sawAuth) {
