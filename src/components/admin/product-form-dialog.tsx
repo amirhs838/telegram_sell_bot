@@ -162,6 +162,10 @@ export function ProductFormDialog({
   const [images, setImages] = useState<GalleryImage[]>([])
   const [specsOpen, setSpecsOpen] = useState(false)
   const [saving, setSaving] = useState(false)
+  // Live product-code duplicate warning: idle | checking | available | duplicate.
+  // The DB unique index stays the hard guarantee — this is only early UX.
+  const [codeState, setCodeState] = useState<'idle' | 'checking' | 'available' | 'duplicate'>('idle')
+  const codeSeqRef = useRef(0)
   const [roughInfo, setRoughInfo] = useState('')
   const [generating, setGenerating] = useState(false)
   const [suggestion, setSuggestion] = useState<AiSuggestion | null>(null)
@@ -214,8 +218,42 @@ export function ProductFormDialog({
       setRoughInfo('')
       setSpecsOpen(false)
       setPreviewUrl(null)
+      setCodeState('idle')
+      codeSeqRef.current += 1 // invalidate any in-flight duplicate check
     }
   }, [open, product])
+
+  // Debounced «کد تکراری» warning while the admin types the product code.
+  // The product's own unchanged code (edit mode) never triggers a warning.
+  useEffect(() => {
+    if (!open) return
+    const code = form.productCode.trim()
+    if (!code) {
+      setCodeState('idle')
+      return
+    }
+    if (product && code === (product.productCode ?? '').trim()) {
+      setCodeState('available')
+      return
+    }
+    setCodeState('checking')
+    const seq = ++codeSeqRef.current
+    const t = setTimeout(() => {
+      api<{ available: boolean }>(
+        `/api/products/check-code?code=${encodeURIComponent(code)}${
+          product ? `&excludeId=${encodeURIComponent(product.id)}` : ''
+        }`,
+      )
+        .then((r) => {
+          if (seq === codeSeqRef.current) setCodeState(r.available ? 'available' : 'duplicate')
+        })
+        .catch(() => {
+          // Endpoint hiccup → the server-side 422 stays the safety net on save.
+          if (seq === codeSeqRef.current) setCodeState('idle')
+        })
+    }, 450)
+    return () => clearTimeout(t)
+  }, [form.productCode, open, product])
 
   function set<K extends keyof FormState>(key: K, value: FormState[K]) {
     setForm((f) => ({ ...f, [key]: value }))
@@ -361,6 +399,15 @@ export function ProductFormDialog({
       toast.error('نام محصول الزامی است')
       return
     }
+    const productCode = form.productCode.trim()
+    if (!productCode) {
+      toast.error('کد محصول الزامی است — کد یکتای محصول را دستی وارد کنید')
+      return
+    }
+    if (codeState === 'duplicate') {
+      toast.error('کد محصول تکراری است — کد دیگری وارد کنید')
+      return
+    }
     const price = Number(form.price)
     if (!Number.isFinite(price) || price < 0) {
       toast.error('قیمت معتبر وارد کنید')
@@ -400,7 +447,7 @@ export function ProductFormDialog({
         sortOrder: i,
       })),
       // silver specs (null when empty)
-      productCode: form.productCode.trim() || null,
+      productCode,
       silverType: form.silverType.trim() || null,
       fineness,
       weightGrams,
@@ -492,6 +539,39 @@ export function ProductFormDialog({
                   ))}
                 </SelectContent>
               </Select>
+            </div>
+            {/* Product code — REQUIRED, admin-entered, globally unique.
+                The same code is displayed by the bot and the channel post. */}
+            <div className="space-y-1.5 md:col-span-2">
+              <Label htmlFor="p-code">کد محصول *</Label>
+              <Input
+                id="p-code"
+                dir="ltr"
+                className={cn(
+                  'text-left',
+                  codeState === 'duplicate' &&
+                    'border-destructive focus-visible:ring-destructive',
+                )}
+                value={form.productCode}
+                onChange={(e) => set('productCode', e.target.value)}
+                placeholder="SL-1024"
+                aria-invalid={codeState === 'duplicate'}
+                autoComplete="off"
+              />
+              {codeState === 'checking' && (
+                <p className="text-xs text-muted-foreground">در حال بررسی یکتا بودن کد…</p>
+              )}
+              {codeState === 'duplicate' && (
+                <p className="text-xs font-medium text-destructive">
+                  این کد قبلاً برای محصول دیگری ثبت شده — کد دیگری وارد کنید
+                </p>
+              )}
+              {codeState === 'available' && (
+                <p className="text-xs font-medium text-emerald-600">این کد آزاد است</p>
+              )}
+              <p className="text-xs text-muted-foreground">
+                کد یکتا را خودتان دستی وارد کنید — همین کد در ربات و پست کانال نمایش داده می‌شود
+              </p>
             </div>
             <div className="space-y-1.5">
               <Label htmlFor="p-price">قیمت نهایی (تومان) *</Label>
@@ -718,17 +798,6 @@ export function ProductFormDialog({
             </CollapsibleTrigger>
             <CollapsibleContent>
               <div className="mt-3 grid grid-cols-1 gap-4 rounded-xl border p-4 sm:grid-cols-2">
-                <div className="space-y-1.5">
-                  <Label htmlFor="p-code">کد محصول</Label>
-                  <Input
-                    id="p-code"
-                    dir="ltr"
-                    className="text-left"
-                    value={form.productCode}
-                    onChange={(e) => set('productCode', e.target.value)}
-                    placeholder="SL-1024"
-                  />
-                </div>
                 <div className="space-y-1.5">
                   <Label htmlFor="p-silver-type">نوع نقره</Label>
                   <Input
