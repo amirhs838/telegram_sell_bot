@@ -36,9 +36,15 @@ export const productCreateSchema = z.object({
   description: z.string().max(5000).nullish(),
   aiGenerated: z.boolean().nullish(),
   tags: z.array(z.string()).max(10, 'حداکثر ۱۰ برچسب مجاز است').nullish(),
-  // ─── Silver Love specs (optional, never priced) ───
-  productCode: z.string().trim().max(100, 'کد محصول حداکثر ۱۰۰ کاراکتر است').nullish(),
+  // ─── Product code: REQUIRED, admin-entered, globally unique ───
+  // (PATCH keeps it optional via productPatchSchema = .partial())
+  productCode: z
+    .string()
+    .trim()
+    .min(1, 'کد محصول الزامی است — کد یکتای محصول را دستی وارد کنید')
+    .max(100, 'کد محصول حداکثر ۱۰۰ کاراکتر است'),
   silverType: z.string().trim().max(200).nullish(),
+  // ─── Silver Love specs (optional, never priced) ───
   fineness: z
     .number()
     .int('عیار باید عدد صحیح باشد')
