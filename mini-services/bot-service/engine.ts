@@ -1423,6 +1423,14 @@ async function confirmOrderCallback(
   input: UpdateInput,
   state: BotState,
 ): Promise<Reply[]> {
+  // Stale-press safety: «تأیید سفارش» from an older message must never create
+  // a second order nor wipe an awaited receipt session.
+  if (state.flow === 'await_receipt' && state.orderId) {
+    return stalePressReply(telegramUserId, state)
+  }
+  if (state.flow && state.flow !== 'await_confirm') {
+    return stalePressReply(telegramUserId, state)
+  }
   if (
     !state.productId ||
     !state.quantity ||
@@ -1452,6 +1460,11 @@ async function confirmOrderCallback(
       return [setSuggestionReply(mainProduct?.name ?? '', suggestions)]
     }
   }
+  // Double-tap on «تأیید سفارش» while the suggestion is still unanswered →
+  // re-show the live offer; never finalize past an unanswered suggestion.
+  if ((state.setPending ?? []).length > 0) {
+    return reShowSetSuggestion(telegramUserId, input, state)
+  }
   return finalizeOrder(telegramUserId, input, state)
 }
 
@@ -1474,6 +1487,69 @@ function setSuggestionReply(
   ])
   keyboard.push([{ text: '🛒 نه، همین کافی است', callback_data: 'set:skip' }])
   return { text: lines.join('\n'), keyboard }
+}
+
+/**
+ * A stale keyboard press (old suggestion buttons or an old «تأیید سفارش» that
+ * outlived its flow) must never mutate the session: no second order, no
+ * clearFlow. When the order was already placed, re-show its payment info —
+ * that restores the «📨 ارسال رسید» button so the customer can still upload
+ * their receipt; otherwise a gentle notice with the session left intact.
+ */
+async function stalePressReply(telegramUserId: string, state: BotState): Promise<Reply[]> {
+  if (state.flow === 'await_receipt' && state.orderId) {
+    const order = await db.order.findUnique({
+      where: { id: state.orderId },
+      select: {
+        id: true,
+        orderNumber: true,
+        total: true,
+        status: true,
+        items: { select: { productNameSnapshot: true, quantity: true, total: true } },
+      },
+    })
+    if (order && order.status !== 'cancelled') {
+      return paymentInfoReply(
+        { id: order.id, orderNumber: order.orderNumber, total: order.total },
+        order.items.map((it) => ({
+          name: it.productNameSnapshot,
+          quantity: it.quantity,
+          total: it.total,
+        })),
+      )
+    }
+  }
+  return [
+    {
+      text: 'این دکمه دیگر معتبر نیست؛ لطفاً از آخرین پیام ادامه دهید.',
+      keyboard: MAIN_MENU,
+    },
+  ]
+}
+
+/**
+ * Idempotent re-show of the live suggestion (double-tap on «تأیید سفارش» or
+ * on an already-added item). Unavailable pending members are filtered; when
+ * nothing remains to decide the pending order is finalized exactly once.
+ */
+async function reShowSetSuggestion(
+  telegramUserId: string,
+  input: UpdateInput,
+  state: BotState,
+): Promise<Reply[]> {
+  const pending = state.setPending ?? []
+  const still = (
+    await Promise.all(pending.map((id) => getProduct(id).catch(() => null)))
+  ).filter((x): x is NonNullable<typeof x> => !!x && x.status === 'active' && x.stock > 0)
+  if (still.length === 0) {
+    return finalizeOrder(telegramUserId, input, {
+      ...state,
+      setOffered: true,
+      setPending: [],
+    })
+  }
+  const mainProduct = state.productId ? await getProduct(state.productId).catch(() => null) : null
+  return [setSuggestionReply(mainProduct?.name ?? '', still)]
 }
 
 /** Order creation + straight into the manual payment flow. */
@@ -1544,6 +1620,17 @@ async function setAddCallback(
   productId: string,
   state: BotState,
 ): Promise<Reply[]> {
+  // Stale-press safety FIRST: an old suggestion keyboard can outlive its flow.
+  //  - order already placed (await_receipt) → re-show its payment info (this
+  //    also restores the lost «📨 ارسال رسید» button); NEVER create a second
+  //    order and NEVER clearFlow (that would strand the customer's receipt)
+  //  - any other non-suggestion state → gentle notice, session untouched
+  if (state.flow === 'await_receipt' && state.orderId) {
+    return stalePressReply(telegramUserId, state)
+  }
+  if (state.flow !== 'await_confirm' || !state.setOffered) {
+    return stalePressReply(telegramUserId, state)
+  }
   if (!state.productId || !state.quantity || !state.name || !state.phone || !state.address) {
     await clearFlow(telegramUserId)
     return [{ text: 'سفارشی برای تأیید یافت نشد. از منوی محصولات شروع کنید:', keyboard: MAIN_MENU }]
@@ -1551,8 +1638,9 @@ async function setAddCallback(
   const pending = state.setPending ?? []
   const extras = state.setExtras ?? []
   if (!pending.includes(productId) || extras.includes(productId)) {
-    // stale keyboard press → keep going with what the order already has
-    return finalizeOrder(telegramUserId, input, { ...state, setOffered: true })
+    // already-added / already-decided item (double-tap or stale button) →
+    // idempotent re-show of what is still pending — never finalize from here
+    return reShowSetSuggestion(telegramUserId, input, state)
   }
 
   const p = await getProduct(productId).catch(() => null)
@@ -1614,6 +1702,15 @@ async function setSkipCallback(
   input: UpdateInput,
   state: BotState,
 ): Promise<Reply[]> {
+  // Stale-press safety (same contract as setAddCallback): a second skip press
+  // or a skip from an old message must never create a second order or wipe
+  // an awaited receipt session.
+  if (state.flow === 'await_receipt' && state.orderId) {
+    return stalePressReply(telegramUserId, state)
+  }
+  if (state.flow !== 'await_confirm' || !state.setOffered) {
+    return stalePressReply(telegramUserId, state)
+  }
   return finalizeOrder(telegramUserId, input, { ...state, setOffered: true, setPending: [] })
 }
 
