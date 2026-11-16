@@ -113,6 +113,36 @@ export async function getProduct(id: string) {
   })
 }
 
+/**
+ * Set links (کدهای متصل): the OTHER members of the same set that are
+ * currently buyable — active AND in stock. Out-of-stock members are hidden
+ * entirely (owner decision: never shown, not even with a badge).
+ */
+export async function getSetSuggestions(productId: string, limit = 8) {
+  const links = await db.productLink.findMany({
+    where: { OR: [{ productId }, { linkedId: productId }] },
+    include: {
+      linked: {
+        select: { id: true, name: true, productCode: true, price: true, stock: true, status: true },
+      },
+      product: {
+        select: { id: true, name: true, productCode: true, price: true, stock: true, status: true },
+      },
+    },
+  })
+  const seen = new Set<string>()
+  const out: { id: string; name: string; productCode: string | null; price: number; stock: number }[] = []
+  for (const l of links) {
+    const p = l.productId === productId ? l.linked : l.product
+    if (!p || p.id === productId || seen.has(p.id)) continue
+    seen.add(p.id)
+    if (p.status !== 'active' || p.stock <= 0) continue
+    out.push(p)
+    if (out.length >= limit) break
+  }
+  return out
+}
+
 /** Search active products for the bot search flow / AI fallback (text lists only). */
 export async function searchActiveProducts(query: string, limit = 8) {
   const q = query.trim()

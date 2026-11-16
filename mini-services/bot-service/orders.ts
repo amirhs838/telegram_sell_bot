@@ -28,6 +28,11 @@ export class ProductUnavailableError extends Error {
 
 const VALID_STATUSES = ['pending', 'confirmed', 'processing', 'shipped', 'completed', 'cancelled']
 
+export type CreateOrderExtra = {
+  productId: string
+  quantity: number
+}
+
 export type CreateOrderInput = {
   customer: {
     telegramUserId: string
@@ -41,10 +46,23 @@ export type CreateOrderInput = {
   name: string
   phone: string
   address: string
+  /**
+   * Set items (کدهای متصل) the customer accepted at the pre-payment step —
+   * created as additional OrderItems of the SAME order, in one transaction.
+   */
+  extras?: CreateOrderExtra[]
+}
+
+export type OrderItemSnapshot = {
+  productId: string
+  name: string
+  quantity: number
+  unitPrice: number
+  total: number
 }
 
 export async function createOrder(input: CreateOrderInput) {
-  const { customer, productId, quantity, name, phone, address } = input
+  const { customer, productId, quantity, name, phone, address, extras = [] } = input
 
   const order = await db.$transaction(async (tx) => {
     // a. re-fetch product — must exist and be active
@@ -62,6 +80,36 @@ export async function createOrder(input: CreateOrderInput) {
       throw new InsufficientStockError(product.stock)
     }
     const remainingStock = product.stock - quantity
+
+    // b2. set extras (کدهای متصل) — same transaction, all-or-nothing:
+    //     active check + atomic stock decrement + snapshot for the item row.
+    const mainTotal = product.price * quantity
+    let extrasTotal = 0
+    const extraSnapshots: OrderItemSnapshot[] = []
+    const zeroStockExtras: string[] = []
+    const seenExtraIds = new Set<string>([productId])
+    for (const extra of extras) {
+      if (!extra || typeof extra.productId !== 'string' || !extra.productId) continue
+      if (seenExtraIds.has(extra.productId)) continue // dedupe + never re-add the main product
+      seenExtraIds.add(extra.productId)
+      const eqty = Math.max(1, Math.floor(Number(extra.quantity) || 1))
+      const ep = await tx.product.findUnique({ where: { id: extra.productId } })
+      if (!ep || ep.status !== 'active') throw new ProductUnavailableError()
+      const upd = await tx.product.updateMany({
+        where: { id: ep.id, stock: { gte: eqty } },
+        data: { stock: { decrement: eqty } },
+      })
+      if (upd.count === 0) throw new InsufficientStockError(ep.stock)
+      if (ep.stock - eqty === 0) zeroStockExtras.push(ep.id)
+      extrasTotal += ep.price * eqty
+      extraSnapshots.push({
+        productId: ep.id,
+        name: ep.name,
+        quantity: eqty,
+        unitPrice: ep.price,
+        total: ep.price * eqty,
+      })
+    }
 
     // c. atomic order number allocation
     const counter = await tx.counter.upsert({
@@ -98,9 +146,9 @@ export async function createOrder(input: CreateOrderInput) {
         orderNumber,
         customerId: dbCustomer.id,
         status: 'pending',
-        subtotal: product.price * quantity,
+        subtotal: mainTotal + extrasTotal,
         discount: 0,
-        total: product.price * quantity,
+        total: mainTotal + extrasTotal,
         customerName: name, // snapshot of the name the customer typed
         paymentStatus: 'awaiting_payment',
         address,
@@ -120,9 +168,26 @@ export async function createOrder(input: CreateOrderInput) {
       },
     })
 
-    // g. stock hit zero → mark out of stock
+    // f2. set extra items (کدهای متصل) — same snapshots, same order
+    for (const snap of extraSnapshots) {
+      await tx.orderItem.create({
+        data: {
+          orderId: created.id,
+          productId: snap.productId,
+          productNameSnapshot: snap.name,
+          unitPriceSnapshot: snap.unitPrice,
+          quantity: snap.quantity,
+          total: snap.total,
+        },
+      })
+    }
+
+    // g. stock hit zero → mark out of stock (main + set extras)
     if (remainingStock === 0) {
-      await tx.product.update({ where: { id: product.id }, data: { status: 'out_of_stock' } })
+      await tx.product.update({ where: { id: productId }, data: { status: 'out_of_stock' } })
+    }
+    for (const id of zeroStockExtras) {
+      await tx.product.update({ where: { id }, data: { status: 'out_of_stock' } })
     }
 
     // h. activity log — NO phone/address (privacy)
@@ -135,17 +200,37 @@ export async function createOrder(input: CreateOrderInput) {
           orderId: created.id,
           productId: product.id,
           quantity,
+          extras: extraSnapshots.map((s) => ({ productId: s.productId, quantity: s.quantity })),
           total: created.total,
           telegramUserId: customer.telegramUserId,
         }),
       },
     })
 
-    return { order: created, product, remainingStock }
+    const items: OrderItemSnapshot[] = [
+      {
+        productId: product.id,
+        name: product.name,
+        quantity,
+        unitPrice: product.price,
+        total: product.price * quantity,
+      },
+      ...extraSnapshots,
+    ]
+
+    return { order: created, product, remainingStock, items }
   })
 
   // Seller notification (best-effort, after commit) — every connected platform
   try {
+    const items = order.items
+    const itemLines =
+      items.length > 1
+        ? [
+            '🛍 اقلام سفارش:',
+            ...items.map((it) => `• ${it.name} × ${it.quantity} — ${formatMoney(it.total)}`),
+          ]
+        : [`🛍 ${order.product.name}`, `🔢 تعداد: ${quantity}`]
     await notifyAdmin(
       [
         '🔔 سفارش جدید',
@@ -156,8 +241,7 @@ export async function createOrder(input: CreateOrderInput) {
         `📱 ${phone}`,
         `📍 ${address}`,
         '',
-        `🛍 ${order.product.name}`,
-        `🔢 تعداد: ${quantity}`,
+        ...itemLines,
         `💰 مبلغ: ${formatMoney(order.order.total)}`,
         '',
         '🟡 در انتظار بررسی',
@@ -173,7 +257,8 @@ export async function createOrder(input: CreateOrderInput) {
     // never fail the order because of notification
   }
 
-  return order.order
+  // full result: order + item snapshots (engine shows items in the payment info)
+  return { order: order.order, product: order.product, remainingStock: order.remainingStock, items: order.items }
 }
 
 /**

@@ -92,6 +92,25 @@ model Product {
   orderItems       OrderItem[]
   embedding        ProductEmbedding?
   studioJobs  ImageStudioJob[]
+  // ─── Set links (کدهای متصل) — symmetric pairs, stored canonically ───
+  setLinksOut ProductLink[] @relation("setLinksOut")
+  setLinksIn  ProductLink[] @relation("setLinksIn")
+}
+
+// ─── Product set links (اتصال کدها به هم) ────────────────────────────────────
+// Buying any member of a pair suggests the other one at checkout («این‌ها هم
+// جزو همان ست هستند»). Pairs are stored in canonical id order (productId <
+// linkedId) so one physical row represents the two-way link.
+model ProductLink {
+  id        String   @id @default(cuid())
+  productId String
+  product   Product  @relation("setLinksOut", fields: [productId], references: [id], onDelete: Cascade)
+  linkedId  String
+  linked    Product  @relation("setLinksIn", fields: [linkedId], references: [id], onDelete: Cascade)
+  createdAt DateTime @default(now())
+
+  @@unique([productId, linkedId])
+  @@index([linkedId])
 }
 
 // ─── Product gallery (multiple images, one primary) ─────────────────────────

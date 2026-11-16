@@ -6,6 +6,7 @@ import { db } from '@/lib/db'
 import { logEvent } from '@/lib/logger'
 import { syncProductPost, unpublishProduct } from '@/lib/telegram'
 import { uniqueSlug } from '@/lib/slug'
+import { resolveLinkedIds, setProductLinks } from '@/lib/product-links'
 import {
   PRODUCT_INCLUDE,
   isProductCodeViolation,
@@ -42,6 +43,12 @@ export const PATCH = route<{ params: Promise<{ id: string }> }>(
       const category = await db.category.findUnique({ where: { id: categoryId } })
       if (!category) throw new ApiError(400, 'دسته‌بندی انتخاب‌شده یافت نشد')
     }
+
+    // ─── Set links — resolve codes EARLY (a 422 here must abort before any mutation) ───
+    const linkedIds =
+      body.linkedCodes !== undefined
+        ? await resolveLinkedIds(db, body.linkedCodes ?? [], id)
+        : null
 
     const data: Prisma.ProductUncheckedUpdateInput = {}
     const changedFields: string[] = []
@@ -168,6 +175,17 @@ export const PATCH = route<{ params: Promise<{ id: string }> }>(
     if (body.images !== undefined) {
       await replaceProductGallery(id, body.images ?? [])
       changedFields.push('images')
+      const refetched = await db.product.findUnique({
+        where: { id },
+        include: PRODUCT_INCLUDE,
+      })
+      if (refetched) updated = refetched
+    }
+
+    // ─── Set links (کدهای متصل) — full replacement of this product's links ───
+    if (linkedIds !== null) {
+      await setProductLinks(db, id, linkedIds)
+      changedFields.push('linkedCodes')
       const refetched = await db.product.findUnique({
         where: { id },
         include: PRODUCT_INCLUDE,

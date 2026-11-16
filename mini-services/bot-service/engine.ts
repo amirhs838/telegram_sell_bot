@@ -46,6 +46,7 @@ import {
   listChildCategories,
   listRootCategories,
   searchActiveProducts,
+  getSetSuggestions,
 } from './store'
 import {
   answerCallback,
@@ -77,6 +78,13 @@ export type BotState = {
   address?: string
   /** set while flow === 'await_receipt' — the order awaiting its payment receipt */
   orderId?: string
+  // ─── Set suggestion (کدهای متصل) at the pre-payment step ───
+  /** the suggestion was already shown once — never re-offer on the same order */
+  setOffered?: boolean
+  /** product ids still undecided from the suggestion message */
+  setPending?: string[]
+  /** product ids the customer accepted (each joins the order as 1 unit) */
+  setExtras?: string[]
 }
 
 export type UpdateInput = {
@@ -728,17 +736,28 @@ async function orderSummaryReply(state: BotState): Promise<Reply[]> {
 const RECEIPT_ACCEPTED_STATUSES = ['awaiting_payment', 'rejected', 'payment_review']
 
 /** Payment info message shown right after the order is created. */
-async function paymentInfoReply(order: {
-  id: string
-  orderNumber: number
-  total: number
-}): Promise<Reply[]> {
+async function paymentInfoReply(
+  order: {
+    id: string
+    orderNumber: number
+    total: number
+  },
+  items?: { name: string; quantity: number; total: number }[],
+): Promise<Reply[]> {
   const dests = await getActivePaymentDestinations()
   const lines: string[] = [
     `✅ سفارش شما با شماره #${formatNumber(order.orderNumber)} ثبت شد!`,
     '',
-    `💳 مبلغ قابل پرداخت: <b>${formatMoney(order.total)}</b>`,
   ]
+  // multi-item (set) orders list every item so the customer sees what $ is for
+  if (items && items.length > 1) {
+    lines.push('🛍 اقلام سفارش:')
+    for (const it of items) {
+      lines.push(`• ${escapeHtml(it.name)} × ${formatNumber(it.quantity)} — ${formatMoney(it.total)}`)
+    }
+    lines.push('')
+  }
+  lines.push(`💳 مبلغ قابل پرداخت: <b>${formatMoney(order.total)}</b>`)
   if (dests.length > 0) {
     lines.push('', '🏦 اطلاعات پرداخت (کارت به کارت):', '')
     dests.forEach((d, i) => {
@@ -1357,6 +1376,12 @@ async function handleCallback(
   if (cb === 'order:confirm') {
     return confirmOrderCallback(telegramUserId, input, state)
   }
+  if (cb.startsWith('set:add:')) {
+    return setAddCallback(telegramUserId, input, cb.slice('set:add:'.length), state)
+  }
+  if (cb === 'set:skip') {
+    return setSkipCallback(telegramUserId, input, state)
+  }
   if (cb === 'order:cancel') {
     await clearFlow(telegramUserId)
     return [{ text: 'سفارش لغو شد.', keyboard: MAIN_MENU }]
@@ -1409,6 +1434,65 @@ async function confirmOrderCallback(
     return [{ text: 'سفارشی برای تأیید یافت نشد. از منوی محصولات شروع کنید:', keyboard: MAIN_MENU }]
   }
 
+  // ─── Set suggestion (کدهای متصل) — EXACTLY one step before payment ───
+  // The offer is made once per order; declined/undecided items never block
+  // the checkout, and out-of-stock members were already filtered out.
+  if (!state.setOffered) {
+    const [mainProduct, suggestions] = await Promise.all([
+      getProduct(state.productId),
+      getSetSuggestions(state.productId),
+    ])
+    if (suggestions.length > 0) {
+      await saveSession(telegramUserId, {
+        ...state,
+        setOffered: true,
+        setPending: suggestions.map((s) => s.id),
+        setExtras: state.setExtras ?? [],
+      })
+      return [setSuggestionReply(mainProduct?.name ?? '', suggestions)]
+    }
+  }
+  return finalizeOrder(telegramUserId, input, state)
+}
+
+/** The suggestion message + per-item add buttons shown before payment. */
+function setSuggestionReply(
+  mainName: string,
+  suggestions: { id: string; name: string; productCode: string | null; price: number }[],
+): Reply {
+  const lines: string[] = ['✨ این محصول جزو یک ست است', '']
+  if (mainName) lines.push(`ستِ «${escapeHtml(mainName)}»:`, '')
+  lines.push(
+    ...suggestions.map(
+      (s, i) =>
+        `${formatNumber(i + 1)}. ${escapeHtml(s.name)} — کد ${escapeHtml(s.productCode ?? '—')} — ${formatMoney(s.price)}`,
+    ),
+  )
+  lines.push('', 'می‌خواهید هر کدام را هم (۱ عدد) به همین سفارش اضافه کنید؟')
+  const keyboard: InlineButton[][] = suggestions.map((s) => [
+    { text: `➕ ${s.name.slice(0, 24)}`, callback_data: `set:add:${s.id}` },
+  ])
+  keyboard.push([{ text: '🛒 نه، همین کافی است', callback_data: 'set:skip' }])
+  return { text: lines.join('\n'), keyboard }
+}
+
+/** Order creation + straight into the manual payment flow. */
+async function finalizeOrder(
+  telegramUserId: string,
+  input: UpdateInput,
+  state: BotState,
+): Promise<Reply[]> {
+  if (
+    !state.productId ||
+    !state.quantity ||
+    !state.name ||
+    !state.phone ||
+    !state.address
+  ) {
+    await clearFlow(telegramUserId)
+    return [{ text: 'سفارشی برای تأیید یافت نشد. از منوی محصولات شروع کنید:', keyboard: MAIN_MENU }]
+  }
+
   try {
     const order = await createOrder({
       customer: {
@@ -1422,10 +1506,15 @@ async function confirmOrderCallback(
       name: state.name,
       phone: state.phone,
       address: state.address,
+      // set items the customer accepted — each joins as 1 unit of the same order
+      extras: (state.setExtras ?? []).map((id) => ({ productId: id, quantity: 1 })),
     })
     // straight into the manual payment flow
-    await saveSession(telegramUserId, { flow: 'await_receipt', orderId: order.id })
-    return paymentInfoReply({ id: order.id, orderNumber: order.orderNumber, total: order.total })
+    await saveSession(telegramUserId, { flow: 'await_receipt', orderId: order.order.id })
+    return paymentInfoReply(
+      { id: order.order.id, orderNumber: order.order.orderNumber, total: order.order.total },
+      order.items.map((it) => ({ name: it.name, quantity: it.quantity, total: it.total })),
+    )
   } catch (e) {
     await clearFlow(telegramUserId)
     if (e instanceof InsufficientStockError) {
@@ -1446,6 +1535,86 @@ async function confirmOrderCallback(
     }
     throw e // caught by handleUpdate → generic error reply
   }
+}
+
+/** Customer pressed «➕ add» on a suggested set member. */
+async function setAddCallback(
+  telegramUserId: string,
+  input: UpdateInput,
+  productId: string,
+  state: BotState,
+): Promise<Reply[]> {
+  if (!state.productId || !state.quantity || !state.name || !state.phone || !state.address) {
+    await clearFlow(telegramUserId)
+    return [{ text: 'سفارشی برای تأیید یافت نشد. از منوی محصولات شروع کنید:', keyboard: MAIN_MENU }]
+  }
+  const pending = state.setPending ?? []
+  const extras = state.setExtras ?? []
+  if (!pending.includes(productId) || extras.includes(productId)) {
+    // stale keyboard press → keep going with what the order already has
+    return finalizeOrder(telegramUserId, input, { ...state, setOffered: true })
+  }
+
+  const p = await getProduct(productId).catch(() => null)
+  if (!p || p.status !== 'active' || p.stock <= 0) {
+    // disappeared between the offer and the press — drop it, show the rest
+    const remaining = pending.filter((id) => id !== productId)
+    if (remaining.length === 0) {
+      return finalizeOrder(telegramUserId, input, { ...state, setPending: [], setOffered: true })
+    }
+    await saveSession(telegramUserId, { ...state, setOffered: true, setPending: remaining })
+    const still = (await Promise.all(remaining.map((id) => getProduct(id)))).filter(
+      (x): x is NonNullable<typeof x> => !!x && x.status === 'active' && x.stock > 0,
+    )
+    if (still.length === 0) {
+      return finalizeOrder(telegramUserId, input, { ...state, setPending: [], setOffered: true })
+    }
+    return [
+      { text: '⚠️ این کالا همین حالا ناموجود شد و از پیشنهاد حذف گردید.' },
+      setSuggestionReply('', still),
+    ]
+  }
+
+  const nextExtras = [...extras, productId]
+  const remaining = pending.filter((id) => id !== productId && !nextExtras.includes(id))
+  if (remaining.length === 0) {
+    return finalizeOrder(telegramUserId, input, {
+      ...state,
+      setOffered: true,
+      setPending: [],
+      setExtras: nextExtras,
+    })
+  }
+  await saveSession(telegramUserId, {
+    ...state,
+    setOffered: true,
+    setPending: remaining,
+    setExtras: nextExtras,
+  })
+  const still = (await Promise.all(remaining.map((id) => getProduct(id)))).filter(
+    (x): x is NonNullable<typeof x> => !!x && x.status === 'active' && x.stock > 0,
+  )
+  if (still.length === 0) {
+    return finalizeOrder(telegramUserId, input, {
+      ...state,
+      setOffered: true,
+      setPending: [],
+      setExtras: nextExtras,
+    })
+  }
+  return [
+    { text: `✅ «${escapeHtml(p.name)}» (۱ عدد) به سفارش اضافه شد.` },
+    setSuggestionReply('', still),
+  ]
+}
+
+/** Customer pressed «نه، همین کافی است» — straight to order creation + payment. */
+async function setSkipCallback(
+  telegramUserId: string,
+  input: UpdateInput,
+  state: BotState,
+): Promise<Reply[]> {
+  return finalizeOrder(telegramUserId, input, { ...state, setOffered: true, setPending: [] })
 }
 
 async function sellerStatusCallback(

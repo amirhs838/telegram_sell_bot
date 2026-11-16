@@ -5,6 +5,7 @@ import { upsertProductEmbedding } from '@/lib/ai/embedding'
 import { db } from '@/lib/db'
 import { logEvent } from '@/lib/logger'
 import { uniqueSlug } from '@/lib/slug'
+import { normalizeLinkedCodes, resolveLinkedIds, setProductLinks } from '@/lib/product-links'
 import {
   PRODUCT_INCLUDE,
   PRODUCT_STATUSES,
@@ -77,6 +78,14 @@ export const POST = route(async (req: NextRequest) => {
 
   const slug = await uniqueSlug(body.name, 'product')
 
+  // ─── Set links — validate codes EARLY so a bad code never creates a half product ───
+  // A code equal to the product's own code is silently ignored (self-link).
+  const selfCode = body.productCode.trim().toLowerCase()
+  const linkedInput = normalizeLinkedCodes(body.linkedCodes ?? []).filter(
+    (c) => c.toLowerCase() !== selfCode,
+  )
+  const linkedIds = linkedInput.length ? await resolveLinkedIds(db, linkedInput, null) : []
+
   // Gallery: when provided, the primary image syncs Product.imageUrl.
   const gallery = normalizeGalleryInput(body.images)
 
@@ -129,11 +138,22 @@ export const POST = route(async (req: NextRequest) => {
     throw e
   }
 
+  // ─── Set links (کدهای متصل) — canonical symmetric pairs ───
+  let finalProduct = product
+  if (linkedIds.length) {
+    await setProductLinks(db, product.id, linkedIds)
+    const refetched = await db.product.findUnique({
+      where: { id: product.id },
+      include: PRODUCT_INCLUDE,
+    })
+    if (refetched) finalProduct = refetched
+  }
+
   await logEvent('product.created', `محصول «${product.name}» ایجاد شد`, {
     productId: product.id,
   })
 
   void upsertProductEmbedding(product.id).catch(() => undefined)
 
-  return ok({ product: serializeProduct(product) }, 201)
+  return ok({ product: serializeProduct(finalProduct) }, 201)
 })

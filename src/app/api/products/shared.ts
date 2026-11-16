@@ -8,6 +8,9 @@ export const PRODUCT_INCLUDE = {
   category: true,
   telegramProducts: true,
   images: true,
+  // ─── Set links (کدهای متصل) — neighbors in both directions ───
+  setLinksOut: { select: { linked: { select: { id: true, productCode: true, name: true } } } },
+  setLinksIn: { select: { product: { select: { id: true, productCode: true, name: true } } } },
 } as const
 
 export const productImageInputSchema = z.object({
@@ -60,15 +63,16 @@ export const productCreateSchema = z.object({
   authenticityNote: z.string().trim().max(2000).nullish(),
   // ─── Gallery (replaces the whole set when provided) ───
   images: z.array(productImageInputSchema).max(20, 'حداکثر ۲۰ تصویر مجاز است').nullish(),
+  // ─── Set links (کدهای متصل) — codes of OTHER products in the same set ───
+  // undefined on PATCH = leave links untouched; [] = remove all links.
+  linkedCodes: z.array(z.string().trim().min(1).max(100)).max(20).nullish(),
 })
 
 export const productPatchSchema = productCreateSchema.partial().extend({
   status: z.enum(PRODUCT_STATUSES).optional(),
 })
 
-export type ProductWithRelations = Prisma.ProductGetPayload<{
-  include: { category: true; telegramProducts: true; images: true }
-}>
+export type ProductWithRelations = Prisma.ProductGetPayload<{ include: typeof PRODUCT_INCLUDE }>
 
 export type ProductGalleryInput = z.infer<typeof productImageInputSchema>
 
@@ -180,6 +184,19 @@ export function parseTags(raw: string | null): string[] | null {
   }
 }
 
+/** Neighbor products of the set links, as {id, code, name} — for the panel form. */
+export function serializeSetLinks(p: ProductWithRelations) {
+  const seen = new Set<string>()
+  const neighbors: { id: string; productCode: string; name: string }[] = []
+  for (const l of [...p.setLinksOut, ...p.setLinksIn]) {
+    const other = 'linked' in l ? l.linked : l.product
+    if (!other.productCode || seen.has(other.id)) continue
+    seen.add(other.id)
+    neighbors.push({ id: other.id, productCode: other.productCode, name: other.name })
+  }
+  return neighbors
+}
+
 /** Map a Prisma product (with category + telegramProducts + images) to the API contract shape. */
 export function serializeProduct(p: ProductWithRelations) {
   const post = p.telegramProducts[0]
@@ -222,6 +239,8 @@ export function serializeProduct(p: ProductWithRelations) {
         isPrimary: img.isPrimary,
         sortOrder: img.sortOrder,
       })),
+    // ─── Set links (کدهای متصل) ───
+    setLinks: serializeSetLinks(p),
     createdAt: p.createdAt,
     updatedAt: p.updatedAt,
     telegramPost: post

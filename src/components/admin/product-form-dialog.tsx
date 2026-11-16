@@ -166,6 +166,13 @@ export function ProductFormDialog({
   // The DB unique index stays the hard guarantee — this is only early UX.
   const [codeState, setCodeState] = useState<'idle' | 'checking' | 'available' | 'duplicate'>('idle')
   const codeSeqRef = useRef(0)
+
+  // ─── Set links (کدهای متصل) — admin-typed codes of other products ───
+  const [linkedInput, setLinkedInput] = useState('')
+  const [linkedState, setLinkedState] = useState<'idle' | 'checking' | 'invalid' | 'ok'>('idle')
+  const [linkedUnknown, setLinkedUnknown] = useState<string[]>([])
+  const [linkedResolved, setLinkedResolved] = useState<Record<string, { id: string; name: string; productCode: string }>>({})
+  const linkedSeqRef = useRef(0)
   const [roughInfo, setRoughInfo] = useState('')
   const [generating, setGenerating] = useState(false)
   const [suggestion, setSuggestion] = useState<AiSuggestion | null>(null)
@@ -220,6 +227,11 @@ export function ProductFormDialog({
       setPreviewUrl(null)
       setCodeState('idle')
       codeSeqRef.current += 1 // invalidate any in-flight duplicate check
+      setLinkedInput(product?.setLinks?.length ? product.setLinks.map((l) => l.productCode).join(', ') : '')
+      setLinkedState('idle')
+      setLinkedUnknown([])
+      setLinkedResolved({})
+      linkedSeqRef.current += 1
     }
   }, [open, product])
 
@@ -254,6 +266,52 @@ export function ProductFormDialog({
     }, 450)
     return () => clearTimeout(t)
   }, [form.productCode, open, product])
+
+  // Debounced validation of the set-link codes: every code must belong to an
+  // existing product (the product's own code is ignored server-side too).
+  useEffect(() => {
+    if (!open) return
+    const codes = [...new Set(
+      linkedInput
+        .split(/[,\u060C\n]/)
+        .map((c) => c.trim())
+        .filter(Boolean),
+    )]
+    const selfCode = (product?.productCode ?? '').trim().toLowerCase()
+    const effective = codes.filter((c) => c.toLowerCase() !== selfCode)
+    if (!effective.length) {
+      setLinkedState('idle')
+      setLinkedUnknown([])
+      setLinkedResolved({})
+      return
+    }
+    setLinkedState('checking')
+    const seq = ++linkedSeqRef.current
+    const t = setTimeout(() => {
+      api<{ resolved: Record<string, { id: string; name: string; productCode: string } | null> }>(
+        `/api/products/resolve-codes?codes=${encodeURIComponent(effective.join(','))}${
+          product ? `&excludeId=${encodeURIComponent(product.id)}` : ''
+        }`,
+      )
+        .then((r) => {
+          if (seq !== linkedSeqRef.current) return
+          const unknown = effective.filter((c) => !r.resolved[c])
+          const known: Record<string, { id: string; name: string; productCode: string }> = {}
+          for (const c of effective) {
+            const hit = r.resolved[c]
+            if (hit) known[c] = hit
+          }
+          setLinkedUnknown(unknown)
+          setLinkedResolved(known)
+          setLinkedState(unknown.length ? 'invalid' : 'ok')
+        })
+        .catch(() => {
+          // Endpoint hiccup → the server-side 422 stays the safety net on save.
+          if (seq === linkedSeqRef.current) setLinkedState('idle')
+        })
+    }, 450)
+    return () => clearTimeout(t)
+  }, [linkedInput, open, product])
 
   function set<K extends keyof FormState>(key: K, value: FormState[K]) {
     setForm((f) => ({ ...f, [key]: value }))
@@ -408,6 +466,14 @@ export function ProductFormDialog({
       toast.error('کد محصول تکراری است — کد دیگری وارد کنید')
       return
     }
+    if (linkedState === 'invalid') {
+      toast.error(`کدهای ست نامعتبرند — این کدها برای هیچ محصولی ثبت نشده‌اند: ${linkedUnknown.join('، ')}`)
+      return
+    }
+    if (linkedState === 'checking') {
+      toast.error('در حال اعتبارسنجی کدهای ست — چند لحظه صبر کنید و دوباره ذخیره کنید')
+      return
+    }
     const price = Number(form.price)
     if (!Number.isFinite(price) || price < 0) {
       toast.error('قیمت معتبر وارد کنید')
@@ -448,6 +514,10 @@ export function ProductFormDialog({
       })),
       // silver specs (null when empty)
       productCode,
+      // set links (کدهای متصل) — always sent so clearing the field unlinks
+      linkedCodes: [...new Set(
+        linkedInput.split(/[,\u060C\n]/).map((c) => c.trim()).filter(Boolean),
+      )],
       silverType: form.silverType.trim() || null,
       fineness,
       weightGrams,
@@ -571,6 +641,43 @@ export function ProductFormDialog({
               )}
               <p className="text-xs text-muted-foreground">
                 کد یکتا را خودتان دستی وارد کنید — همین کد در ربات و پست کانال نمایش داده می‌شود
+              </p>
+            </div>
+            {/* Set links (کدهای متصل) — codes of OTHER products in the same set.
+                The bot offers these to the customer one step before payment. */}
+            <div className="space-y-1.5 md:col-span-2">
+              <Label htmlFor="p-set-links">کدهای متصل (ست)</Label>
+              <Input
+                id="p-set-links"
+                dir="ltr"
+                className={cn(
+                  'text-left',
+                  linkedState === 'invalid' && 'border-destructive focus-visible:ring-destructive',
+                )}
+                value={linkedInput}
+                onChange={(e) => setLinkedInput(e.target.value)}
+                placeholder="SL-1024, SL-1031"
+                aria-invalid={linkedState === 'invalid'}
+                autoComplete="off"
+              />
+              {linkedState === 'checking' && (
+                <p className="text-xs text-muted-foreground">در حال اعتبارسنجی کدها…</p>
+              )}
+              {linkedState === 'invalid' && (
+                <p className="text-xs font-medium text-destructive">
+                  این کدها برای هیچ محصولی ثبت نشده‌اند: {linkedUnknown.join('، ')}
+                </p>
+              )}
+              {linkedState === 'ok' && (
+                <p className="text-xs font-medium text-emerald-600">
+                  ست متصل شد ({Object.keys(linkedResolved).length} محصول):{' '}
+                  {Object.values(linkedResolved)
+                    .map((r) => `${r.name} (${r.productCode})`)
+                    .join('، ')}
+                </p>
+              )}
+              <p className="text-xs text-muted-foreground">
+                کد محصولات دیگر را با کاما جدا وارد کنید — موقع خرید، ربات همین‌ها را یک مرحله قبل از پرداخت به مشتری پیشنهاد می‌دهد؛ اتصال دوطرفه است
               </p>
             </div>
             <div className="space-y-1.5">

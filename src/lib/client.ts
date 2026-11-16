@@ -71,6 +71,8 @@ export type Product = {
   telegramPost: TelegramPost | null
   // Silver-specific spec fields (all optional, null when unset)
   productCode?: string | null
+  // Set links (کدهای متصل) — other products this one suggests at checkout
+  setLinks?: { id: string; productCode: string; name: string }[]
   silverType?: string | null
   fineness?: number | null
   weightGrams?: number | null
