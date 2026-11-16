@@ -923,9 +923,15 @@ async function runOpenRouterImage(
         break
       }
       if (e instanceof CreditsError) {
-        parkImageKey(key, 15 * 60 * 1000, msg, 'credits')
+        // 402 is budget-vs-model-cost, NOT a dead key — a cheaper fallback may
+        // still fit the remaining balance (observed: gemini-3.1-flash-image
+        // 402s with weight_exceeds_budget while seedream / gpt-image succeed
+        // on the same balance). Never stop the chain on it.
         sawCredits = true
-        break
+        console.warn(
+          `[ai:provider] openrouter image 402 via ${model} — balance below this model's max cost → next fallback`,
+        )
+        continue
       }
       if (e instanceof MarkerError && msg.startsWith('MODEL_404:')) {
         sawModel404 = true
@@ -945,8 +951,16 @@ async function runOpenRouterImage(
   }
 
   if (sawCredits) {
+    // The WHOLE chain failed on budget → park briefly so the panel warns the
+    // seller instead of hammering OpenRouter on every click.
+    parkImageKey(
+      key,
+      15 * 60 * 1000,
+      lastDetail || 'insufficient credits for all image models',
+      'credits',
+    )
     throw new AiError(
-      'اعتبار حساب OpenRouter تمام شده است — از openrouter.ai/credits حساب را شارژ کنید (تصویرسازی بر اساس مصرف از اعتبار کم می‌شود، دیگر سهمیهٔ صفر روزانه وجود ندارد)',
+      'اعتبار باقی‌ماندهٔ حساب OpenRouter برای هیچ‌کدام از مدل‌های تصویر کافی نیست — از openrouter.ai/credits حساب را شارژ کنید، یا مدل تصویر ارزان‌تری در تنظیمات پنل انتخاب کنید (هزینهٔ تصویرسازی بر اساس مصرف کم می‌شود)',
     )
   }
   if (sawAuth) {
